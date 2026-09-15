@@ -12,7 +12,10 @@ from sim.model.scene_builder import build_scene_xml, yaw_to_quat
 
 @pytest.fixture
 def cfg():
-    return load_config()
+    config = load_config()
+    # These tests cover the preserved pre-ACT Cartesian diagnostic branch.
+    config.set_path("end_effector.type", "cartesian3dof")
+    return config
 
 
 def build(cfg, count=3, geometry="hex_nut", seed=0):

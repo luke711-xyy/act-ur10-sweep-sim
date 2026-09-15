@@ -18,6 +18,11 @@ from sim.environments.sweep_env import SweepEnv        # noqa: E402
 @pytest.fixture(scope="module")
 def cfg():
     cfg = load_config()
+    cfg.set_path("end_effector.type", "cartesian3dof")
+    cfg.set_path("workspace.z_search_start", 0.008)
+    # The legacy Cartesian regression tests exercise their historical force
+    # envelope; ACT/UR10 safety remains 5 N in the default runtime config.
+    cfg.set_path("controller.safe_max_force", 20.0)
     cfg.set_path("components.count", 2)
     cfg.set_path("sim.max_episode_time", 90.0)
     cfg.set_path("planner.max_strokes", 4)

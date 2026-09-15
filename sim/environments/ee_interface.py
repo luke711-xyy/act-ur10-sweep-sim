@@ -296,8 +296,10 @@ class UR10eEndEffector(EndEffectorInterface):  # pragma: no cover - optional int
 
 def build_end_effector(model, data, cfg) -> EndEffectorInterface:
     kind = str(cfg.end_effector.type)
+    if kind in ("ur10_cb3", "ur10e"):
+        from .ur10_interface import UR10CB3EndEffector
+
+        return UR10CB3EndEffector(model, data, cfg)
     if kind == "cartesian3dof":
         return CartesianEndEffector(model, data, cfg)
-    if kind == "ur10e":
-        return UR10eEndEffector(model, data, cfg)
     raise ValueError(f"unknown end_effector.type {kind!r}")

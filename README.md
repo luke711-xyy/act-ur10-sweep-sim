@@ -1,13 +1,14 @@
-# sweepsim — tabletop component collection by gripper-tip pushing
+# act-ur10-sweep-sim — MuJoCo UR10 ACT tabletop sweep
 
 A minimal but runnable **MuJoCo** prototype of a contact-rich sweeping task: a robot uses
-its **closed gripper tips directly as a pusher** to collect small industrial components
+its **fixed brush directly as a pusher** to collect small industrial components
 (nuts, screws, bolts, washers) from a flat table into a fixed shallow tray at the table
 edge.
 
-There is **no sweeping plate and no task-specific tool**, and the gripper never grasps
-anything. All manipulation happens through the front/bottom geometry of the two closed
-fingertips.
+There is no WAM and no grasping DOF. The scene uses a portable six-joint UR10/CB3-like
+arm, a fixed brush, an overhead camera, and a tool-mounted wrist camera. The project
+keeps the original Cartesian pusher/planner implementation as a legacy diagnostic path;
+the default ACT path is the UR10 brush scene.
 
 The first version focuses on five things:
 
@@ -15,7 +16,7 @@ The first version focuses on five things:
 2. hybrid force/position control,
 3. conventional (non-learned) visual and trajectory planning,
 4. reproducible experiments over component count and distribution,
-5. export of demonstrations in a format that can later train ACT.
+5. automatic demonstrations, LeRobot 0.6.1 ACT training, and asynchronous inference.
 
 No Isaac Sim, no MoveIt. Python MuJoCo + NumPy + Matplotlib (SciPy for image labelling).
 
@@ -60,6 +61,13 @@ python -m sim.visualize_results --run runs/experiment-*
 
 # 5. export demonstrations for later ACT training (no training happens here)
 python -m sim.export_dataset --planner visual_greedy --episodes 200
+
+# 6. default UR10 + ACT vertical slice
+uv pip install -e '.[act,web]'
+python -m sim.act.collect_dataset --split train --episodes 300
+python -m sim.act.train --config configs/default.yaml
+python -m sim.act.evaluate --config configs/default.yaml --model runs/act_model
+python -m sim.web.run --config configs/default.yaml
 
 # tests
 pytest -q                     # or: python tests/run_tests.py
@@ -158,7 +166,7 @@ z_command = z_nominal + Δz
 where `w` is the correction **along the inward contact normal** (positive = press deeper)
 and `Δz = −w` because the table normal is `+Z`. Both forces use the same
 *pressing-positive* convention, so `controller.desired_force` is a small **positive**
-value (default 3 N), never zero. Writing the ODE in the inward-normal frame is what keeps
+value (default 1 N), never zero. Writing the ODE in the inward-normal frame is what keeps
 the signs unambiguous; see the module docstring in `sim/controllers/admittance.py`.
 
 `z_nominal` is latched at `CONTACT_DETECTED` (the commanded height at which contact was

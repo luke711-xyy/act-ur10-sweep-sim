@@ -32,6 +32,7 @@ class SweepEnv:
         self.xml: str = ""
         self.table_top_z: float = float(cfg.table.top_z)
         self._renderer = None
+        self._camera_renderers = {}
         self._seg_renderer = None
         self._depth_renderer = None
         self.decimation = max(1, int(round((1.0 / float(cfg.sim.control_hz)) / float(cfg.sim.physics_dt))))
@@ -81,6 +82,11 @@ class SweepEnv:
 
         mujoco.mj_forward(self.model, self.data)
         self._settle(float(cfg.episode.settle_time))
+        # Settling the free components also lets the arm's position actuators
+        # move under gravity.  Re-pin the commanded airborne pose afterwards
+        # so every episode starts from the same task-space state.
+        self.ee.reset([0.42, 0.0, float(cfg.end_effector.z_home)])
+        mujoco.mj_forward(self.model, self.data)
         self.initial_positions = self.component_positions().copy()
         return self.observation()
 
@@ -101,6 +107,12 @@ class SweepEnv:
                 except Exception:  # pragma: no cover - renderer teardown is best effort
                     pass
             setattr(self, attr, None)
+        for renderer in self._camera_renderers.values():
+            try:
+                renderer.close()
+            except Exception:
+                pass
+        self._camera_renderers.clear()
 
     def close(self) -> None:
         self._close_renderers()
@@ -178,14 +190,30 @@ class SweepEnv:
         }
 
     # -------------------------------------------------------------- rendering
-    def render_rgb(self) -> np.ndarray:
+    def render_rgb(self, camera: str = "scene_cam", size=None) -> np.ndarray:
         import mujoco
 
-        cam = self.cfg.perception.camera
-        if self._renderer is None:
-            self._renderer = mujoco.Renderer(self.model, height=int(cam.height), width=int(cam.width))
-        self._renderer.update_scene(self.data, camera="scene_cam")
-        return self._renderer.render()
+        if size is None:
+            size = (int(self.cfg.perception.camera.width), int(self.cfg.perception.camera.height))
+        width, height = int(size[0]), int(size[1])
+        if camera == "scene_cam" and size == (int(self.cfg.perception.camera.width),
+                                               int(self.cfg.perception.camera.height)):
+            renderer = self._renderer
+            if renderer is None:
+                renderer = mujoco.Renderer(self.model, height=height, width=width)
+                self._renderer = renderer
+        else:
+            key = (camera, width, height)
+            renderer = self._camera_renderers.get(key)
+            if renderer is None:
+                renderer = mujoco.Renderer(self.model, height=height, width=width)
+                self._camera_renderers[key] = renderer
+        renderer.update_scene(self.data, camera=camera)
+        return renderer.render()
+
+    def render_wrist_rgb(self, size=None) -> np.ndarray:
+        """Render the body-attached wrist camera used by ACT."""
+        return self.render_rgb("wrist_cam", size=size)
 
     def render_depth(self) -> np.ndarray:
         import mujoco

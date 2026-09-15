@@ -28,6 +28,7 @@ from xml.etree import ElementTree as ET
 import numpy as np
 
 from .geometries import ComponentSpec, make_component_spec
+from .ur10_mjcf import add_ur10_actuators, add_ur10_arm, add_ur10_sensors
 
 
 # ---------------------------------------------------------------------------
@@ -97,8 +98,10 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
     table_half = np.asarray(cfg.table.half_size, dtype=float)
     top_z = float(cfg.table.top_z)
     ee_cfg = cfg.end_effector
-    tip_half = np.asarray(ee_cfg.tip_half, dtype=float)
-    tip_gap = float(ee_cfg.tip_gap)
+    # Legacy Cartesian scenes still use the two-tip pusher.  The ACT scene uses
+    # the fixed brush branch below and therefore does not require these fields.
+    tip_half = np.asarray(ee_cfg.get("tip_half", [0.008, 0.012, 0.030]), dtype=float)
+    tip_gap = float(ee_cfg.get("tip_gap", 0.004))
 
     root = ET.Element("mujoco", {"model": "tabletop_sweep"})
     _sub(root, "compiler", angle="radian", autolimits="true")
@@ -130,6 +133,7 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
          specular=0.1, shininess=0.1, reflectance=0.0)
     _sub(asset, "material", name="mat_tray", rgba=(0.20, 0.45, 0.75, 1.0))
     _sub(asset, "material", name="mat_tip", rgba=(0.15, 0.15, 0.18, 1.0))
+    _sub(asset, "material", name="mat_brush", rgba=(0.10, 0.20, 0.12, 1.0))
 
     # Component specs (one per distinct geometry present in the layout).
     specs: Dict[str, ComponentSpec] = {}
@@ -176,27 +180,36 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
          solref=(0.004, 1.0), solimp=(0.95, 0.99, 0.001), group=0)
 
     _add_target_tray(world, cfg, top_z)
-    _add_end_effector(world, cfg, tip_half, tip_gap, top_z)
+    if str(cfg.end_effector.type) == "ur10_cb3":
+        add_ur10_arm(world, cfg)
+    else:
+        _add_end_effector(world, cfg, tip_half, tip_gap, top_z)
 
     for index, item in enumerate(layout):
         _add_component(world, index, item, specs[item["geometry"]], top_z)
 
     # ---------------- actuators ----------------
     actuator = _sub(root, "actuator")
-    kp = float(ee_cfg.kp)
-    _sub(actuator, "position", name="act_x", joint="ee_x", kp=kp, forcerange=(-300, 300))
-    _sub(actuator, "position", name="act_y", joint="ee_y", kp=kp, forcerange=(-300, 300))
-    _sub(actuator, "position", name="act_z", joint="ee_z", kp=kp, forcerange=(-300, 300))
-    if bool(ee_cfg.yaw_enabled):
-        _sub(actuator, "position", name="act_yaw", joint="ee_yaw",
-             kp=float(ee_cfg.yaw_kp), forcerange=(-20, 20))
+    if str(ee_cfg.type) == "ur10_cb3":
+        add_ur10_actuators(actuator, cfg)
+    else:
+        kp = float(ee_cfg.kp)
+        _sub(actuator, "position", name="act_x", joint="ee_x", kp=kp, forcerange=(-300, 300))
+        _sub(actuator, "position", name="act_y", joint="ee_y", kp=kp, forcerange=(-300, 300))
+        _sub(actuator, "position", name="act_z", joint="ee_z", kp=kp, forcerange=(-300, 300))
+        if bool(ee_cfg.yaw_enabled):
+            _sub(actuator, "position", name="act_yaw", joint="ee_yaw",
+                 kp=float(ee_cfg.yaw_kp), forcerange=(-20, 20))
 
     # ---------------- sensors ----------------
     sensor = _sub(root, "sensor")
-    _sub(sensor, "force", name="ft_force", site="ft_site")
-    _sub(sensor, "torque", name="ft_torque", site="ft_site")
-    _sub(sensor, "framepos", name="tcp_pos", objtype="site", objname="tcp_site")
-    _sub(sensor, "framelinvel", name="tcp_linvel", objtype="site", objname="tcp_site")
+    if str(ee_cfg.type) == "ur10_cb3":
+        add_ur10_sensors(sensor)
+    else:
+        _sub(sensor, "force", name="ft_force", site="ft_site")
+        _sub(sensor, "torque", name="ft_torque", site="ft_site")
+        _sub(sensor, "framepos", name="tcp_pos", objtype="site", objname="tcp_site")
+        _sub(sensor, "framelinvel", name="tcp_linvel", objtype="site", objname="tcp_site")
 
     return ET.tostring(root, encoding="unicode")
 
@@ -325,6 +338,26 @@ def _add_component(world: ET.Element, index: int, item: dict,
         }
         if geom.mesh is not None:
             attrs["mesh"] = geom.mesh
+            # Keep the polygon mesh for appearance, but use a simple convex
+            # collision proxy for stable dynamic pushing.  This avoids the
+            # poor contact response of tiny freejoint mesh prisms while
+            # retaining the nut/bolt silhouette in the cameras.
+            attrs.update({"mass": "0", "contype": "0", "conaffinity": "0"})
+            ET.SubElement(body, "geom", attrs)
+            vertices = np.asarray(spec.meshes[geom.mesh], dtype=float)
+            radius = float(np.max(np.linalg.norm(vertices[:, :2], axis=1)))
+            proxy = {
+                "name": f"{name}_g{gi}_collision",
+                "type": "cylinder",
+                "pos": _fmt(geom.pos),
+                "quat": _fmt(geom.quat),
+                "size": _fmt((radius, float(spec.half_height))),
+                "mass": f"{mass_share:.6g}",
+                "friction": _fmt((mu, 0.008, 0.0004)),
+                "rgba": _fmt(geom.rgba),
+            }
+            ET.SubElement(body, "geom", proxy)
+            continue
         else:
             attrs["size"] = _fmt(geom.size)
         ET.SubElement(body, "geom", attrs)

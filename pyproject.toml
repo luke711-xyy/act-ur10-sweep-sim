@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sweepsim"
 version = "0.1.0"
-description = "MuJoCo prototype for tabletop component collection by gripper-tip pushing with hybrid force/position control"
+description = "MuJoCo UR10 tabletop sweeping simulator for ACT training and inference"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -22,6 +22,15 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
+act = [
+    "torch>=2.7,<2.12",
+    "torchvision>=0.22,<0.27",
+    "lerobot==0.6.1",
+]
+web = [
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+]
 
 [tool.setuptools.packages.find]
 include = ["sim*"]

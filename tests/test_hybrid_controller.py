@@ -56,7 +56,10 @@ def run_stroke(cfg, stroke, plant=None, max_steps=20000):
 
 @pytest.fixture
 def cfg():
-    return load_config()
+    cfg = load_config()
+    cfg.set_path("end_effector.type", "cartesian3dof")
+    cfg.set_path("workspace.z_search_start", 0.008)
+    return cfg
 
 
 @pytest.fixture
