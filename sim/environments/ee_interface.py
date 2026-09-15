@@ -10,10 +10,10 @@ Two implementations are foreseen:
 * :class:`CartesianEndEffector` -- the simplified 3-DOF (x/y/z slide) +
   optional yaw prototype used in this first version.  Position actuators track
   the commanded TCP directly.
-* :class:`UR10eEndEffector`     -- optional later integration of a real UR10e
-  (+ Robotiq) model.  It has to convert the same task-space command into joint
-  commands (IK or operational-space control) and read the same wrench.  No
-  planner or controller code changes when it is swapped in.
+* :class:`UR10eEndEffector`     -- six-joint UR10e adapter for the vendored
+  MuJoCo Menagerie model.  It converts the same task-space command into joint
+  commands and reads the same wrench.  No planner or controller code changes
+  when the model is swapped.
 """
 
 from __future__ import annotations
@@ -268,35 +268,20 @@ class CartesianEndEffector(EndEffectorInterface):
         return np.array([self.data.qpos[self.qpos_adr[k]] for k in keys], dtype=float)
 
 
-class UR10eEndEffector(EndEffectorInterface):  # pragma: no cover - optional integration
-    """Placeholder for the optional UR10e + Robotiq integration.
+class UR10eEndEffector(EndEffectorInterface):  # pragma: no cover - compatibility shim
+    """Lazy compatibility wrapper for the concrete UR10e MuJoCo adapter."""
 
-    To enable it:
+    def __new__(cls, *args, **kwargs):
+        # Import lazily to avoid a cycle when ``sim.environments.ur10_interface``
+        # itself imports the base interface module.
+        from .ur10_interface import UR10eEndEffector as implementation
 
-    1. add the UR10e MJCF (e.g. from ``mujoco_menagerie/universal_robots_ur10e``)
-       and a closed Robotiq 2F-85 to :func:`sim.model.scene_builder.build_scene_xml`
-       under ``end_effector.type == "ur10e"``;
-    2. implement :meth:`set_command` as either damped-least-squares IK on the
-       tool frame followed by joint position control, or an operational-space
-       controller; keep the same task-space semantics (absolute TCP pose);
-    3. read :meth:`wrench` from a Robotiq/UR wrist F/T sensor site instead of
-       ``cfrc_ext``.
-
-    Everything above this interface -- planners, trajectory generation, the
-    admittance loop, the state machine, metrics and the dataset exporter --
-    stays unchanged.
-    """
-
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(
-            "UR10e integration is not part of the simplified prototype. "
-            "See sim/environments/ee_interface.py:UR10eEndEffector for the steps."
-        )
+        return implementation(*args, **kwargs)
 
 
 def build_end_effector(model, data, cfg) -> EndEffectorInterface:
     kind = str(cfg.end_effector.type)
-    if kind in ("ur10_cb3", "ur10e"):
+    if kind in ("ur10_cb3", "ur10e", "ur10e_menagerie"):
         from .ur10_interface import UR10CB3EndEffector
 
         return UR10CB3EndEffector(model, data, cfg)

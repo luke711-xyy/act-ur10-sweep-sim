@@ -6,11 +6,13 @@ import numpy as np
 
 
 def pusher_width(cfg) -> float:
-    """Width of the closed gripper-tip pair along the tool's local Y axis.
+    """Width of the active pusher along the tool's local Y axis.
 
-    The two tips sit at +/-(gap/2 + tip_half_y) and are ``2 * tip_half_y`` wide
-    each, so the outer-to-outer extent is ``gap + 4 * tip_half_y``.
+    The official UR10e task brush is a single transverse face.  The legacy
+    Cartesian diagnostic scene keeps the original two-tip extent.
     """
+    if str(cfg.end_effector.type) in ("ur10_cb3", "ur10e", "ur10e_menagerie"):
+        return float(cfg.end_effector.brush_width)
     tip_half = np.asarray(cfg.end_effector.tip_half, dtype=float)
     return float(cfg.end_effector.tip_gap) + 4.0 * float(tip_half[1])
 

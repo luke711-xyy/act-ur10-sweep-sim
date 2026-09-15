@@ -8,20 +8,25 @@ Scene contents
 --------------
 * a flat table with configurable friction, top surface at ``table.top_z``
 * a fixed shallow open-fronted tray (the target region) at the left (-X) edge
-* a 3-DOF Cartesian end-effector (x/y/z slides, optional yaw hinge) whose body
-  origin coincides with the TCP, i.e. the bottom-centre point between the two
-  closed gripper tips
-* two rigid gripper-tip boxes separated by ``end_effector.tip_gap``
-  (the gripper is permanently closed -- there is no grasping DOF)
+* by default, the vendored MuJoCo Menagerie six-joint UR10e with its official
+  visual/collision geometry, plus a task-specific brush attached at the
+  source model's ``attachment_site``
+* a legacy 3-DOF Cartesian end-effector (x/y/z slides, optional yaw hinge)
+  whose body origin coincides with the TCP; it remains available for isolated
+  controller diagnostics
 * N free-floating components
 * one fixed high-oblique camera used for the conventional-vision backend
 
 Nothing in this module imports MuJoCo; it only produces text.  That keeps the
-model definition testable in environments where MuJoCo is not installed.
+model definition testable in environments where MuJoCo is not installed.  The
+Menagerie asset bytes are supplied separately by :func:`scene_assets` when the
+XML is loaded from a string.
 """
 
 from __future__ import annotations
 
+from copy import deepcopy
+from pathlib import Path
 from typing import Dict, List, Sequence
 from xml.etree import ElementTree as ET
 
@@ -29,6 +34,32 @@ import numpy as np
 
 from .geometries import ComponentSpec, make_component_spec
 from .ur10_mjcf import add_ur10_actuators, add_ur10_arm, add_ur10_sensors
+
+
+MENAGERIE_ROOT = Path(__file__).resolve().parent / "assets" / "universal_robots_ur10e"
+MENAGERIE_XML = MENAGERIE_ROOT / "ur10e.xml"
+UR10_MODEL_TYPES = {"ur10_cb3", "ur10e", "ur10e_menagerie"}
+
+
+def scene_assets() -> Dict[str, bytes]:
+    """Return the vendored MuJoCo Menagerie assets for ``from_xml_string``.
+
+    MuJoCo's string loader has no filesystem-relative asset directory, so the
+    generated scene passes the mesh files as an in-memory virtual file system.
+    The returned keys intentionally retain the ``assets/`` prefix used by the
+    Menagerie MJCF's ``meshdir`` declaration.
+    """
+    if not MENAGERIE_ROOT.is_dir():
+        return {}
+    return {
+        str(path.relative_to(MENAGERIE_ROOT)): path.read_bytes()
+        for path in MENAGERIE_ROOT.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".obj", ".stl", ".dae", ".png", ".jpg", ".jpeg"}
+    }
+
+
+def _uses_menagerie(cfg) -> bool:
+    return str(cfg.end_effector.type) in UR10_MODEL_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +135,10 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
     tip_gap = float(ee_cfg.get("tip_gap", 0.004))
 
     root = ET.Element("mujoco", {"model": "tabletop_sweep"})
-    _sub(root, "compiler", angle="radian", autolimits="true")
+    # The Menagerie meshes are declared with meshdir="assets".  The actual
+    # bytes are supplied by ``scene_assets`` when the model is loaded.
+    _sub(root, "compiler", angle="radian", autolimits="true",
+         meshdir="assets" if _uses_menagerie(cfg) else None)
     option = _sub(
         root,
         "option",
@@ -158,6 +192,8 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
     tip_default = ET.SubElement(default, "default", {"class": "tip"})
     _sub(tip_default, "geom", type="box", material="mat_tip", condim=4,
          friction=(0.5, 0.01, 0.0002), solref=(0.004, 1.0), group=0)
+    if _uses_menagerie(cfg):
+        _add_menagerie_defaults_and_assets(root, default, asset)
 
     # ---------------- worldbody ----------------
     world = _sub(root, "worldbody")
@@ -180,7 +216,10 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
          solref=(0.004, 1.0), solimp=(0.95, 0.99, 0.001), group=0)
 
     _add_target_tray(world, cfg, top_z)
-    if str(cfg.end_effector.type) == "ur10_cb3":
+    if _uses_menagerie(cfg):
+        _add_menagerie_ur10e(world, cfg)
+    elif str(cfg.end_effector.type) == "ur10_cb3":
+        # Kept as a compatibility path for old explicitly-selected configs.
         add_ur10_arm(world, cfg)
     else:
         _add_end_effector(world, cfg, tip_half, tip_gap, top_z)
@@ -190,7 +229,10 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
 
     # ---------------- actuators ----------------
     actuator = _sub(root, "actuator")
-    if str(ee_cfg.type) == "ur10_cb3":
+    if _uses_menagerie(cfg):
+        _add_menagerie_actuators(actuator)
+    elif str(ee_cfg.type) == "ur10_cb3":
+        # Kept as a compatibility path for old explicitly-selected configs.
         add_ur10_actuators(actuator, cfg)
     else:
         kp = float(ee_cfg.kp)
@@ -203,7 +245,10 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
 
     # ---------------- sensors ----------------
     sensor = _sub(root, "sensor")
-    if str(ee_cfg.type) == "ur10_cb3":
+    if _uses_menagerie(cfg):
+        _add_ur10_sensors(sensor)
+    elif str(ee_cfg.type) == "ur10_cb3":
+        # Kept as a compatibility path for old explicitly-selected configs.
         add_ur10_sensors(sensor)
     else:
         _sub(sensor, "force", name="ft_force", site="ft_site")
@@ -212,6 +257,113 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
         _sub(sensor, "framelinvel", name="tcp_linvel", objtype="site", objname="tcp_site")
 
     return ET.tostring(root, encoding="unicode")
+
+
+def _menagerie_root() -> ET.Element:
+    if not MENAGERIE_XML.is_file():
+        raise FileNotFoundError(f"vendored MuJoCo Menagerie model is missing: {MENAGERIE_XML}")
+    return ET.parse(MENAGERIE_XML).getroot()
+
+
+def _add_menagerie_defaults_and_assets(root: ET.Element, default: ET.Element,
+                                       asset: ET.Element) -> None:
+    """Merge the official Menagerie UR10e visual/dynamics declarations."""
+    source = _menagerie_root()
+    source_default = source.find("default")
+    if source_default is not None:
+        for child in source_default:
+            default.append(deepcopy(child))
+    source_asset = source.find("asset")
+    if source_asset is not None:
+        for child in source_asset:
+            asset.append(deepcopy(child))
+
+
+def _add_menagerie_ur10e(world: ET.Element, cfg) -> None:
+    """Append the vendored Google DeepMind Menagerie UR10e body.
+
+    The source robot ends at ``attachment_site``.  The task-specific brush is
+    attached in that exact frame, which preserves the source robot kinematics
+    and keeps the task geometry independent from the vendor model.
+    """
+    source = _menagerie_root()
+    base_source = source.find("./worldbody/body[@name='base']")
+    if base_source is None:
+        raise ValueError("Menagerie UR10e model has no base body")
+    base = deepcopy(base_source)
+    base_pos = cfg.end_effector.get("base_pos", (0.70, 0.0, 0.04))
+    base.set("pos", _fmt(base_pos))
+
+    wrist3 = base.find(".//body[@name='wrist_3_link']")
+    if wrist3 is None:
+        raise ValueError("Menagerie UR10e model has no wrist_3_link body")
+
+    ee = cfg.end_effector
+    brush_height = float(ee.brush_height)
+    brush_width = float(ee.brush_width)
+    brush_depth = float(ee.brush_depth)
+    stem_length = float(ee.get("brush_stem_length", 0.15))
+    if stem_length < 0.0:
+        raise ValueError("brush_stem_length must be non-negative")
+    brush = ET.Element("body", {"name": "tool", "pos": "0 0.1 0", "quat": "-1 1 0 0"})
+    _sub(brush, "inertial", pos=(0.0, 0.0, -stem_length / 2.0), mass=float(ee.brush_mass),
+         diaginertia=(0.001, 0.001, 0.0004))
+    if stem_length > 0.0:
+        _sub(brush, "geom", name="brush_stem", type="cylinder",
+             size=(0.009, stem_length / 2.0), pos=(0.0, 0.0, -stem_length / 2.0),
+             material="mat_tip", friction=(0.65, 0.01, 0.0004), condim=4)
+    _sub(brush, "geom", name="brush_head", type="box",
+         # The stroke runs along -X, so the long brush dimension must span Y.
+         # Keeping width on X would turn the tool into a narrow scraper and
+         # make components slide sideways at the brush edge.
+         size=(brush_depth / 2.0, brush_width / 2.0, brush_height / 2.0),
+         pos=(0.0, 0.0, -(stem_length + brush_height / 2.0)), material="mat_brush",
+         friction=(0.65, 0.01, 0.0004), condim=4, margin=0.00005)
+    _sub(brush, "site", name="ft_site", pos=(0.0, 0.0, 0.0), size=(0.004,),
+         rgba=(1.0, 0.2, 0.2, 0.4))
+    # The task TCP is the brush's bottom-centre contact point.  At z=0 the
+    # force controller therefore places the brush on the table, while z_home
+    # remains a clearance pose above it.
+    _sub(brush, "site", name="tcp_site", pos=(0.0, 0.0, -(stem_length + brush_height)), size=(0.003,),
+         rgba=(0.1, 1.0, 0.1, 0.4))
+    _sub(brush, "camera", name="wrist_cam", pos=(0.0, -0.16, 0.10),
+         xyaxes=(1.0, 0.0, 0.0, 0.0, 0.0, 1.0), fovy=58.0)
+    wrist3.append(brush)
+    if bool(ee.get("gravity_compensation", True)):
+        # The vendor MJCF describes the physical links but deliberately leaves
+        # gravity compensation to the robot controller.  The task adapter is
+        # position-controlled, so make that controller property explicit for
+        # every dynamic link; otherwise the real arm's pose sags while moving
+        # to the far lanes and the brush impacts the table.
+        for body in base.iter("body"):
+            body.set("gravcomp", "1")
+    # The real UR10e base is raised above the tabletop in this side-mounted
+    # layout.  A fixed pedestal makes that transform explicit instead of
+    # leaving the official base mesh visually floating in space.
+    base_z = float(base_pos[2])
+    table_z = float(cfg.table.top_z)
+    if base_z > table_z + 1e-6:
+        mount = _sub(world, "body", name="robot_mount")
+        _sub(mount, "geom", name="robot_mount_pedestal", type="cylinder",
+             size=(0.13, (base_z - table_z) / 2.0),
+             pos=(float(base_pos[0]), float(base_pos[1]), (base_z + table_z) / 2.0),
+             material="mat_tip", friction=(0.6, 0.01, 0.0002), condim=4)
+    world.append(base)
+
+
+def _add_menagerie_actuators(actuator: ET.Element) -> None:
+    source = _menagerie_root()
+    source_actuator = source.find("actuator")
+    if source_actuator is not None:
+        for child in source_actuator:
+            actuator.append(deepcopy(child))
+
+
+def _add_ur10_sensors(sensor: ET.Element) -> None:
+    _sub(sensor, "force", name="ft_force", site="ft_site")
+    _sub(sensor, "torque", name="ft_torque", site="ft_site")
+    _sub(sensor, "framepos", name="tcp_pos", objtype="site", objname="tcp_site")
+    _sub(sensor, "framelinvel", name="tcp_linvel", objtype="site", objname="tcp_site")
 
 
 def _add_render_cameras(world: ET.Element, cfg) -> None:

@@ -1,21 +1,61 @@
 import numpy as np
+import mujoco
+import pytest
+from xml.etree import ElementTree as ET
 
 from sim.act.interface import ACTObservationBuilder
 from sim.act.realtime import ActionChunkScheduler
 from sim.config import load_config
 from sim.environments.sweep_env import SweepEnv
-from sim.model.scene_builder import build_scene_xml
+from sim.model.scene_builder import build_scene_xml, scene_assets
 from sim.environments.layout import sample_layout
+from sim.planners.geometry_utils import pusher_width
+from sim.act.expert import expert_waypoints
 
 
-def test_ur10_scene_exposes_six_joints_brush_and_wrist_camera():
+def test_ur10e_scene_uses_menagerie_structure_and_custom_brush():
     cfg = load_config()
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
-    for name in ("ur10_shoulder_joint", "ur10_upper_arm_joint", "ur10_forearm_joint",
-                 "ur10_wrist_1_joint", "ur10_wrist_2_joint", "ur10_wrist_3_joint"):
+    for name in ("shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+                 "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"):
         assert f'name="{name}"' in xml
+    assert 'name="upper_arm_link"' in xml
+    assert 'mesh="base_0"' in xml
+    assert 'name="attachment_site"' in xml
     assert 'name="brush_head"' in xml
     assert 'name="wrist_cam"' in xml
+
+
+def test_ur10e_scene_loads_with_vendored_menagerie_assets():
+    cfg = load_config()
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    model = mujoco.MjModel.from_xml_string(xml, assets=scene_assets())
+    assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base") >= 0
+    assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "tool") >= 0
+    assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "brush_head") >= 0
+
+
+def test_ur10e_brush_width_is_transverse_to_the_sweep_direction():
+    cfg = load_config()
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    model = mujoco.MjModel.from_xml_string(xml, assets=scene_assets())
+    brush_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "brush_head")
+    np.testing.assert_allclose(
+        model.geom_size[brush_id],
+        [cfg.end_effector.brush_depth / 2.0,
+         cfg.end_effector.brush_width / 2.0,
+         cfg.end_effector.brush_height / 2.0],
+    )
+    assert pusher_width(cfg) == pytest.approx(float(cfg.end_effector.brush_width))
+
+
+def test_ur10e_chain_has_explicit_gravity_compensation_for_position_control():
+    cfg = load_config()
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    root = ET.fromstring(xml)
+    base = root.find("./worldbody/body[@name='base']")
+    assert base is not None
+    assert all(body.get("gravcomp") == "1" for body in base.iter("body"))
 
 
 def test_mujoco_reset_render_and_act_observation_contract():
@@ -35,6 +75,43 @@ def test_mujoco_reset_render_and_act_observation_contract():
         env.close()
 
 
+def test_ur10e_initial_pose_keeps_visual_links_above_table():
+    cfg = load_config()
+    env = SweepEnv(cfg, seed=0)
+    try:
+        env.reset(seed=0)
+        body_ids = [
+            mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            for name in ("shoulder_link", "upper_arm_link", "forearm_link",
+                         "wrist_1_link", "wrist_2_link", "wrist_3_link", "tool")
+        ]
+        assert min(float(env.data.xpos[body_id][2]) for body_id in body_ids) > 0.0
+    finally:
+        env.close()
+
+
+def test_ur10e_tcp_is_brush_bottom_and_contacts_at_search_height():
+    from sim.controllers.hybrid import Command
+    brush_id = None
+
+    cfg = load_config(overrides=["sim.real_time=false"])
+    env = SweepEnv(cfg, seed=0)
+    try:
+        env.reset(seed=0)
+        assert np.isclose(env.tcp()[2], cfg.end_effector.z_home, atol=1e-3)
+        brush_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "brush_head")
+        brush_bottom = (env.data.geom_xpos[brush_id]
+                        - env.data.geom_xmat[brush_id].reshape(3, 3)[:, 2]
+                        * env.model.geom_size[brush_id, 2])
+        np.testing.assert_allclose(brush_bottom, env.tcp(), atol=1e-5)
+        for _ in range(180):
+            env.step_control(Command(0.42, 0.0, float(cfg.workspace.z_search_start), 0.0))
+        assert env.tcp()[2] < 0.01
+        assert env.normal_force() > 0.0
+    finally:
+        env.close()
+
+
 def test_scheduler_uses_future_aligned_action_index():
     cfg = load_config()
     scheduler = ActionChunkScheduler(cfg)
@@ -43,3 +120,75 @@ def test_scheduler_uses_future_aligned_action_index():
     assert scheduler.accept(0.0, values, 0.199)
     assert scheduler.action_for(0.199) is None
     np.testing.assert_array_equal(scheduler.action_for(0.2), values[4])
+
+
+def test_act_contact_latch_does_not_teleport_tcp_to_table_height():
+    from sim.act.rollout import run_expert_episode
+
+    cfg = load_config(overrides=["sim.real_time=false", "components.count=1"])
+    result = run_expert_episode(cfg, seed=12345, collect_observations=False)
+    first_contact = next(row for row in result.trace if row["contact"])
+    # The force loop must start from the measured TCP pose.  A large downward
+    # jump at the latch is an impact, not a controlled contact search.
+    assert first_contact["command"][2] >= first_contact["tcp"][2] - 0.005
+
+
+def test_act_contact_latch_requires_measured_brush_contact():
+    from sim.act.rollout import run_expert_episode
+
+    cfg = load_config(overrides=["sim.real_time=false", "components.count=1"])
+    result = run_expert_episode(cfg, seed=12345, collect_observations=False)
+    first_contact = next(row for row in result.trace if row["contact"])
+    # Entering the search-height command band is not itself contact.  The
+    # force loop must latch only after the brush has produced a real measured
+    # load, otherwise the subsequent admittance hold is airborne.
+    assert first_contact["normal_force"] >= float(cfg.controller.contact_threshold)
+
+
+def test_expert_waypoints_stop_inside_ur10e_command_workspace():
+    cfg = load_config()
+    env = SweepEnv(cfg, seed=12345)
+    try:
+        env.reset(seed=12345)
+        points = expert_waypoints(env, cfg)
+        assert float(points[:, 0].min()) >= float(cfg.workspace.x_min)
+        assert float(points[-1, 0]) < float(cfg.target.x_max)
+    finally:
+        env.close()
+
+
+def test_ur10e_can_reach_expert_tray_lane_from_home():
+    cfg = load_config()
+    env = SweepEnv(cfg, seed=12345)
+    try:
+        env.reset(seed=12345)
+        lane_x = float(expert_waypoints(env, cfg)[-1, 0])
+        solution = env.ee._solve_ik(np.array([lane_x, 0.0, 0.0, 0.0]))
+        assert np.linalg.norm(env.ee.tcp_position() - np.array([lane_x, 0.0, 0.0])) < 0.01
+        assert solution.shape == (6,)
+    finally:
+        env.close()
+
+
+def test_ur10e_ik_tracks_a_continuous_home_to_tray_path():
+    cfg = load_config()
+    env = SweepEnv(cfg, seed=0)
+    try:
+        env.reset(seed=0)
+        for x in np.linspace(0.42, -0.36, 80):
+            env.ee._solve_ik(np.array([x, 0.0, 0.0, 0.0]))
+        assert np.linalg.norm(env.ee.tcp_position() - np.array([-0.36, 0.0, 0.0])) < 0.01
+    finally:
+        env.close()
+
+
+def test_act_rollout_finishes_when_all_components_are_in_the_tray():
+    from sim.act.rollout import run_expert_episode
+
+    cfg = load_config(overrides=[
+        "sim.real_time=false", "components.count=1",
+        "workspace.z_search_start=-0.001", "controller.safe_max_force=100.0",
+    ])
+    result = run_expert_episode(cfg, seed=12345, collect_observations=False)
+    assert result.success
+    assert result.collected == result.total == 1

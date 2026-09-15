@@ -5,9 +5,9 @@ its **fixed brush directly as a pusher** to collect small industrial components
 (nuts, screws, bolts, washers) from a flat table into a fixed shallow tray at the table
 edge.
 
-There is no WAM and no grasping DOF. The scene uses a portable six-joint UR10/CB3-like
-arm, a fixed brush, an overhead camera, a tool-mounted wrist camera, and a separate
-observation-only oblique camera. The project
+There is no WAM and no grasping DOF. The scene uses the vendored MuJoCo Menagerie UR10e
+six-joint model, a fixed brush, an overhead camera, a tool-mounted wrist camera, and a
+separate observation-only oblique camera. The project
 keeps the original Cartesian pusher/planner implementation as a legacy diagnostic path;
 the default ACT path is the UR10 brush scene.
 
@@ -97,6 +97,13 @@ dataset, so preview failures (including excessive normal force or a component
 sliding out of the safe workspace) remain visible without silently becoming
 training labels. Training and inference are local subprocesses with captured
 logs and stop controls; the panel does not upload data or control a real arm.
+
+The UR10 preview uses a continuous task-space-to-joint adapter. Its IK solve is
+performed in scratch state, the physical joint state is restored before stepping,
+and `end_effector.ik_max_joint_step` bounds each joint target update. This keeps
+near-singular least-squares solves from causing a visible branch jump. Demo
+playback renders into separate image elements from the live simulation views, so
+the periodic live refresh cannot overwrite a selected demo frame.
 
 For richer dataset browsing, video playback, action plots, filtering, and
 annotations, use the upstream [LeRobot Dataset Visualizer](https://huggingface.co/spaces/lerobot/visualize_dataset)
@@ -198,8 +205,12 @@ and `Δz = −w` because the table normal is `+Z`. Both forces use the same
 value (default 1 N), never zero. Writing the ODE in the inward-normal frame is what keeps
 the signs unambiguous; see the module docstring in `sim/controllers/admittance.py`.
 
-`z_nominal` is latched at `CONTACT_DETECTED` (the commanded height at which contact was
-first measured), and the admittance state is **reset at the start of every sweep**.
+`z_nominal` is latched only after a post-step brush contact load is measured, and it uses
+the actual TCP height at that instant rather than a guessed or teleported command. The
+admittance state is **reset at the start of every sweep**. The default search height is
+1 mm below the table reference (`workspace.z_search_start=-0.001`), a small controlled
+preload that gives MuJoCo a real contact constraint instead of relying on an exact
+zero-gap equilibrium.
 
 Implemented safeguards:
 
@@ -207,6 +218,7 @@ Implemented safeguards:
 * first-order low-pass filter on the normal force (`force_filter_cutoff_hz`)
 * force-target slew-rate ramping, up **and** down (`force_ramp_rate`)
 * force-target saturation (`max_force`) and a hard measured-force abort (`safe_max_force`)
+* transient-force dwell (`safe_force_dwell_steps`) before the hard abort is declared
 * `Δz` saturation (`delta_z_limit`) and `dΔz/dt` limit (`delta_z_rate_limit`), both with
   anti-windup
 * contact-detection threshold with a dwell counter (rejects single-sample spikes)
@@ -430,6 +442,14 @@ planner-independent). `paired_*.csv` holds the per-seed differences and
 ---
 
 ## Failure modes
+
+The official Menagerie UR10e is mounted at `[0.62, 0, 0.22]` in the default scene. This
+is a task-layout choice: it keeps the tray-mouth lane reachable while the full official
+link and collision geometry remains in the model. The brush stops at the tray mouth
+(`target.x_max - max(0.02, brush_depth/2)`) rather than asking IK to reach the tray back
+wall outside the command workspace. Once all components are inside the tray, the expert
+rollout terminates immediately; it does not run extra recovery lanes that could create a
+new collision after success.
 
 Collection rate alone does not say *why* a run went badly. Three failure modes are
 detected per stroke and aggregated per episode.
@@ -724,7 +744,7 @@ sim/
     rrt.py                   RRT-Connect for the contact-free transfer legs
     geometry_utils.py        planar helpers
   environments/
-    ee_interface.py          end-effector abstraction (+ UR10e placeholder)
+    ee_interface.py          end-effector abstraction (+ UR10e adapter)
     layout.py                reproducible layout sampling
     sweep_env.py             MuJoCo environment
     episode.py               episode runner
@@ -738,26 +758,32 @@ tests/                       unit tests (+ MuJoCo smoke tests, auto-skipped)
 
 ---
 
-## Swapping in a real UR10e later
+## UR10 model boundary
 
 Everything above `EndEffectorInterface` — planners, trajectory generation, the admittance
 loop, the state machine, metrics and the dataset exporter — is written against a
 **task-space** interface: an absolute TCP pose command, the measured TCP pose/velocity,
 and the contact wrench at the fingertip frame. Nothing in them knows about slide joints.
 
-To integrate a UR10e:
+The current default `end_effector.type: ur10e` uses the vendored MuJoCo Menagerie
+UR10e six-joint model with official visual meshes and collision geometry. It
+is suitable for validating the ACT observation/action plumbing and the hybrid
+force-control loop, but it is not a calibrated hardware model.
+The model is mounted just beyond the table's +X edge and starts from an above-table IK
+seed so the human inspection view does not show a link passing through the work surface.
+The task-specific brush, TCP, wrist F/T sites and wrist camera are attached at the model's
+`attachment_site`. This is still an ACT-feasibility model rather than a calibrated hardware
+digital twin: the Menagerie README notes that actuator values are not carefully tuned, and
+the brush is a rigid task fixture with no gripper DOF.
 
-1. add the UR10e MJCF (e.g. from `mujoco_menagerie/universal_robots_ur10e`) plus a closed
-   Robotiq 2F-85 in `sim/model/scene_builder.py` under `end_effector.type == "ur10e"`;
-2. implement `UR10eEndEffector.set_command` as damped-least-squares IK on the tool frame
-   followed by joint position control, or as an operational-space controller — keeping the
-   same absolute-TCP-pose semantics;
-3. read `wrench()` from a wrist F/T sensor site instead of `cfrc_ext`.
+The current adapter solves damped-least-squares IK on the official tool frame, then sends
+bounded joint-position targets to the Menagerie actuators. The force-control framework
+above it continues to use the same absolute-TCP-pose and normal-force contract. The
+vendored model's `README.md` and `LICENSE` are kept beside the assets for provenance.
 
-The scaffold, including the documented steps, is in
-`sim/environments/ee_interface.py::UR10eEndEffector`. Until it is filled in, the
-simplified Cartesian prototype is the deliverable, and the two are kept strictly separate
-(`end_effector.type` selects one or the other; no code path mixes them).
+The original `cartesian3dof` scene remains available as a diagnostic baseline.
+`end_effector.type` selects the scene and adapter; the planner, force controller,
+state machine, metrics, and dataset exporter keep the same task-space contract.
 
 ---
 
@@ -767,11 +793,11 @@ Read this before quoting any number from this simulator.
 
 **Robot model**
 
-1. The end-effector is an idealised **3-DOF Cartesian stage** (x/y/z slides) with an optional
-   yaw hinge, driven by position actuators with gravity compensation. There is no arm
-   kinematics, no joint limits, no singularities, no link collisions and no joint
-   compliance. Wrist-side dynamics of a real UR10e (inertia, drive compliance, control
-   latency) are absent — `controller.control_delay_steps` is a crude stand-in.
+1. The active end-effector is the six-joint UR10e Menagerie model with visual meshes,
+   inertial links, collision geometry, joint limits and position actuators. It is not a
+   calibrated hardware digital twin: actuator gains, contact parameters and the rigid
+   brush fixture remain feasibility-level settings, and `controller.control_delay_steps`
+   is still a crude stand-in for hardware latency.
 2. The gripper is **permanently closed** and rigid: no finger joint, no finger compliance,
    no pad deformation. There is no grasping degree of freedom anywhere in the model, by
    construction (a unit test enforces this).

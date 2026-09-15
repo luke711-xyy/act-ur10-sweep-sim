@@ -30,7 +30,7 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None) -> ActRol
     scheduler.reset(env.time)
     admittance = _force_loop(cfg)
     contact = False
-    z_nominal = float(cfg.table.top_z) + 0.001
+    z_nominal = float(env.tcp()[2])
     last_action = np.array([*env.tcp(), env.ee.tcp_yaw()], dtype=np.float32)
     observations, actions, trace = [], [], []
     pending: Future | None = None
@@ -38,6 +38,7 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None) -> ActRol
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="act-inference")
     failure = ""
     peak_force = 0.0
+    overforce_steps = 0
     path_length = 0.0
     previous_xy = env.tcp()[:2].copy()
 
@@ -81,10 +82,6 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None) -> ActRol
 
             for _ in range(max(1, int(round(float(cfg.sim.control_hz) / float(cfg.act.action_hz))))):
                 measured = float(env.normal_force())
-                near_table = float(env.tcp()[2]) <= float(cfg.workspace.z_search_start) + 0.025
-                if not contact and near_table and measured >= float(cfg.controller.contact_threshold):
-                    contact = True
-                    admittance.reset()
                 if contact:
                     z = z_nominal + admittance.step(float(cfg.controller.desired_force), measured)
                 else:
@@ -93,18 +90,30 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None) -> ActRol
                 post_force = float(env.normal_force())
                 peak_force = max(peak_force, post_force)
                 tcp = env.tcp()
+                if not contact:
+                    near_table = float(tcp[2]) <= float(cfg.workspace.z_search_start) + 0.025
+                    if near_table and post_force >= float(cfg.controller.contact_threshold):
+                        contact = True
+                        z_nominal = float(tcp[2])
+                        admittance.reset()
                 path_length += float(np.linalg.norm(tcp[:2] - previous_xy))
                 previous_xy = tcp[:2].copy()
                 trace.append({"t": env.time, "tcp": tcp.copy(), "command": action.copy(),
                               "normal_force": post_force, "contact": contact,
                               "collected": int(env.collected_mask().sum())})
-                if contact and peak_force > float(cfg.controller.safe_max_force):
+                if contact and int(env.collected_mask().sum()) == len(env.layout) and len(env.layout) > 0:
+                    break
+                if contact and post_force > float(cfg.controller.safe_max_force):
+                    overforce_steps += 1
+                else:
+                    overforce_steps = 0
+                if contact and overforce_steps >= int(cfg.controller.get("safe_force_dwell_steps", 3)):
                     failure = "normal force exceeded safety threshold"
                     break
                 if path_length > float(cfg.episode.max_contact_path):
                     failure = "contact path exceeded limit"
                     break
-            if failure:
+            if failure or (len(env.layout) > 0 and int(env.collected_mask().sum()) == len(env.layout)):
                 break
     finally:
         executor.shutdown(wait=False, cancel_futures=True)

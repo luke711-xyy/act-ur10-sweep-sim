@@ -14,8 +14,15 @@ def expert_waypoints(env, cfg) -> np.ndarray:
     """
     positions = np.asarray(env.component_positions(), dtype=float)[:, :2]
     home = np.array([0.42, 0.0], dtype=float)
+    # Stop at the tray mouth, not at its back wall.  The latter was outside
+    # the official UR10e task-space bound and made the IK chase an unreachable
+    # endpoint even though a component is already collected once its centre
+    # crosses the target boundary.
+    target_lane_x = float(np.clip(
+        float(cfg.target.x_max) - max(0.02, float(cfg.end_effector.brush_depth) / 2.0),
+        float(cfg.workspace.x_min), float(cfg.workspace.x_max)))
     if positions.size == 0:
-        return np.array([home, [0.30, 0.0], [float(cfg.target.x_min), 0.0]], dtype=float)
+        return np.array([home, [0.30, 0.0], [target_lane_x, 0.0]], dtype=float)
     order = np.argsort(-positions[:, 0])
     ordered = positions[order]
     brush_half = float(cfg.end_effector.brush_width) / 2.0
@@ -27,14 +34,14 @@ def expert_waypoints(env, cfg) -> np.ndarray:
     points = [home, start]
     for point in ordered:
         points.append(np.asarray(point, dtype=float))
-    target_lane = np.array([float(cfg.target.x_min) + 0.04, 0.0], dtype=float)
+    target_lane = np.array([target_lane_x, 0.0], dtype=float)
     points.append(target_lane)
     # Small parts can roll sideways at the brush edge.  These two low-cost
     # backtracking lanes keep the demonstration a single continuous contact
     # episode while making the expert robust to that allowed in-plane turn.
     for lane_y in (-0.12, 0.12):
         points.extend((np.array([0.10, lane_y], dtype=float),
-                       np.array([float(cfg.target.x_min) + 0.04, lane_y], dtype=float)))
+                       np.array([target_lane_x, lane_y], dtype=float)))
     return np.asarray(points, dtype=float)
 
 

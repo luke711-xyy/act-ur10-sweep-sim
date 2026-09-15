@@ -36,19 +36,22 @@ target:
   wall_height: 0.04
 
 end_effector:
-  type: ur10_cb3             # ur10_cb3 | cartesian3dof (legacy)
+  type: ur10e                # ur10e Menagerie model | cartesian3dof (legacy)
   brush_width: 0.12
   brush_depth: 0.024
   brush_height: 0.016
+  brush_stem_length: 0.15       # reach from the UR10e flange down to the table
   brush_mass: 0.25
+  base_pos: [0.62, 0.0, 0.22]     # raised side mount; keeps the tray lane reachable
   z_home: 0.18
   gravity_compensation: true
   joint_kp: 120.0
   joint_kd: 12.0
   ik_damping: 0.01
   ik_iterations: 60
-  # Level-brush IK seed for the simplified UR10 kinematic chain.
-  initial_joint_positions: [0.0, -2.0744, 3.6233, 0.0, -1.5489, 0.0]
+  ik_max_joint_step: 0.04     # target slew limit per task-space command [rad]
+  # Level-brush IK seed for the vendored Menagerie UR10e at [0.42, 0, 0.18].
+  initial_joint_positions: [-2.0863942, -2.5664948, -2.6904114, 3.6861097, 1.5707961, 3.6571908]
   # Retained only for the original Cartesian diagnostic scene.
   yaw_enabled: true
   kp: 3000.0
@@ -67,7 +70,7 @@ workspace:
   y_min: -0.32
   y_max: 0.32
   z_travel: 0.06             # lift height for contact-free transfer motions
-  z_search_start: 0.0        # TCP height at which the brush reaches the table
+  z_search_start: -0.001     # controlled 1 mm preload; avoids a zero-gap no-contact equilibrium
   z_search_min: -0.012       # deepest probing height before declaring "no table"
   observe_pose: [0.44, -0.34, 0.26]   # parking pose used for re-observation
   # Larger box: components outside it are counted as lost.
@@ -80,6 +83,7 @@ controller:
   desired_force: 1.0         # fixed positive normal force target [N]
   max_force: 5.0
   safe_max_force: 5.0         # stop threshold for the simulated wrist sensor [N]
+  safe_force_dwell_steps: 3   # transient contact peaks must persist before aborting
   contact_threshold: 0.20
   release_threshold: 0.05
   force_ramp_rate: 15.0      # N/s, used for ramp-up and ramp-down
@@ -210,10 +214,10 @@ video:
       pos: [0.30, -0.55, 0.40]
       fovy_deg: 45.0
     inspection_cam:
-      pos: [0.52, -0.62, 0.58]
-      lookat: [-0.02, 0.0, 0.0]
+      pos: [0.95, -1.10, 0.90]
+      lookat: [0.28, 0.0, 0.24]
       up: [0.0, 0.0, 1.0]
-      fovy_deg: 52.0
+      fovy_deg: 60.0
 
 act:
   enabled: true

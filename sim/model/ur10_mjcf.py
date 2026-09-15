@@ -53,7 +53,12 @@ def _link_body(parent: ET.Element, name: str, pos, joint_axis, length: float,
 def add_ur10_arm(world: ET.Element, cfg) -> None:
     """Append the UR10 arm, fixed brush, TCP and wrist sensor sites."""
     ee = cfg.end_effector
-    base = _sub(world, "body", name="ur10_base", pos=(0.22, 0.0, 0.04))
+    # Keep the robot base on the right-hand side of the tabletop.  The previous
+    # prototype placed it almost underneath the TCP; its valid IK seed then
+    # folded one long link below the table, which was visible in the inspection
+    # camera even though the brush itself was at the correct pose.
+    base_pos = tuple(float(v) for v in ee.get("base_pos", (0.70, 0.0, 0.04)))
+    base = _sub(world, "body", name="ur10_base", pos=base_pos)
     _sub(base, "geom", name="ur10_base_geom", type="cylinder", size=(0.11, 0.04),
          rgba=(0.25, 0.27, 0.30, 1.0), contype=0, conaffinity=0)
 

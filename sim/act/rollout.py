@@ -51,9 +51,11 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
     contact = False
     z_nominal = None
     peak_force = 0.0
+    overforce_steps = 0
     path_length = 0.0
     previous_xy = env.tcp()[:2].copy()
     failure = ""
+    completed_now = False
     for action in np.asarray(path, dtype=np.float32).reshape(-1, 4):
         if collect_observations:
             obs = builder.observe(env)
@@ -74,18 +76,6 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
 
         for _ in range(max(1, int(round(float(cfg.sim.control_hz) / float(cfg.act.action_hz))))):
             measured = float(env.normal_force())
-            # The wrist sensor also sees transient inertial reactions from the
-            # position-controlled arm.  A contact latch is therefore valid
-            # only while the brush is physically near the table search height;
-            # this keeps an airborne acceleration spike from handing Z control
-            # to the admittance loop.
-            near_table = float(env.tcp()[2]) <= float(cfg.workspace.z_search_start) + 0.025
-            approach_contact = float(action[2]) <= float(cfg.workspace.z_search_start) + 0.02
-            if (not contact and near_table
-                    and (measured >= float(cfg.controller.contact_threshold) or approach_contact)):
-                contact = True
-                z_nominal = float(env.table_top_z) + 0.001
-                admittance.reset()
             if contact:
                 z = float(z_nominal + admittance.step(float(cfg.controller.desired_force), measured))
             else:
@@ -96,14 +86,37 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             path_length += float(np.linalg.norm(tcp[:2] - previous_xy))
             previous_xy = tcp[:2].copy()
             post_force = float(env.normal_force())
+            # The wrist sensor also sees transient inertial reactions from the
+            # position-controlled arm.  Latch only after the *post-step*
+            # measured brush load is above threshold while the TCP is near the
+            # table.  Entering the action's height band alone is not contact.
+            if not contact:
+                near_table = float(tcp[2]) <= float(cfg.workspace.z_search_start) + 0.025
+                if near_table and post_force >= float(cfg.controller.contact_threshold):
+                    contact = True
+                    # The policy action is a target, not a teleport.  Starting
+                    # the admittance loop from the measured pose avoids an
+                    # artificial centimetre-scale impact on the next command.
+                    z_nominal = float(tcp[2])
+                    admittance.reset()
             peak_force = max(peak_force, post_force)
             trace.append({"t": env.time, "tcp": tcp.copy(), "command": cmd.as_array(),
                           "normal_force": post_force, "contact": contact,
                           "collected": int(env.collected_mask().sum())})
+            # Collection is the task terminal event.  Do not continue into the
+            # optional recovery lanes after every component is already inside
+            # the tray; those lanes can create a new collision after success.
+            if contact and len(env.layout) > 0 and int(env.collected_mask().sum()) == len(env.layout):
+                completed_now = True
+                break
             # Before contact, the sensor includes arm acceleration.  The
             # safety bound is a contact-load bound and is meaningful only
             # after the contact latch above.
-            if contact and peak_force > float(cfg.controller.safe_max_force):
+            if contact and post_force > float(cfg.controller.safe_max_force):
+                overforce_steps += 1
+            else:
+                overforce_steps = 0
+            if contact and overforce_steps >= int(cfg.controller.get("safe_force_dwell_steps", 3)):
                 failure = "normal force exceeded safety threshold"
                 break
             if path_length > float(cfg.episode.max_contact_path):
@@ -112,10 +125,12 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             if np.any(env.lost_mask()):
                 failure = "component left the safe workspace"
                 break
-        if failure:
+        if failure or completed_now:
             break
 
-    if not failure and contact:
+    completed = (not failure and contact and len(env.layout) > 0
+                 and int(env.collected_mask().sum()) == len(env.layout))
+    if not failure and contact and not completed:
         # Hold the final pose for the explicit stability interval without lifting
         # the brush.  This is part of the task result, not a second sweep.
         final = env.tcp().copy()

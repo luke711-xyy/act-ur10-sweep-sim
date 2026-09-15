@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..model.scene_builder import build_scene_xml
+from ..model.scene_builder import build_scene_xml, scene_assets
 from .ee_interface import EndEffectorInterface, build_end_effector
 from .layout import in_safe_workspace, in_target_region, sample_layout
 
@@ -59,7 +59,7 @@ class SweepEnv:
 
         self.layout = sample_layout(cfg, self.rng)
         self.xml = build_scene_xml(cfg, self.layout)
-        self.model = mujoco.MjModel.from_xml_string(self.xml)
+        self.model = mujoco.MjModel.from_xml_string(self.xml, assets=scene_assets())
         self.data = mujoco.MjData(self.model)
         self._close_renderers()
 

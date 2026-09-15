@@ -98,3 +98,28 @@ def test_http_contract_includes_preview_job_and_config_routes():
             "/api/preview/{preview_id}/frame/{frame_index}",
             "/api/jobs/train", "/api/jobs/inference",
             "/api/config/apply"} <= paths
+
+
+def test_ur10_ik_stays_continuous_for_a_small_tcp_move():
+    from sim.controllers.hybrid import Command
+    from sim.environments.sweep_env import SweepEnv
+
+    cfg = load_config(overrides=["sim.real_time=false"])
+    env = SweepEnv(cfg, seed=0)
+    env.reset(seed=0)
+    q0 = env.ee.joint_state().copy()
+    env.step_control(Command(0.42, 0.006, 0.18, 0.0))
+    q1 = env.ee.joint_state().copy()
+    env.close()
+    assert np.max(np.abs(q1 - q0)) < 0.05
+
+
+def test_live_and_demo_views_have_separate_dom_targets():
+    app = create_app(load_config())
+    index = next(route for route in app.routes if getattr(route, "path", None) == "/")
+    html = index.endpoint()
+    assert 'id="demoOverheadImage"' in html
+    assert 'id="demoWristImage"' in html
+    assert 'id="demoInspectionImage"' in html
+    assert "image('overheadImage',f.overhead)" in html
+    assert "image('demoOverheadImage',f.overhead)" in html

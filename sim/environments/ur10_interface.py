@@ -1,4 +1,4 @@
-"""UR10/CB3 MuJoCo end-effector adapter."""
+"""MuJoCo end-effector adapter for the vendored UR10e Menagerie model."""
 
 from __future__ import annotations
 
@@ -11,10 +11,15 @@ from .ee_interface import CartesianEndEffector
 
 
 class UR10CB3EndEffector(CartesianEndEffector):
-    """Convert absolute TCP targets to six UR10 joint actuator targets."""
+    """Convert absolute TCP targets to six official UR10e actuator targets.
 
-    JOINT_NAMES = ("ur10_shoulder_joint", "ur10_upper_arm_joint", "ur10_forearm_joint",
-                   "ur10_wrist_1_joint", "ur10_wrist_2_joint", "ur10_wrist_3_joint")
+    The class name is retained for configuration/API compatibility with the
+    earlier CB3 prototype; the active MJCF is the Menagerie UR10e model.
+    """
+
+    JOINT_NAMES = ("shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+                   "wrist_1_joint", "wrist_2_joint", "wrist_3_joint")
+    ACTUATOR_NAMES = ("shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3")
 
     def __init__(self, model, data, cfg):
         import mujoco
@@ -28,8 +33,10 @@ class UR10CB3EndEffector(CartesianEndEffector):
             raise RuntimeError("MuJoCo model is missing one or more UR10 joints")
         self.qpos_adr = {n: int(model.jnt_qposadr[j]) for n, j in self.jnt_ids.items()}
         self.qvel_adr = {n: int(model.jnt_dofadr[j]) for n, j in self.jnt_ids.items()}
-        self.act_ids = {f"ur10_act_{i}": mujoco.mj_name2id(
-            model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"ur10_act_{i}") for i in range(1, 7)}
+        self.act_ids = {name: mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_ACTUATOR, name) for name in self.ACTUATOR_NAMES}
+        if any(v < 0 for v in self.act_ids.values()):
+            raise RuntimeError("MuJoCo model is missing one or more UR10e actuators")
         self.tool_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "tool")
         self.tcp_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "tcp_site")
         self.ft_sensor_adr = self._sensor_adr("ft_force")
@@ -54,9 +61,19 @@ class UR10CB3EndEffector(CartesianEndEffector):
 
     def set_command(self, x: float, y: float, z: float, yaw: float = 0.0) -> None:
         target = np.array([x, y, z, yaw], dtype=float)
-        q = self._solve_ik(target)
-        for i, value in enumerate(q, 1):
-            self.data.ctrl[self.act_ids[f"ur10_act_{i}"]] = float(value)
+        q_current = self.joint_state()
+        q_solution = self._solve_ik(target)
+        # IK iterations use qpos as a scratch space.  Do not leave the
+        # converged solution teleported into the physical state: the actuators
+        # must move the arm there.  The step limit also prevents a near-singular
+        # least-squares solve from selecting a visually discontinuous branch.
+        max_step = float(self.cfg.end_effector.get("ik_max_joint_step", 0.04))
+        q = q_current + np.clip(q_solution - q_current, -max_step, max_step)
+        for name, value in zip(self.JOINT_NAMES, q_current):
+            self.data.qpos[self.qpos_adr[name]] = value
+        self._mujoco.mj_forward(self.model, self.data)
+        for name, value in zip(self.ACTUATOR_NAMES, q):
+            self.data.ctrl[self.act_ids[name]] = float(value)
 
     def _solve_ik(self, target: np.ndarray) -> np.ndarray:
         mj = self._mujoco
