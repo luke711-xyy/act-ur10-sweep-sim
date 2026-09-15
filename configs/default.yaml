@@ -1,0 +1,224 @@
+# =============================================================================
+# Default configuration -- tabletop component-collection sweeping simulator.
+#
+# Coordinate convention
+#   * table plane   : XY,  table normal: +Z (up)
+#   * table top     : z = 0   (all heights are relative to the table surface)
+#   * target tray   : fixed at the LEFT (-X) edge; successful sweeps move
+#                     components towards -X
+#
+# Units: metres, newtons, seconds, radians.
+# =============================================================================
+
+seed: 0
+
+sim:
+  physics_dt: 0.001          # MuJoCo timestep (must be < the control period)
+  control_hz: 100.0          # outer hybrid-controller rate
+  max_episode_time: 320.0    # simulated-seconds budget for one episode
+  gravity: [0.0, 0.0, -9.81]
+  solver_iterations: 50
+
+table:
+  half_size: [0.50, 0.40, 0.02]
+  top_z: 0.0
+  friction: [0.6, 0.005, 0.0001]
+  height_perturb_std: 0.0    # domain randomisation of the table height [m]
+
+target:
+  # Shallow tray, open towards +X, its floor being the table surface itself.
+  x_min: -0.48
+  x_max: -0.34
+  y_min: -0.18
+  y_max: 0.18
+  wall_thickness: 0.012
+  wall_height: 0.04
+
+end_effector:
+  type: cartesian3dof        # cartesian3dof | ur10e (optional, not wired yet)
+  tip_half: [0.008, 0.012, 0.030]   # half extents of ONE closed gripper tip
+  tip_gap: 0.004             # gap between the two closed tips (along y)
+  # -> pusher width = tip_gap + 4*tip_half_y = 0.052 m
+  mass: 1.5
+  kp: 3000.0                 # position-actuator gain for the x/y/z slides
+  kd: 120.0                  # joint damping (near critical with kp and the masses)
+  yaw_kp: 60.0
+  yaw_kd: 4.0
+  yaw_enabled: true
+  z_home: 0.15
+  gravity_compensation: true # emulate a gravity-compensated arm
+
+workspace:
+  # Region the TCP may travel in.  x_min reaches inside the tray mouth so the
+  # stroke can deposit components past the tray entrance.
+  x_min: -0.42
+  x_max: 0.46
+  y_min: -0.32
+  y_max: 0.32
+  z_travel: 0.06             # lift height for contact-free transfer motions
+  z_search_start: 0.008      # height at which SEARCH_CONTACT begins
+  z_search_min: -0.012       # deepest probing height before declaring "no table"
+  observe_pose: [0.44, -0.34, 0.26]   # parking pose used for re-observation
+  # Larger box: components outside it are counted as lost.
+  safe_x_min: -0.52
+  safe_x_max: 0.52
+  safe_y_min: -0.42
+  safe_y_max: 0.42
+
+controller:
+  desired_force: 3.0         # small POSITIVE normal force (pressing into the table)
+  max_force: 12.0            # saturation on the force *target*
+  safe_max_force: 25.0       # hard safety limit on the *measured* force
+  contact_threshold: 0.8     # measured normal force that declares contact
+  release_threshold: 0.3     # below this, contact is considered lost/released
+  force_ramp_rate: 15.0      # N/s, used for ramp-up and ramp-down
+  force_filter_cutoff_hz: 12.0
+  admittance:
+    # Damping is sized against the *closed-loop* stiffness k_d + k_actuator
+    # (~3060 N/m), not against k_d alone -- see README "Controller tuning".
+    m: 1.0
+    b: 120.0
+    k: 60.0
+  delta_z_limit: 0.006       # |delta_z| saturation [m]
+  delta_z_rate_limit: 0.05   # |d(delta_z)/dt| saturation [m/s]
+  search_velocity: 0.02      # downward probing speed [m/s]
+  sweep_speed: 0.15          # XY sweeping speed [m/s]
+  travel_speed: 0.35         # XY speed for lifted transfer motions [m/s]
+  z_speed: 0.18              # vertical speed for approach / retract [m/s]
+  control_delay_steps: 0     # artificial actuation delay, in control periods
+  force_noise_std: 0.0       # additive Gaussian noise on the measured force
+  force_sensor: contact      # contact | wrist_ft
+  wrist_ft_sign: -1.0        # maps the wrist sensor z to "pressing positive"
+  # Release guard: the desired force must already be ~0 at x_release_line, so
+  # the ramp-down starts release_margin earlier.
+  release_margin: 0.07
+  x_release_line: -0.40
+
+components:
+  count: 3
+  geometry: hex_nut          # hex_nut | cylinder | screw | bolt | washer | mixed
+  size_scale: 1.0
+  mass: {min: 0.004, max: 0.012}
+  friction: {min: 0.40, max: 0.80}
+  spawn: {x_min: -0.12, x_max: 0.40, y_min: -0.24, y_max: 0.24}
+  spawn_mode: uniform        # uniform (planner comparison) | cluster (locked main task)
+  cluster:                   # only used when spawn_mode == cluster
+    center_x: {min: 0.02, max: 0.34}
+    center_y: {min: -0.16, max: 0.16}
+    spread_std: {min: 0.030, max: 0.060}
+    max_radius: 0.11
+  min_separation: 0.035
+  randomize_orientation: true
+  target_clearance: 0.05
+
+perception:
+  backend: ground_truth      # ground_truth | vision
+  camera:
+    pos: [0.62, 0.24, 0.62]  # fixed high-oblique view, never moves
+    lookat: [-0.02, 0.0, 0.0]
+    up: [0.0, 0.0, 1.0]
+    fovy_deg: 58.0
+    width: 640
+    height: 480
+  segmentation: mujoco       # mujoco | color | depth
+  depth_threshold: 0.004     # [m] above the fitted table plane (depth mode)
+  depth_convention: optical_axis   # optical_axis | euclidean (MuJoCo renders the former)
+  color_threshold: 0.55      # grayscale threshold (color mode)
+  plane_offset: 0.003        # back-project onto z = table_top + this [m]
+  grid_res: 0.008            # table-plane occupancy grid resolution [m]
+  typical_component_area: 8.0e-5   # [m^2], used to estimate counts from blob area
+  min_blob_pixels: 6
+  noise:
+    position_std: 0.0
+    dropout: 0.0
+    false_positive_rate: 0.0
+
+planner:
+  name: fixed                # fixed | visual_greedy
+  max_strokes: 20
+  lane_overlap: 0.15         # fraction of the pusher width overlapped between lanes
+  consolidation: true        # final consolidation stroke in front of the tray
+  consolidation_lead: 0.18
+  stroke_end_x: -0.40        # where every sweeping stroke terminates
+  stroke_lead_in: 0.06       # start this far to the +X side of the target cluster
+  tray_margin: 0.05          # keep stroke end points this far inside the tray in y
+  align_yaw: true            # rotate the pusher face perpendicular to the stroke
+  interpolation: trapezoidal # trapezoidal | quintic
+  accel: 0.8                 # [m/s^2] for the trapezoidal profile
+  transfer:
+    # Motion planning for the CONTACT-FREE transfer legs only. The sweeping
+    # stroke is always a straight Cartesian segment -- see sim/planners/rrt.py
+    # for why a sampling planner must not touch it.
+    mode: direct             # direct | rrt
+    step_size: 0.05          # RRT extension length [m]
+    goal_bias: 0.15
+    max_iters: 3000
+    shortcut_iters: 100
+    max_waypoints: 8
+    resolution: 0.005        # segment collision-check spacing [m]
+    clearance: 0.004         # extra margin around obstacles [m]
+    avoid_components: true   # route around parts already detected on the table
+    component_clearance: 0.010
+    component_height: 0.012
+
+  greedy:
+    lambda_path: 0.35
+    mu_risk: 1.20
+    cluster_eps: 0.055
+    n_lane_candidates: 21
+    yaw_candidates: [0.0]
+    capture_halfwidth_pad: 0.004
+    max_no_progress: 4
+
+video:
+  # Recording only. These cameras are invisible to every perception backend.
+  cameras: [scene_cam, overhead_cam]   # panes, left to right
+  width: 640
+  height: 480
+  fps: 25
+  every_n_control_steps: 4   # 100 Hz control / 4 -> 25 fps, i.e. real time
+  hud: true
+  format: mp4                # mp4 | gif
+  quality: 7                 # libx264 quality, 0-10
+  force_gauge_max: null      # HUD force-gauge full scale [N]; null -> 2.5 * desired_force
+  extra_cameras:
+    overhead_cam:
+      pos: [-0.02, 0.0, 1.05]
+      lookat: [-0.02, 0.0, 0.0]
+      up: [0.0, 1.0, 0.0]    # +Y up in frame -> sweep direction points left
+      fovy_deg: 52.0
+    side_cam:
+      pos: [0.05, -0.80, 0.17]
+      lookat: [-0.14, 0.0, 0.02]
+      up: [0.0, 0.0, 1.0]
+      fovy_deg: 40.0
+    follow_cam:
+      mode: targetbody       # stays put, rotates to keep the tool centred
+      target: tool
+      pos: [0.30, -0.55, 0.40]
+      fovy_deg: 45.0
+
+metrics:
+  # Failure-mode detection thresholds (see README "Failure modes").
+  jam_force_threshold: 4.0      # [N] tangential force that counts as a jam
+  jam_min_duration: 0.08        # [s] it must be sustained for
+  ride_over_move_threshold: 0.004   # [m] below this a swept component "did not move"
+  ride_over_pad: 0.002          # [m] widening of the capture band for the test
+  touchdown_window: 0.5         # [s] of SWEEP included in the touchdown transient
+
+episode:
+  success_collection_rate: 1.0
+  settle_time: 0.4
+  stroke_timeout: 60.0
+
+logging:
+  out_dir: runs
+  save_plots: true
+  save_trace: true
+
+dataset:
+  out_dir: datasets/sweep_v1
+  wrench_history_steps: 10   # control steps of 6-axis wrench stored per observation
+  save_images: true
+  image_format: png
+  only_successful: true

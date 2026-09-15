@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sweepsim"
+version = "0.1.0"
+description = "MuJoCo prototype for tabletop component collection by gripper-tip pushing with hybrid force/position control"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "mujoco>=3.1",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "PyYAML>=6.0",
+    "Pillow>=10.0",
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[tool.setuptools.packages.find]
+include = ["sim*"]
+
+[tool.setuptools.package-data]
+sim = ["../configs/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
