@@ -24,7 +24,7 @@ class ActDatasetWriter:
             raise ValueError("one ACT action target is required per observation")
         episode_dir = self.root / episode_id
         episode_dir.mkdir(parents=True, exist_ok=True)
-        overhead, wrist = [], []
+        overhead, wrist, inspection = [], [], []
         for i, obs in enumerate(observations):
             overhead_path = episode_dir / f"overhead_{i:05d}.png"
             wrist_path = episode_dir / f"wrist_{i:05d}.png"
@@ -32,13 +32,20 @@ class ActDatasetWriter:
             Image.fromarray(np.asarray(obs["wrist"], dtype=np.uint8)).save(wrist_path)
             overhead.append(str(overhead_path.relative_to(self.root)))
             wrist.append(str(wrist_path.relative_to(self.root)))
+            inspection_image = obs.get("inspection")
+            if inspection_image is None:
+                inspection.append("")
+            else:
+                inspection_path = episode_dir / f"inspection_{i:05d}.png"
+                Image.fromarray(np.asarray(inspection_image, dtype=np.uint8)).save(inspection_path)
+                inspection.append(str(inspection_path.relative_to(self.root)))
         states = np.stack([o["state"] for o in observations]).astype(np.float32)
         env_states = np.stack([o["environment_state"] for o in observations]).astype(np.float32)
         np.savez_compressed(episode_dir / "arrays.npz", state=states,
                             environment_state=env_states,
                             action=np.asarray(actions, dtype=np.float32))
         record = {"episode_id": episode_id, "success": bool(success),
-                  "overhead": overhead, "wrist": wrist,
+                  "overhead": overhead, "wrist": wrist, "inspection": inspection,
                   "arrays": str((episode_dir / "arrays.npz").relative_to(self.root)),
                   **metadata}
         with self.manifest.open("a", encoding="utf-8") as handle:

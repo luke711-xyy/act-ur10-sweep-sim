@@ -6,7 +6,8 @@ its **fixed brush directly as a pusher** to collect small industrial components
 edge.
 
 There is no WAM and no grasping DOF. The scene uses a portable six-joint UR10/CB3-like
-arm, a fixed brush, an overhead camera, and a tool-mounted wrist camera. The project
+arm, a fixed brush, an overhead camera, a tool-mounted wrist camera, and a separate
+observation-only oblique camera. The project
 keeps the original Cartesian pusher/planner implementation as a legacy diagnostic path;
 the default ACT path is the UR10 brush scene.
 
@@ -72,6 +73,34 @@ python -m sim.web.run --config configs/default.yaml
 # tests
 pytest -q                     # or: python tests/run_tests.py
 ```
+
+### Local robot-learning workbench
+
+The local browser workbench is the integration surface for the current MuJoCo
+prototype:
+
+```bash
+python -m sim.web.run --config configs/default.yaml
+# open http://127.0.0.1:8765/
+```
+
+It contains five connected areas: live simulation views, saved/preview expert
+episode playback, local ACT training jobs, MuJoCo inference jobs, and a bounded
+parameter editor. The simulation shows the fixed perception overhead camera,
+the ACT wrist camera, and a third **inspection-only** oblique-front-above
+camera. The third camera is rendered and stored for human review but is never
+included in `act.observation_keys` or passed to the ACT policy.
+
+“Generate expert preview” runs the existing force-controlled expert once and
+stores it under `runs/workbench_previews/`; this is separate from the formal
+dataset, so preview failures (including excessive normal force or a component
+sliding out of the safe workspace) remain visible without silently becoming
+training labels. Training and inference are local subprocesses with captured
+logs and stop controls; the panel does not upload data or control a real arm.
+
+For richer dataset browsing, video playback, action plots, filtering, and
+annotations, use the upstream [LeRobot Dataset Visualizer](https://huggingface.co/spaces/lerobot/visualize_dataset)
+instead of duplicating that functionality in this project.
 
 Every run writes a timestamped directory under `runs/` containing the exact
 configuration used, metrics, phase events, the dense control trace and the plots.
@@ -499,6 +528,7 @@ python -m sim.record_video --compare fixed global_sweep visual_greedy \
 | `overhead_cam` | top-down; best for reading stroke geometry and the tray |
 | `side_cam` | low side view; best for seeing tip–table contact and parts tipping |
 | `follow_cam` | fixed position, rotates to keep the tool centred |
+| `inspection_cam` | oblique front-above human inspection view; never an ACT input |
 
 Every frame carries a HUD: simulated time, stroke index, phase, planner, collected count,
 and a normal-force gauge showing measured fill against a tick at the setpoint, plus a

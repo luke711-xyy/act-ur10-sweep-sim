@@ -209,6 +209,11 @@ video:
       target: tool
       pos: [0.30, -0.55, 0.40]
       fovy_deg: 45.0
+    inspection_cam:
+      pos: [0.52, -0.62, 0.58]
+      lookat: [-0.02, 0.0, 0.0]
+      up: [0.0, 0.0, 1.0]
+      fovy_deg: 52.0
 
 act:
   enabled: true

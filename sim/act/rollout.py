@@ -64,6 +64,11 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                                   0, 255).astype(np.uint8),
                 "state": obs["observation.state"],
                 "environment_state": obs["observation.environment_state"],
+                # Observation-only camera: stored beside demonstrations for
+                # human inspection, but absent from the ACT input contract.
+                "inspection": np.asarray(env.render_rgb("inspection_cam",
+                                                         size=builder.spec.image_size),
+                                           dtype=np.uint8),
             })
             targets.append(action.copy())
 
