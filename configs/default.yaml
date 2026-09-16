@@ -37,10 +37,17 @@ target:
 
 end_effector:
   type: ur10e                # ur10e Menagerie model | cartesian3dof (legacy)
-  brush_width: 0.12
-  brush_depth: 0.024
-  brush_height: 0.016
-  brush_stem_length: 0.15       # reach from the UR10e flange down to the table
+  # Thin rectangular sweeping plate: broad transverse face, visible vertical
+  # height, and a small front-to-back thickness.
+  brush_width: 0.14
+  brush_depth: 0.016
+  brush_height: 0.032
+  # Chosen with the plate height so the plate bottom/TCP stays at the existing
+  # table-contact height and z_home remains unchanged.
+  brush_stem_length: 0.134
+  # Coaxial tool mount: only the camera uses the side adapter; the brush must
+  # rotate around the terminal wrist axis with the end effector.
+  brush_mount_pos: [0.0, 0.10, 0.0]
   brush_mass: 0.25
   base_pos: [0.62, 0.0, 0.22]     # raised side mount; keeps the tray lane reachable
   z_home: 0.18
@@ -61,19 +68,17 @@ end_effector:
   mass: 0.25
   tip_half: [0.008, 0.012, 0.030]
   tip_gap: 0.004
-  # Eye-in-hand view: mounted on the front/lower side of the flange/tool stack
-  # and aimed at the contact patch.  It remains body-attached with the tool.
+  # Eye-in-hand view: a short side adapter beside the final wrist joint.  The
+  # pose is in wrist_3_link coordinates, not brush/tool coordinates.
   wrist_camera:
-    # The lens sits on the front side of the flange/tool stack, below the
-    # wrist housing and just above the brush.  This mirrors a UR10 wrist-camera
-    # adapter: the tool remains in view while the optical axis points at the
-    # work surface instead of into the robot's own wrist shell.
-    pos: [0.12, 0.12, -0.05]
-    # MuJoCo camera looks along local -Z.  This frame looks slightly ahead of
-    # the brush in the sweep direction while keeping the brush in the lower
-    # part of the image and the workpieces in front of it.
-    xyaxes: [-0.3939193, 0.919145, 0.0, -0.3071316, -0.1316278, 0.9425202]
-    fovy_deg: 74.0
+    # Short side-upper adapter beside the terminal joint, matching the
+    # physical arrangement in the design sketch.  The camera is close to the
+    # joint but offset far enough to look diagonally down at the plate.
+    pos: [0.18, 0.10, 0.12]
+    # Aimed at the brush/contact region in the wrist_3_link frame.  MuJoCo
+    # cameras look along local -Z and accept the local X/Y axes here.
+    xyaxes: [-0.623370, 0.781927, 0.0, -0.361445, -0.288152, 0.886750]
+    fovy_deg: 68.0
 
 workspace:
   # Region the TCP may travel in.  x_min reaches inside the tray mouth so the
@@ -215,10 +220,12 @@ video:
     overhead_cam:
       # Kept under the historical ``overhead_cam`` name for the ACT input
       # contract; geometrically this is now a front-oblique global view.
-      pos: [0.30, -0.52, 0.56]
+      # Opposite side from the prior negative-Y view, and slightly higher, so
+      # the forearm no longer sits over the brush stroke and components.
+      pos: [0.30, 0.62, 0.80]
       lookat: [-0.04, 0.0, 0.0]
       up: [0.0, 0.0, 1.0]
-      fovy_deg: 44.0
+      fovy_deg: 48.0
     side_cam:
       pos: [0.05, -0.80, 0.17]
       lookat: [-0.14, 0.0, 0.02]

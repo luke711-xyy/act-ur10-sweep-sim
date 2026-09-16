@@ -42,14 +42,53 @@ def test_wrist_camera_is_pitched_towards_tool_contact_region():
     cfg = load_config()
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
     root = ET.fromstring(xml)
-    camera = root.find(".//body[@name='tool']/camera[@name='wrist_cam']")
+    camera = root.find(".//body[@name='wrist_3_link']/camera[@name='wrist_cam']")
     assert camera is not None
     axes = np.fromstring(camera.get("xyaxes", ""), sep=" ")
     assert axes.size == 6
-    # MuJoCo cameras look along local -Z.  With XY axes defining the camera
-    # frame, -cross(X, Y) must have a downward component in the tool frame.
+    # The camera is expressed in the final wrist-link frame.  The official
+    # attachment and the reset pose put the brush contact region near
+    # ``[0, -0.066, 0]`` in this local frame.
     forward = -np.cross(axes[:3], axes[3:])
-    assert forward[2] < -0.20
+    camera_pos = np.fromstring(camera.get("pos", ""), sep=" ")
+    contact = np.array([0.0, -0.066, 0.0])
+    to_contact = contact - camera_pos
+    to_contact /= np.linalg.norm(to_contact)
+    assert np.linalg.norm(camera_pos) < 0.30
+    assert float(np.dot(forward, to_contact)) > 0.85
+
+
+def test_global_act_camera_is_on_the_opposite_elevated_side():
+    cfg = load_config()
+    camera = cfg.video.extra_cameras.overhead_cam
+    pos = np.asarray(camera.pos, dtype=float)
+    # The previous view was on negative Y and let the forearm cover the stroke.
+    assert pos[1] > 0.30
+    assert pos[2] > 0.60
+
+
+def test_wrist_camera_is_mounted_beside_final_wrist_link():
+    cfg = load_config()
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    root = ET.fromstring(xml)
+    wrist3 = root.find(".//body[@name='wrist_3_link']")
+    assert wrist3 is not None
+    # The real-style adapter is fixed beside the final wrist joint, not on the
+    # brush child body.  The latter made the simulated lens appear detached
+    # from the end-effector in the preview.
+    assert wrist3.find("./camera[@name='wrist_cam']") is not None
+    assert root.find(".//body[@name='tool']/camera[@name='wrist_cam']") is None
+
+
+def test_brush_plate_is_coaxial_with_the_terminal_wrist_joint():
+    cfg = load_config()
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    root = ET.fromstring(xml)
+    tool = root.find(".//body[@name='tool']")
+    assert tool is not None
+    mount = np.fromstring(tool.get("pos", ""), sep=" ")
+    assert mount.size == 3
+    np.testing.assert_allclose(mount, [0.0, 0.1, 0.0], atol=1e-6)
 
 
 def test_ur10e_scene_loads_with_vendored_menagerie_assets():
@@ -73,6 +112,20 @@ def test_ur10e_brush_width_is_transverse_to_the_sweep_direction():
          cfg.end_effector.brush_height / 2.0],
     )
     assert pusher_width(cfg) == pytest.approx(float(cfg.end_effector.brush_width))
+
+
+def test_ur10e_brush_head_has_a_plate_like_height_and_width():
+    cfg = load_config()
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    model = mujoco.MjModel.from_xml_string(xml, assets=scene_assets())
+    brush_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "brush_head")
+    depth, width, height = 2.0 * model.geom_size[brush_id]
+    # A plate needs a visible vertical face, not a thin lip.  Keep the
+    # sweeping width dominant while making height materially larger than depth.
+    assert width >= 0.14
+    assert height >= 0.03
+    assert depth <= 0.02
+    assert height > depth
 
 
 def test_ur10e_chain_has_explicit_gravity_compensation_for_position_control():
