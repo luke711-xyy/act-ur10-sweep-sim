@@ -401,6 +401,21 @@ def test_default_official_ur10e_demo_uses_calibrated_force_ceiling():
     assert max(float(row["normal_force"]) for row in result.trace) < float(cfg.controller.safe_max_force)
 
 
+def test_default_expert_reaches_contact_before_approach_dominates_episode():
+    from sim.act.rollout import run_expert_episode
+
+    cfg = load_config(overrides=["sim.real_time=false", "components.count=1"])
+    result = run_expert_episode(cfg, seed=12345, collect_observations=False)
+    first_contact = next(row for row in result.trace if row["contact"])
+
+    # The demonstration should spend most of its budget on the intentional
+    # horizontal sweep, not on a long airborne descent.  Keep this as an
+    # end-to-end assertion so changing either the home height or descent speed
+    # cannot silently restore the old imbalanced timing.
+    assert float(first_contact["t"]) <= 5.0
+    assert float(first_contact["t"]) / float(result.elapsed) < 0.50
+
+
 def test_ur10e_can_reach_expert_tray_lane_from_home():
     cfg = load_config()
     env = SweepEnv(cfg, seed=12345)
