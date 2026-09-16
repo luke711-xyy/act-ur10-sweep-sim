@@ -1,5 +1,7 @@
 """Behavior tests for the local robot-learning workbench."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -96,6 +98,7 @@ def test_http_contract_includes_preview_job_and_config_routes():
     paths = {route.path for route in app.routes}
     assert {"/api/preview", "/api/preview/{preview_id}",
             "/api/preview/{preview_id}/frame/{frame_index}",
+            "/api/episodes/{episode_id}/signals",
             "/api/jobs/train", "/api/jobs/inference",
             "/api/config/apply"} <= paths
 
@@ -114,12 +117,53 @@ def test_ur10_ik_stays_continuous_for_a_small_tcp_move():
     assert np.max(np.abs(q1 - q0)) < 0.05
 
 
-def test_live_and_demo_views_have_separate_dom_targets():
+def test_playback_uses_the_live_view_canvas_and_renders_fz():
     app = create_app(load_config())
     index = next(route for route in app.routes if getattr(route, "path", None) == "/")
     html = index.endpoint()
-    assert 'id="demoOverheadImage"' in html
-    assert 'id="demoWristImage"' in html
-    assert 'id="demoInspectionImage"' in html
+    assert 'id="demoOverheadImage"' not in html
+    assert 'id="demoWristImage"' not in html
+    assert 'id="demoInspectionImage"' not in html
+    assert 'class="demo-views"' not in html
     assert "image('overheadImage',f.overhead)" in html
-    assert "image('demoOverheadImage',f.overhead)" in html
+    assert "image('wristImage',f.wrist)" in html
+    assert "image('inspectionImage',f.inspection)" in html
+    assert "renderFz" in html
+    assert "/api/episodes/${encodeURIComponent(id)}/signals" in html
+
+
+def test_workbench_persists_and_reads_preview_fz_trace(tmp_path, monkeypatch):
+    image = np.zeros((12, 12, 3), dtype=np.uint8)
+    observation = {
+        "overhead": image,
+        "wrist": image,
+        "inspection": image,
+        "state": np.zeros(7, dtype=np.float32),
+        "environment_state": np.zeros(3, dtype=np.float32),
+    }
+    result = SimpleNamespace(
+        observations=[observation],
+        actions=np.zeros((1, 4), dtype=np.float32),
+        success=True,
+        failure_reason="",
+        trace=[
+            {"t": 0.01, "normal_force": 0.0, "contact": False},
+            {"t": 0.02, "normal_force": 0.75, "contact": True},
+        ],
+    )
+    monkeypatch.setattr("sim.web.workbench.run_expert_episode",
+                        lambda cfg, seed, collect_observations: result)
+    preview_root = tmp_path / "previews"
+    state = WorkbenchState(load_config(), dataset_root=tmp_path / "dataset",
+                           preview_root=preview_root)
+
+    metadata = state.build_preview(seed=8, count=1)
+
+    signal_path = preview_root / metadata["episode_id"] / "signals.json"
+    assert signal_path.is_file()
+    assert state.load_episode_signals(metadata["episode_id"]) == {
+        "episode_id": metadata["episode_id"],
+        "t": [0.01, 0.02],
+        "fz": [0.0, 0.75],
+        "contact": [False, True],
+    }

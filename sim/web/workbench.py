@@ -105,6 +105,26 @@ class WorkbenchState:
             frame["inspection"] = _image(root, inspection[frame_index])
         return frame
 
+    def load_episode_signals(self, episode_id: str) -> dict:
+        """Load the persisted full-run force trace for an episode.
+
+        Older dataset episodes do not have a trace sidecar.  Returning an
+        empty, well-shaped response keeps the workbench useful for those
+        episodes while making the provenance of the plotted signal explicit.
+        """
+        root, rec, _ = self._find(episode_id)
+        path = root / rec["episode_id"] / "signals.json"
+        if not path.is_file():
+            return {"episode_id": rec["episode_id"], "t": [], "fz": [],
+                    "contact": []}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            "episode_id": rec["episode_id"],
+            "t": [float(value) for value in data.get("t", [])],
+            "fz": [float(value) for value in data.get("fz", [])],
+            "contact": [bool(value) for value in data.get("contact", [])],
+        }
+
     def build_preview(self, seed: int, count: int | None = None) -> dict:
         local_cfg = self.cfg.copy()
         if count is not None:
@@ -139,4 +159,11 @@ class WorkbenchState:
             (self.preview_root / "manifest.jsonl").write_text(
                 "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in lines),
                 encoding="utf-8")
+        signals = {
+            "t": [float(row["t"]) for row in result.trace],
+            "fz": [float(row["normal_force"]) for row in result.trace],
+            "contact": [bool(row["contact"]) for row in result.trace],
+        }
+        (self.preview_root / episode_id / "signals.json").write_text(
+            json.dumps(signals, ensure_ascii=False), encoding="utf-8")
         return self.episode_metadata(episode_id)
