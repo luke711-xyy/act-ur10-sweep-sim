@@ -779,10 +779,11 @@ is suitable for validating the ACT observation/action plumbing and the hybrid
 force-control loop, but it is not a calibrated hardware model.
 The model is mounted just beyond the table's +X edge and starts from an above-table IK
 seed so the human inspection view does not show a link passing through the work surface.
-The task-specific brush, TCP, wrist F/T sites and wrist camera are attached at the model's
-`attachment_site`. This is still an ACT-feasibility model rather than a calibrated hardware
-digital twin: the Menagerie README notes that actuator values are not carefully tuned, and
-the brush is a rigid task fixture with no gripper DOF.
+The fixed-closed Robotiq 2F-85, handled brush, TCP, wrist F/T site and wrist camera are
+attached at the model's `attachment_site`. The official 2F-85 meshes are frozen at their
+closed pose: the handle is visibly held between the pads, but there are no finger joints or
+gripper actuator. This remains an ACT-feasibility model rather than a calibrated hardware
+digital twin; the Menagerie README notes that actuator values are not carefully tuned.
 
 The current adapter solves damped-least-squares IK on the official tool frame, then sends
 bounded joint-position targets to the Menagerie actuators. The force-control framework
@@ -806,11 +807,11 @@ Read this before quoting any number from this simulator.
    calibrated hardware digital twin: actuator gains, contact parameters and the rigid
    brush fixture remain feasibility-level settings, and `controller.control_delay_steps`
    is still a crude stand-in for hardware latency.
-2. The gripper is **permanently closed** and rigid: no finger joint, no finger compliance,
-   no pad deformation. There is no grasping degree of freedom anywhere in the model, by
-   construction (a unit test enforces this).
-3. The TCP is defined as the **bottom centre point between the two closed tips**, which is
-   also the origin of the body carrying the F/T site.
+2. The Robotiq 2F-85 is **permanently closed** and rigid: its official visual meshes are
+   frozen around a centred brush handle, with no finger joint, finger compliance, pad
+   deformation, or grasping degree of freedom (a unit test enforces this).
+3. The TCP is defined at the **bottom centre of the high, thin brush plate**. The simulated
+   F/T site remains at the UR10 attachment flange, upstream of the fixed gripper.
 
 **Contact and components**
 

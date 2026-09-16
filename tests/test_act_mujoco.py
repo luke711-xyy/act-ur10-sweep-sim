@@ -47,15 +47,77 @@ def test_wrist_camera_is_pitched_towards_tool_contact_region():
     axes = np.fromstring(camera.get("xyaxes", ""), sep=" ")
     assert axes.size == 6
     # The camera is expressed in the final wrist-link frame.  The official
-    # attachment and the reset pose put the brush contact region near
-    # ``[0, -0.066, 0]`` in this local frame.
+    # attachment and the new gripper/handle stack put the plate centre near
+    # ``[0, -0.16, 0]`` in this local frame.
     forward = -np.cross(axes[:3], axes[3:])
     camera_pos = np.fromstring(camera.get("pos", ""), sep=" ")
-    contact = np.array([0.0, -0.066, 0.0])
+    contact = np.array([0.0, -0.16, 0.0])
     to_contact = contact - camera_pos
     to_contact /= np.linalg.norm(to_contact)
     assert np.linalg.norm(camera_pos) < 0.30
     assert float(np.dot(forward, to_contact)) > 0.85
+
+
+def test_wrist_camera_sees_the_brush_thin_edge_as_a_vertical_divider():
+    cfg = load_config()
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    root = ET.fromstring(xml)
+    camera = root.find(".//body[@name='wrist_3_link']/camera[@name='wrist_cam']")
+    assert camera is not None
+    axes = np.fromstring(camera.get("xyaxes", ""), sep=" ")
+    camera_x, camera_y = axes[:3], axes[3:]
+    forward = -np.cross(camera_x, camera_y)
+
+    # In the wrist_3_link frame, the plate width points along local Z and its
+    # vertical height points along local Y.  Looking mostly along the width
+    # collapses the broad face to a thin edge; aligning height with image Y
+    # makes that edge divide the image into left and right halves.
+    plate_width_axis = np.array([0.0, 0.0, 1.0])
+    plate_height_axis = np.array([0.0, 1.0, 0.0])
+    assert abs(float(np.dot(forward, plate_width_axis))) > 0.80
+    assert abs(float(np.dot(camera_x, plate_height_axis))) < 0.10
+    assert abs(float(np.dot(camera_y, plate_height_axis))) > 0.75
+
+
+def test_ur10e_mounts_a_fixed_closed_robotiq_gripper():
+    cfg = load_config()
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    root = ET.fromstring(xml)
+    gripper = root.find(".//body[@name='robotiq_2f85']")
+    assert gripper is not None
+
+    # The approved ACT setup uses the official Robotiq meshes at one frozen
+    # closed pose.  It must not add a grasp action or passive finger dynamics.
+    assert gripper.findall(".//joint") == []
+    actuator_names = {node.get("name", "") for node in root.find("actuator")}
+    assert "fingers_actuator" not in actuator_names
+    mesh_names = {node.get("mesh", "") for node in gripper.findall(".//geom")}
+    assert {"robotiq_base", "robotiq_driver", "robotiq_pad"} <= mesh_names
+
+
+def test_brush_handle_is_centered_between_closed_gripper_pads():
+    cfg = load_config()
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    root = ET.fromstring(xml)
+    gripper = root.find(".//body[@name='robotiq_2f85']")
+    assert gripper is not None
+    handle = gripper.find(".//geom[@name='brush_handle']")
+    left = gripper.find(".//geom[@name='robotiq_left_pad_contact']")
+    right = gripper.find(".//geom[@name='robotiq_right_pad_contact']")
+    assert handle is not None and left is not None and right is not None
+
+    handle_pos = np.fromstring(handle.get("pos", ""), sep=" ")
+    handle_size = np.fromstring(handle.get("size", ""), sep=" ")
+    left_pos = np.fromstring(left.get("pos", ""), sep=" ")
+    right_pos = np.fromstring(right.get("pos", ""), sep=" ")
+    left_size = np.fromstring(left.get("size", ""), sep=" ")
+    right_size = np.fromstring(right.get("size", ""), sep=" ")
+    assert handle_pos[0] == pytest.approx(0.0)
+    assert left_pos[0] < handle_pos[0] < right_pos[0]
+    assert left_pos[0] + left_size[0] == pytest.approx(-handle_size[0], abs=1e-6)
+    assert right_pos[0] - right_size[0] == pytest.approx(handle_size[0], abs=1e-6)
+    assert abs(left_pos[2] - handle_pos[2]) < handle_size[2]
+    assert abs(right_pos[2] - handle_pos[2]) < handle_size[2]
 
 
 def test_global_act_camera_is_on_the_opposite_elevated_side():
@@ -123,8 +185,8 @@ def test_ur10e_brush_head_has_a_plate_like_height_and_width():
     # A plate needs a visible vertical face, not a thin lip.  Keep the
     # sweeping width dominant while making height materially larger than depth.
     assert width >= 0.14
-    assert height >= 0.03
-    assert depth <= 0.02
+    assert height >= 0.06
+    assert depth <= 0.01
     assert height > depth
 
 
@@ -183,7 +245,10 @@ def test_ur10e_tcp_is_brush_bottom_and_contacts_at_search_height():
                         - env.data.geom_xmat[brush_id].reshape(3, 3)[:, 2]
                         * env.model.geom_size[brush_id, 2])
         np.testing.assert_allclose(brush_bottom, env.tcp(), atol=1e-5)
-        for _ in range(180):
+        # The longer gripper/handle stack needs slightly more actuator-settle
+        # time than the former short rigid stem before the plate reaches the
+        # table; the assertion remains about real measured contact.
+        for _ in range(220):
             env.step_control(Command(0.42, 0.0, float(cfg.workspace.z_search_start), 0.0))
         assert env.tcp()[2] < 0.01
         assert env.normal_force() > 0.0

@@ -38,24 +38,69 @@ from .ur10_mjcf import add_ur10_actuators, add_ur10_arm, add_ur10_sensors
 
 MENAGERIE_ROOT = Path(__file__).resolve().parent / "assets" / "universal_robots_ur10e"
 MENAGERIE_XML = MENAGERIE_ROOT / "ur10e.xml"
+ROBOTIQ_ROOT = Path(__file__).resolve().parent / "assets" / "robotiq_2f85"
+ROBOTIQ_MESH_ROOT = ROBOTIQ_ROOT / "assets"
 UR10_MODEL_TYPES = {"ur10_cb3", "ur10e", "ur10e_menagerie"}
 
 
+# Official Robotiq 2F-85 meshes flattened at the model's fully closed pose.
+# Keeping these as welded visual geoms avoids adding finger dynamics or an ACT
+# grasp action, while retaining the real gripper silhouette and proportions.
+ROBOTIQ_FIXED_VISUALS = (
+    ("base_mount", "base_mount", (-0.000361, 0.000085, 0.006941),
+     (-0.000522, 0.706100, 0.000524, 0.708112), "robotiq_black"),
+    ("base", "base", (-0.000027, 0.0, 0.046267),
+     (0.707106, -0.001081, 0.001081, -0.707106), "robotiq_black"),
+    ("right_driver", "driver", (0.042458, 0.0, 0.078963),
+     (-0.248527, -0.661993, 0.661993, 0.248527), "robotiq_gray"),
+    ("right_coupler", "coupler", (0.041652, 0.0, 0.103568),
+     (0.947287, 0.0, -0.320386, 0.0), "robotiq_black"),
+    ("right_spring_link", "spring_link", (0.011159, 0.0, 0.099592),
+     (0.999333, 0.0, -0.036509, 0.0), "robotiq_black"),
+    ("right_follower", "follower", (0.015373, 0.0, 0.135148),
+     (0.695766, 0.126131, -0.126131, -0.695766), "robotiq_metal"),
+    ("right_pad", "pad", (0.004547, 0.0, 0.154449),
+     (0.999926, 0.0, -0.012157, 0.0), "robotiq_metal"),
+    ("right_silicone_pad", "silicone_pad", (0.001248, 0.0, 0.154369),
+     (0.999926, 0.0, -0.012157, 0.0), "robotiq_silicone"),
+    ("left_driver", "driver", (-0.042458, 0.0, 0.078963),
+     (0.248526, 0.661993, 0.661993, 0.248526), "robotiq_gray"),
+    ("left_coupler", "coupler", (-0.041652, 0.0, 0.103568),
+     (0.0, 0.320385, 0.0, 0.947287), "robotiq_black"),
+    ("left_spring_link", "spring_link", (-0.011159, 0.0, 0.099592),
+     (0.0, 0.036514, 0.0, 0.999333), "robotiq_black"),
+    ("left_follower", "follower", (-0.015372, 0.0, 0.135148),
+     (0.695763, 0.126151, 0.126151, 0.695763), "robotiq_metal"),
+    ("left_pad", "pad", (-0.004545, 0.0, 0.154449),
+     (0.0, 0.012186, 0.0, 0.999926), "robotiq_metal"),
+    ("left_silicone_pad", "silicone_pad", (-0.001246, 0.0, 0.154369),
+     (0.0, 0.012186, 0.0, 0.999926), "robotiq_silicone"),
+)
+
+
 def scene_assets() -> Dict[str, bytes]:
-    """Return the vendored MuJoCo Menagerie assets for ``from_xml_string``.
+    """Return vendored UR10e and Robotiq assets for ``from_xml_string``.
 
     MuJoCo's string loader has no filesystem-relative asset directory, so the
     generated scene passes the mesh files as an in-memory virtual file system.
     The returned keys intentionally retain the ``assets/`` prefix used by the
     Menagerie MJCF's ``meshdir`` declaration.
     """
-    if not MENAGERIE_ROOT.is_dir():
-        return {}
-    return {
-        str(path.relative_to(MENAGERIE_ROOT)): path.read_bytes()
-        for path in MENAGERIE_ROOT.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".obj", ".stl", ".dae", ".png", ".jpg", ".jpeg"}
-    }
+    suffixes = {".obj", ".stl", ".dae", ".png", ".jpg", ".jpeg"}
+    assets: Dict[str, bytes] = {}
+    if MENAGERIE_ROOT.is_dir():
+        assets.update({
+            str(path.relative_to(MENAGERIE_ROOT)): path.read_bytes()
+            for path in MENAGERIE_ROOT.rglob("*")
+            if path.is_file() and path.suffix.lower() in suffixes
+        })
+    if ROBOTIQ_MESH_ROOT.is_dir():
+        assets.update({
+            f"assets/robotiq_2f85/{path.name}": path.read_bytes()
+            for path in ROBOTIQ_MESH_ROOT.iterdir()
+            if path.is_file() and path.suffix.lower() in suffixes
+        })
+    return assets
 
 
 def _uses_menagerie(cfg) -> bool:
@@ -267,7 +312,7 @@ def _menagerie_root() -> ET.Element:
 
 def _add_menagerie_defaults_and_assets(root: ET.Element, default: ET.Element,
                                        asset: ET.Element) -> None:
-    """Merge the official Menagerie UR10e visual/dynamics declarations."""
+    """Merge the official Menagerie UR10e and fixed Robotiq declarations."""
     source = _menagerie_root()
     source_default = source.find("default")
     if source_default is not None:
@@ -277,6 +322,73 @@ def _add_menagerie_defaults_and_assets(root: ET.Element, default: ET.Element,
     if source_asset is not None:
         for child in source_asset:
             asset.append(deepcopy(child))
+
+    _sub(asset, "material", name="robotiq_black", rgba=(0.149, 0.149, 0.149, 1.0))
+    _sub(asset, "material", name="robotiq_gray", rgba=(0.4627, 0.4627, 0.4627, 1.0))
+    _sub(asset, "material", name="robotiq_metal", rgba=(0.58, 0.58, 0.58, 1.0))
+    _sub(asset, "material", name="robotiq_silicone", rgba=(0.1882, 0.1882, 0.1882, 1.0))
+    for mesh_name in ("base_mount", "base", "driver", "coupler", "follower",
+                      "pad", "silicone_pad", "spring_link"):
+        _sub(asset, "mesh", name=f"robotiq_{mesh_name}",
+             file=f"robotiq_2f85/{mesh_name}.stl", scale=(0.001, 0.001, 0.001))
+
+
+def _add_fixed_robotiq_2f85(tool: ET.Element, cfg) -> None:
+    """Mount a welded, fully closed 2F-85 that visibly holds the brush handle."""
+    ee = cfg.end_effector
+    brush_height = float(ee.brush_height)
+    brush_width = float(ee.brush_width)
+    brush_depth = float(ee.brush_depth)
+    handle_thickness = float(ee.get("brush_handle_thickness", 0.012))
+    handle_depth = float(ee.get("brush_handle_depth", 0.024))
+    handle_length = float(ee.get("brush_handle_length", 0.10))
+    handle_center_z = float(ee.get("brush_handle_center_z", 0.18))
+    plate_center_z = handle_center_z + handle_length / 2.0 + brush_height / 2.0
+
+    if min(brush_height, brush_width, brush_depth, handle_thickness,
+           handle_depth, handle_length) <= 0.0:
+        raise ValueError("brush and handle dimensions must be positive")
+
+    # The official gripper extends along +Z.  Rotating it 180 degrees about X
+    # aligns +Z with the existing UR10 task tool's downward axis.
+    gripper = _sub(tool, "body", name="robotiq_2f85", quat=(0.0, 1.0, 0.0, 0.0))
+    total_mass = float(ee.get("gripper_mass", 0.90)) + float(ee.brush_mass)
+    _sub(gripper, "inertial", pos=(0.0, 0.0, 0.13), mass=total_mass,
+         diaginertia=(0.0045, 0.0045, 0.0025))
+
+    for part_name, mesh_name, pos, quat, material in ROBOTIQ_FIXED_VISUALS:
+        _sub(gripper, "geom", name=f"robotiq_{part_name}_visual", type="mesh",
+             mesh=f"robotiq_{mesh_name}", pos=pos, quat=quat, material=material,
+             contype=0, conaffinity=0, group=2, mass=0.0)
+
+    # Invisible pad proxies document and test the frozen closed grasp.  Their
+    # inner faces touch the 12 mm handle exactly; they do not add collisions or
+    # finger mechanics to this ACT-feasibility model.
+    pad_center_x = handle_thickness / 2.0 + 0.002
+    for side, x in (("left", -pad_center_x), ("right", pad_center_x)):
+        _sub(gripper, "geom", name=f"robotiq_{side}_pad_contact", type="box",
+             size=(0.002, handle_depth / 2.0, 0.018), pos=(x, 0.0, 0.155),
+             contype=0, conaffinity=0, group=5, rgba=(0.0, 0.0, 0.0, 0.0), mass=0.0)
+
+    _sub(gripper, "geom", name="brush_handle", type="box",
+         size=(handle_thickness / 2.0, handle_depth / 2.0, handle_length / 2.0),
+         pos=(0.0, 0.0, handle_center_z), material="mat_tip",
+         contype=0, conaffinity=0, group=0, mass=0.0)
+    _sub(gripper, "geom", name="brush_head", type="box",
+         # The stroke runs along -X, so the wide plate spans gripper Y.  In the
+         # wrist frame that width points along local Z, directly at the camera.
+         size=(brush_depth / 2.0, brush_width / 2.0, brush_height / 2.0),
+         pos=(0.0, 0.0, plate_center_z), quat=(0.0, 1.0, 0.0, 0.0),
+         material="mat_brush",
+         friction=ee.get("brush_friction", (0.65, 0.01, 0.0004)),
+         condim=4, margin=0.00005, mass=0.0)
+    _sub(gripper, "site", name="tcp_site",
+         pos=(0.0, 0.0, plate_center_z + brush_height / 2.0),
+         # Cancel the gripper's 180-degree mounting rotation so the controller
+         # retains its historical level-tool frame while the physical brush
+         # still extends along the gripper's downward +Z direction.
+         quat=(0.0, 1.0, 0.0, 0.0), size=(0.003,),
+         rgba=(0.1, 1.0, 0.1, 0.4))
 
 
 def _add_menagerie_ur10e(world: ET.Element, cfg) -> None:
@@ -299,45 +411,22 @@ def _add_menagerie_ur10e(world: ET.Element, cfg) -> None:
         raise ValueError("Menagerie UR10e model has no wrist_3_link body")
 
     ee = cfg.end_effector
-    brush_height = float(ee.brush_height)
-    brush_width = float(ee.brush_width)
-    brush_depth = float(ee.brush_depth)
-    stem_length = float(ee.get("brush_stem_length", 0.15))
-    if stem_length < 0.0:
-        raise ValueError("brush_stem_length must be non-negative")
     brush_mount_pos = tuple(float(v) for v in ee.get("brush_mount_pos", (0.0, 0.1, 0.0)))
-    brush = ET.Element("body", {"name": "tool", "pos": _fmt(brush_mount_pos),
-                                  "quat": "-1 1 0 0"})
-    _sub(brush, "inertial", pos=(0.0, 0.0, -stem_length / 2.0), mass=float(ee.brush_mass),
-         diaginertia=(0.001, 0.001, 0.0004))
-    if stem_length > 0.0:
-        _sub(brush, "geom", name="brush_stem", type="cylinder",
-             size=(0.009, stem_length / 2.0), pos=(0.0, 0.0, -stem_length / 2.0),
-             material="mat_tip", friction=(0.65, 0.01, 0.0004), condim=4)
-    _sub(brush, "geom", name="brush_head", type="box",
-         # The stroke runs along -X, so the long brush dimension must span Y.
-         # Keeping width on X would turn the tool into a narrow scraper and
-         # make components slide sideways at the brush edge.
-         size=(brush_depth / 2.0, brush_width / 2.0, brush_height / 2.0),
-         pos=(0.0, 0.0, -(stem_length + brush_height / 2.0)), material="mat_brush",
-         friction=(0.65, 0.01, 0.0004), condim=4, margin=0.00005)
-    _sub(brush, "site", name="ft_site", pos=(0.0, 0.0, 0.0), size=(0.004,),
+    tool = ET.Element("body", {"name": "tool", "pos": _fmt(brush_mount_pos),
+                                "quat": "-1 1 0 0"})
+    _sub(tool, "site", name="ft_site", pos=(0.0, 0.0, 0.0), size=(0.004,),
          rgba=(1.0, 0.2, 0.2, 0.4))
-    # The task TCP is the brush's bottom-centre contact point.  At z=0 the
-    # force controller therefore places the brush on the table, while z_home
-    # remains a clearance pose above it.
-    _sub(brush, "site", name="tcp_site", pos=(0.0, 0.0, -(stem_length + brush_height)), size=(0.003,),
-         rgba=(0.1, 1.0, 0.1, 0.4))
-    wrist3.append(brush)
+    _add_fixed_robotiq_2f85(tool, cfg)
+    wrist3.append(tool)
     # Eye-in-hand camera: mount it on the final wrist link beside the tool,
     # like a short side adapter on a real UR10.  Keeping it outside the brush
     # body makes the lens follow the wrist joint without inheriting the brush's
     # downward tool rotation and appearing detached from the end effector.
     wrist_camera = ee.get("wrist_camera", {})
     _sub(wrist3, "camera", name="wrist_cam",
-         pos=wrist_camera.get("pos", (0.15, -0.04, 0.10)),
-         xyaxes=wrist_camera.get("xyaxes", (0.554700, 0.0, -0.832050,
-                                               -0.118785, 0.989821, -0.079190)),
+         pos=wrist_camera.get("pos", (0.0, -0.05, 0.19)),
+         xyaxes=wrist_camera.get("xyaxes", (1.0, 0.0, 0.0,
+                                              0.0, 0.845489, -0.533993)),
          fovy=float(wrist_camera.get("fovy_deg", 58.0)))
     if bool(ee.get("gravity_compensation", True)):
         # The vendor MJCF describes the physical links but deliberately leaves

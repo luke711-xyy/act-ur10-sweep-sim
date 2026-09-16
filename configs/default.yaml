@@ -37,14 +37,19 @@ target:
 
 end_effector:
   type: ur10e                # ur10e Menagerie model | cartesian3dof (legacy)
-  # Thin rectangular sweeping plate: broad transverse face, visible vertical
-  # height, and a small front-to-back thickness.
+  # High, thin sweeping plate held by a fixed-closed Robotiq 2F-85.  The
+  # gripper is visual/fixed only and adds no ACT action dimension.
   brush_width: 0.14
-  brush_depth: 0.016
-  brush_height: 0.032
-  # Chosen with the plate height so the plate bottom/TCP stays at the existing
-  # table-contact height and z_home remains unchanged.
-  brush_stem_length: 0.134
+  brush_depth: 0.008
+  brush_height: 0.060
+  brush_handle_thickness: 0.012
+  brush_handle_depth: 0.024
+  brush_handle_length: 0.100
+  brush_handle_center_z: 0.180
+  gripper_mass: 0.90
+  # Rubber/bristle-facing equivalent: enough lateral grip to retain small
+  # fasteners without adding non-physical side walls to the flat brush plate.
+  brush_friction: [1.20, 0.01, 0.0004]
   # Coaxial tool mount: only the camera uses the side adapter; the brush must
   # rotate around the terminal wrist axis with the end effector.
   brush_mount_pos: [0.0, 0.10, 0.0]
@@ -57,8 +62,8 @@ end_effector:
   ik_damping: 0.01
   ik_iterations: 60
   ik_max_joint_step: 0.04     # target slew limit per task-space command [rad]
-  # Level-brush IK seed for the vendored Menagerie UR10e at [0.42, 0, 0.18].
-  initial_joint_positions: [-2.0863942, -2.5664948, -2.6904114, 3.6861097, 1.5707961, 3.6571908]
+  # Level-brush IK seed for the longer gripper/handle stack at [0.42, 0, 0.18].
+  initial_joint_positions: [-2.0863955, -2.0839338, -2.7731138, 3.2862509, 1.5708025, 3.6571918]
   # Retained only for the original Cartesian diagnostic scene.
   yaw_enabled: true
   kp: 3000.0
@@ -71,14 +76,12 @@ end_effector:
   # Eye-in-hand view: a short side adapter beside the final wrist joint.  The
   # pose is in wrist_3_link coordinates, not brush/tool coordinates.
   wrist_camera:
-    # Short side-front adapter beside the terminal joint.  The camera sits
-    # just above the plate and looks inward at the TCP, so the plate is a
-    # narrow transverse line while the parts and table remain visible.
-    pos: [0.15, -0.04, 0.10]
-    # Generated for local look-at [0, -0.066, 0] with local +Y as image up.
-    # MuJoCo cameras look along local -Z; this is deliberately oblique, not
-    # a vertical top-down view.
-    xyaxes: [0.554700, 0.0, -0.832050, -0.118785, 0.989821, -0.079190]
+    # Side adapter on the final wrist.  It looks mostly along plate width, with
+    # a slight downward/inward pitch, so the thin plate edge is a near-vertical
+    # centre divider and the image is split into left/right regions.
+    pos: [0.0, -0.05, 0.19]
+    # Generated for wrist-local look-at [0, -0.17, 0] and local +Y image up.
+    xyaxes: [1.0, 0.0, 0.0, 0.0, 0.845489, -0.533993]
     fovy_deg: 68.0
 
 workspace:
@@ -116,7 +119,7 @@ controller:
   delta_z_limit: 0.006       # |delta_z| saturation [m]
   delta_z_rate_limit: 0.05   # |d(delta_z)/dt| saturation [m/s]
   search_velocity: 0.02      # downward probing speed [m/s]
-  sweep_speed: 0.12          # XY sweeping speed [m/s]
+  sweep_speed: 0.08          # slower for the longer gripper/brush lever arm [m/s]
   travel_speed: 0.35         # XY speed for lifted transfer motions [m/s]
   z_speed: 0.03              # vertical speed for approach / retract [m/s]
   control_delay_steps: 0     # artificial actuation delay, in control periods
