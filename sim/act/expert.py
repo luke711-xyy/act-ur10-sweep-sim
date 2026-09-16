@@ -34,14 +34,17 @@ def expert_waypoints(env, cfg) -> np.ndarray:
     points = [home, start]
     for point in ordered:
         points.append(np.asarray(point, dtype=float))
+    # Keep the brush aligned with the leftmost (last visited) object while
+    # crossing the tray mouth.  Only after that horizontal push is complete do
+    # we move the brush centre to the tray centreline.
+    points.append(np.array([target_lane_x, float(ordered[-1, 1])], dtype=float))
     target_lane = np.array([target_lane_x, 0.0], dtype=float)
     points.append(target_lane)
-    # Small parts can roll sideways at the brush edge.  These two low-cost
-    # backtracking lanes keep the demonstration a single continuous contact
-    # episode while making the expert robust to that allowed in-plane turn.
-    for lane_y in (-0.12, 0.12):
-        points.extend((np.array([0.10, lane_y], dtype=float),
-                       np.array([target_lane_x, lane_y], dtype=float)))
+    # Stop at the tray mouth after the collection condition is met.  Continuing
+    # with edge lanes would make the brush itself contact the fixed side walls;
+    # that is a controller/planner collision, not a physically meaningful
+    # recovery from a sideways-sliding component.  Such failures remain
+    # represented by episodes that lose a component before reaching the mouth.
     return np.asarray(points, dtype=float)
 
 

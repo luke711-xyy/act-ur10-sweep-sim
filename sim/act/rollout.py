@@ -80,6 +80,13 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                 z = float(z_nominal + admittance.step(float(cfg.controller.desired_force), measured))
             else:
                 z = float(action[2])
+            # The brush TCP is the bottom face of the tool.  A negative task
+            # Z would therefore put the brush through the table, which is not
+            # a valid unilateral-contact state.  Keep the force controller
+            # active, but project its position command onto the non-penetrating
+            # half-space; the measured contact force still determines the
+            # admittance response above the surface.
+            z = max(z, float(env.table_top_z))
             cmd = Command(float(action[0]), float(action[1]), z, float(action[3]))
             env.step_control(cmd)
             tcp = env.tcp()
@@ -174,7 +181,24 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True) ->
         descent[:, 0:2] = points[1]
         descent[:, 2] = np.linspace(float(cfg.end_effector.z_home),
                                      float(cfg.workspace.z_search_start), n_descent)
-        sweep = sample_polyline(points[1:], hz, float(cfg.controller.sweep_speed))
+        if len(points) >= 4:
+            # The final horizontal segment is the actual push into the tray.
+            # Hold its endpoint briefly so the position-controlled official
+            # arm can catch the Cartesian target before we move the brush
+            # centreline, instead of peeling off the last object due to
+            # actuator lag.
+            sweep_prefix = sample_polyline(points[1:-1], hz,
+                                            float(cfg.controller.sweep_speed))
+            final_push = sample_polyline(points[-2:], hz,
+                                         float(cfg.controller.sweep_speed))
+            push_hold_steps = int(round(float(cfg.episode.get("final_push_time", 0.0)) * hz))
+            push_hold = np.repeat(
+                np.array([[points[-2, 0], points[-2, 1],
+                           float(cfg.workspace.z_search_start), 0.0]], dtype=np.float32),
+                max(0, push_hold_steps), axis=0)
+            sweep = np.concatenate((sweep_prefix, push_hold, final_push), axis=0)
+        else:
+            sweep = sample_polyline(points[1:], hz, float(cfg.controller.sweep_speed))
         sweep[:, 2] = float(cfg.workspace.z_search_start)
         path = np.concatenate((approach, descent, sweep), axis=0)
         return run_action_path(env, cfg, path, collect_observations=collect_observations)

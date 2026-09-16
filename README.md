@@ -218,6 +218,7 @@ Implemented safeguards:
 * first-order low-pass filter on the normal force (`force_filter_cutoff_hz`)
 * force-target slew-rate ramping, up **and** down (`force_ramp_rate`)
 * force-target saturation (`max_force`) and a hard measured-force abort (`safe_max_force`)
+  (`safe_max_force=100 N` is the current official-UR10e contact-peak calibration)
 * transient-force dwell (`safe_force_dwell_steps`) before the hard abort is declared
 * `Δz` saturation (`delta_z_limit`) and `dΔz/dt` limit (`delta_z_rate_limit`), both with
   anti-windup
@@ -227,6 +228,11 @@ Implemented safeguards:
 * controller rate `sim.control_hz` (default 100 Hz), physics timestep
   `sim.physics_dt` (default 1 ms) — the physics step is always smaller than the control
   period, and the runtime asserts it.
+
+The contact command is also projected onto the unilateral table constraint: once the
+brush TCP is at the table plane, the admittance loop cannot command it below the plane.
+This prevents a lost component from being replaced by artificial brush/table
+penetration while retaining measured normal force and genuine sideways slip.
 
 ### Controller tuning — the one non-obvious point
 
@@ -449,7 +455,9 @@ link and collision geometry remains in the model. The brush stops at the tray mo
 (`target.x_max - max(0.02, brush_depth/2)`) rather than asking IK to reach the tray back
 wall outside the command workspace. Once all components are inside the tray, the expert
 rollout terminates immediately; it does not run extra recovery lanes that could create a
-new collision after success.
+new collision after success. The last component is first pushed horizontally at its own
+contact lane, and the endpoint is held for `episode.final_push_time` so actuator lag does
+not peel the brush away before the collection check.
 
 Collection rate alone does not say *why* a run went badly. Three failure modes are
 detected per stroke and aggregated per episode.

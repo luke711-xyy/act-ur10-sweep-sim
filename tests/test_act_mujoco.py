@@ -157,6 +157,79 @@ def test_expert_waypoints_stop_inside_ur10e_command_workspace():
         env.close()
 
 
+def test_expert_does_not_sweep_along_tray_side_walls():
+    cfg = load_config()
+    env = SweepEnv(cfg, seed=12345)
+    try:
+        env.reset(seed=12345)
+        points = expert_waypoints(env, cfg)
+        # Once the brush crosses the tray mouth, the centreline must remain
+        # inside the usable opening.  A recovery lane at y=+/-tray edge makes
+        # the brush itself hit a fixed side wall and is not a valid expert
+        # action, even if it sometimes appears to help a lucky layout.
+        inside = points[:, 0] <= float(cfg.target.x_max)
+        half_width = float(cfg.end_effector.brush_width) / 2.0
+        safe_y = (min(float(cfg.target.y_max), float(cfg.target.y_min) * -1.0)
+                  - half_width - float(cfg.target.wall_thickness))
+        assert np.all(np.abs(points[inside, 1]) <= safe_y + 1e-9)
+    finally:
+        env.close()
+
+
+def test_expert_finishes_last_object_with_a_horizontal_sweep():
+    cfg = load_config()
+    env = SweepEnv(cfg, seed=12345)
+    try:
+        env.reset(seed=12345)
+        points = expert_waypoints(env, cfg)
+        positions = np.asarray(env.component_positions())[:, :2]
+        last = positions[np.argmin(positions[:, 0])]
+        # The last object must stay under the brush until it reaches the tray
+        # mouth; a diagonal move changes y at the same time and can peel the
+        # brush off an object near the edge of its transverse footprint.
+        tray_i = np.flatnonzero(points[:, 0] <= float(cfg.target.x_max))[0]
+        assert points[tray_i, 1] == pytest.approx(last[1], abs=1e-9)
+        assert points[tray_i, 0] == pytest.approx(
+            float(np.clip(float(cfg.target.x_max)
+                          - max(0.02, float(cfg.end_effector.brush_depth) / 2.0),
+                          float(cfg.workspace.x_min), float(cfg.workspace.x_max))))
+    finally:
+        env.close()
+
+
+def test_expert_allows_the_arm_to_settle_at_the_tray_mouth():
+    from sim.act.rollout import run_expert_episode
+
+    cfg = load_config(overrides=[
+        "sim.real_time=false", "components.count=1",
+        "controller.safe_max_force=100.0", "episode.final_push_time=1.0",
+    ])
+    result = run_expert_episode(cfg, seed=12345, collect_observations=False)
+    assert result.success
+
+
+def test_contact_force_loop_never_commands_brush_through_table():
+    from sim.act.rollout import run_expert_episode
+
+    cfg = load_config(overrides=[
+        "sim.real_time=false", "components.count=1",
+        "controller.safe_max_force=100.0",
+    ])
+    result = run_expert_episode(cfg, seed=12345, collect_observations=False)
+    contact_rows = [row for row in result.trace if row["contact"]]
+    assert contact_rows
+    assert min(float(row["command"][2]) for row in contact_rows) >= float(cfg.table.top_z)
+
+
+def test_default_official_ur10e_demo_uses_calibrated_force_ceiling():
+    from sim.act.rollout import run_expert_episode
+
+    cfg = load_config(overrides=["sim.real_time=false", "components.count=1"])
+    result = run_expert_episode(cfg, seed=12345, collect_observations=False)
+    assert result.success
+    assert max(float(row["normal_force"]) for row in result.trace) < float(cfg.controller.safe_max_force)
+
+
 def test_ur10e_can_reach_expert_tray_lane_from_home():
     cfg = load_config()
     env = SweepEnv(cfg, seed=12345)
