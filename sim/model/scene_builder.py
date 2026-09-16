@@ -335,9 +335,9 @@ def _add_menagerie_ur10e(world: ET.Element, cfg) -> None:
     # downward tool rotation and appearing detached from the end effector.
     wrist_camera = ee.get("wrist_camera", {})
     _sub(wrist3, "camera", name="wrist_cam",
-         pos=wrist_camera.get("pos", (0.18, 0.10, 0.12)),
-         xyaxes=wrist_camera.get("xyaxes", (-0.623370, 0.781927, 0.0,
-                                               -0.361445, -0.288152, 0.886750)),
+         pos=wrist_camera.get("pos", (0.15, -0.04, 0.10)),
+         xyaxes=wrist_camera.get("xyaxes", (0.554700, 0.0, -0.832050,
+                                               -0.118785, 0.989821, -0.079190)),
          fovy=float(wrist_camera.get("fovy_deg", 58.0)))
     if bool(ee.get("gravity_compensation", True)):
         # The vendor MJCF describes the physical links but deliberately leaves

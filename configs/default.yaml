@@ -71,13 +71,14 @@ end_effector:
   # Eye-in-hand view: a short side adapter beside the final wrist joint.  The
   # pose is in wrist_3_link coordinates, not brush/tool coordinates.
   wrist_camera:
-    # Short side-upper adapter beside the terminal joint, matching the
-    # physical arrangement in the design sketch.  The camera is close to the
-    # joint but offset far enough to look diagonally down at the plate.
-    pos: [0.18, 0.10, 0.12]
-    # Aimed at the brush/contact region in the wrist_3_link frame.  MuJoCo
-    # cameras look along local -Z and accept the local X/Y axes here.
-    xyaxes: [-0.623370, 0.781927, 0.0, -0.361445, -0.288152, 0.886750]
+    # Short side-front adapter beside the terminal joint.  The camera sits
+    # just above the plate and looks inward at the TCP, so the plate is a
+    # narrow transverse line while the parts and table remain visible.
+    pos: [0.15, -0.04, 0.10]
+    # Generated for local look-at [0, -0.066, 0] with local +Y as image up.
+    # MuJoCo cameras look along local -Z; this is deliberately oblique, not
+    # a vertical top-down view.
+    xyaxes: [0.554700, 0.0, -0.832050, -0.118785, 0.989821, -0.079190]
     fovy_deg: 68.0
 
 workspace:
