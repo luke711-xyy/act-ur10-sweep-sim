@@ -553,7 +553,7 @@ python -m sim.record_video --compare fixed global_sweep visual_greedy \
 | Camera | View |
 |---|---|
 | `scene_cam` | the fixed perception camera — **what the planner actually sees** |
-| `overhead_cam` | top-down; best for reading stroke geometry and the tray |
+| `overhead_cam` | front-oblique global view; retained name for the ACT input contract |
 | `side_cam` | low side view; best for seeing tip–table contact and parts tipping |
 | `follow_cam` | fixed position, rotates to keep the tool centred |
 | `inspection_cam` | oblique front-above human inspection view; never an ACT input |

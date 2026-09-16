@@ -86,8 +86,11 @@ def add_ur10_arm(world: ET.Element, cfg) -> None:
          size=(0.003,), rgba=(0.1, 1.0, 0.1, 0.4))
     # Body-attached camera used by ACT.  Its local frame is fixed to the tool,
     # so the wrist view follows the brush during the sweep.
-    _sub(tool, "camera", name="wrist_cam", pos=(0.0, -0.16, 0.09),
-         xyaxes=(1.0, 0.0, 0.0, 0.0, 0.0, 1.0), fovy=58.0)
+    wrist_camera = ee.get("wrist_camera", {})
+    _sub(tool, "camera", name="wrist_cam",
+         pos=wrist_camera.get("pos", (0.0, -0.16, 0.09)),
+         xyaxes=wrist_camera.get("xyaxes", (1.0, 0.0, 0.0, 0.0, 0.0, 1.0)),
+         fovy=float(wrist_camera.get("fovy_deg", 58.0)))
 
 
 def add_ur10_actuators(actuator: ET.Element, cfg) -> None:

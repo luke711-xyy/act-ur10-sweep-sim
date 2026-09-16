@@ -61,6 +61,17 @@ end_effector:
   mass: 0.25
   tip_half: [0.008, 0.012, 0.030]
   tip_gap: 0.004
+  # Eye-in-hand view: mounted on the front/lower side of the flange/tool stack
+  # and aimed at the contact patch.  It remains body-attached with the tool.
+  wrist_camera:
+    # The lens sits on the front side of the flange/tool stack, below the
+    # wrist housing and just above the brush.  This mirrors a UR10 wrist-camera
+    # adapter: the tool remains in view while the optical axis points at the
+    # work surface instead of into the robot's own wrist shell.
+    pos: [0.0, 0.12, -0.05]
+    # MuJoCo camera looks along local -Z; local +Y is the image-up direction.
+    xyaxes: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    fovy_deg: 84.0
 
 workspace:
   # Region the TCP may travel in.  x_min reaches inside the tray mouth so the
@@ -187,7 +198,8 @@ planner:
     max_no_progress: 4
 
 video:
-  # Recording only. These cameras are invisible to every perception backend.
+  # Preview/recording views.  ``overhead_cam`` is also the ACT global-view
+  # input; the inspection camera remains human-only.
   cameras: [scene_cam, overhead_cam]   # panes, left to right
   width: 640
   height: 480
@@ -199,10 +211,12 @@ video:
   force_gauge_max: null      # HUD force-gauge full scale [N]; null -> 2.5 * desired_force
   extra_cameras:
     overhead_cam:
-      pos: [-0.02, 0.0, 1.05]
-      lookat: [-0.02, 0.0, 0.0]
-      up: [0.0, 1.0, 0.0]    # +Y up in frame -> sweep direction points left
-      fovy_deg: 52.0
+      # Kept under the historical ``overhead_cam`` name for the ACT input
+      # contract; geometrically this is now a front-oblique global view.
+      pos: [0.48, -0.78, 0.78]
+      lookat: [-0.05, 0.0, 0.0]
+      up: [0.0, 0.0, 1.0]
+      fovy_deg: 58.0
     side_cam:
       pos: [0.05, -0.80, 0.17]
       lookat: [-0.14, 0.0, 0.02]

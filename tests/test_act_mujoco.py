@@ -26,6 +26,32 @@ def test_ur10e_scene_uses_menagerie_structure_and_custom_brush():
     assert 'name="wrist_cam"' in xml
 
 
+def test_global_act_camera_is_front_oblique_not_vertical_overhead():
+    cfg = load_config()
+    camera = cfg.video.extra_cameras.overhead_cam
+    pos = np.asarray(camera.pos, dtype=float)
+    lookat = np.asarray(camera.lookat, dtype=float)
+    # Keep the historical camera name/ACT tensor key, but make its geometry a
+    # useful global view: a front-oblique camera sees the sweep lane instead of
+    # letting the arm hide parts directly underneath it.
+    assert np.linalg.norm((pos - lookat)[:2]) > 0.10
+    assert pos[2] - lookat[2] > 0.20
+
+
+def test_wrist_camera_is_pitched_towards_tool_contact_region():
+    cfg = load_config()
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    root = ET.fromstring(xml)
+    camera = root.find(".//body[@name='tool']/camera[@name='wrist_cam']")
+    assert camera is not None
+    axes = np.fromstring(camera.get("xyaxes", ""), sep=" ")
+    assert axes.size == 6
+    # MuJoCo cameras look along local -Z.  With XY axes defining the camera
+    # frame, -cross(X, Y) must have a downward component in the tool frame.
+    forward = -np.cross(axes[:3], axes[3:])
+    assert forward[2] < -0.20
+
+
 def test_ur10e_scene_loads_with_vendored_menagerie_assets():
     cfg = load_config()
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))

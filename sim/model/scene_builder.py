@@ -326,8 +326,11 @@ def _add_menagerie_ur10e(world: ET.Element, cfg) -> None:
     # remains a clearance pose above it.
     _sub(brush, "site", name="tcp_site", pos=(0.0, 0.0, -(stem_length + brush_height)), size=(0.003,),
          rgba=(0.1, 1.0, 0.1, 0.4))
-    _sub(brush, "camera", name="wrist_cam", pos=(0.0, -0.16, 0.10),
-         xyaxes=(1.0, 0.0, 0.0, 0.0, 0.0, 1.0), fovy=58.0)
+    wrist_camera = ee.get("wrist_camera", {})
+    _sub(brush, "camera", name="wrist_cam",
+         pos=wrist_camera.get("pos", (0.0, -0.16, 0.10)),
+         xyaxes=wrist_camera.get("xyaxes", (1.0, 0.0, 0.0, 0.0, 0.0, 1.0)),
+         fovy=float(wrist_camera.get("fovy_deg", 58.0)))
     wrist3.append(brush)
     if bool(ee.get("gravity_compensation", True)):
         # The vendor MJCF describes the physical links but deliberately leaves
