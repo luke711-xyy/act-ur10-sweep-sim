@@ -129,6 +129,33 @@ def test_global_act_camera_is_on_the_opposite_elevated_side():
     assert pos[2] > 0.60
 
 
+def test_inspection_camera_is_a_far_full_scene_view():
+    cfg = load_config()
+    camera = cfg.video.extra_cameras.inspection_cam
+    pos = np.asarray(camera.pos, dtype=float)
+    lookat = np.asarray(camera.lookat, dtype=float)
+
+    # This camera is for human inspection, so it must frame the complete arm,
+    # table and the -X collection tray rather than act as a second close-up.
+    assert np.linalg.norm(pos - lookat) > 1.50
+    assert pos[2] > 0.90
+    assert float(camera.fovy_deg) >= 52.0
+    assert -0.10 <= lookat[0] <= 0.15
+    assert abs(lookat[1]) < 0.15
+
+
+def test_render_lighting_uses_shadowless_multi_source_fill():
+    cfg = load_config()
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    root = ET.fromstring(xml)
+    lights = root.findall("./worldbody/light")
+    assert len(lights) >= 4
+    assert all(light.get("castshadow") == "false" for light in lights)
+    headlight = root.find("./visual/headlight")
+    assert headlight is not None
+    assert headlight.get("ambient") is not None
+
+
 def test_wrist_camera_is_mounted_beside_final_wrist_link():
     cfg = load_config()
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))

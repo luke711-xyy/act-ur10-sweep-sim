@@ -167,3 +167,72 @@ def test_workbench_persists_and_reads_preview_fz_trace(tmp_path, monkeypatch):
         "fz": [0.0, 0.75],
         "contact": [False, True],
     }
+
+
+def test_workbench_serializes_mujoco_render_requests(monkeypatch):
+    import asyncio
+    import threading
+    import time
+
+    class FakeEnv:
+        active = 0
+        max_active = 0
+        state_lock = threading.Lock()
+
+        def __init__(self, cfg, seed):
+            self.layout = []
+            self.time = 0.0
+
+        def reset(self, seed):
+            return None
+
+        def render_rgb(self, camera, size):
+            self._render()
+            return np.zeros((size[1], size[0], 3), dtype=np.uint8)
+
+        def render_wrist_rgb(self, size):
+            self._render()
+            return np.zeros((size[1], size[0], 3), dtype=np.uint8)
+
+        def _render(self):
+            with self.state_lock:
+                type(self).active += 1
+                type(self).max_active = max(type(self).max_active, type(self).active)
+            time.sleep(0.01)
+            with self.state_lock:
+                type(self).active -= 1
+
+        def collected_mask(self):
+            return np.zeros(0, dtype=bool)
+
+        def tcp(self):
+            return np.zeros(3)
+
+        def normal_force(self):
+            return 0.0
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("sim.environments.sweep_env.SweepEnv", FakeEnv)
+    app = create_app(load_config(overrides=["sim.real_time=false"]))
+    frames_endpoint = next(route.endpoint for route in app.routes
+                           if getattr(route, "path", None) == "/api/frames")
+
+    async def render_twice():
+        return await asyncio.gather(frames_endpoint(), frames_endpoint())
+
+    results = asyncio.run(render_twice())
+
+    assert len(results) == 2
+    assert FakeEnv.max_active == 1
+
+
+def test_frame_render_route_keeps_mujoco_on_the_event_loop_thread():
+    import inspect
+
+    app = create_app(load_config(overrides=["sim.real_time=false"]))
+    frames_endpoint = next(route.endpoint for route in app.routes
+                           if getattr(route, "path", None) == "/api/frames")
+
+    assert inspect.iscoroutinefunction(frames_endpoint)

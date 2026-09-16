@@ -201,6 +201,12 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
     off_h = max(int(cfg.perception.camera.height), int(cfg.get_path("video.height", 480)))
     _sub(visual, "global", offwidth=off_w, offheight=off_h)
     _sub(visual, "quality", shadowsize=2048)
+    # The workbench is an inspection surface, not a photorealistic lighting
+    # test.  A camera-following ambient headlight plus several shadowless fill
+    # sources keeps the robot, tray and parts readable from every view without
+    # one hard key light drawing a distracting arm shadow across the table.
+    _sub(visual, "headlight", ambient=(0.30, 0.30, 0.30),
+         diffuse=(0.30, 0.30, 0.30), specular=(0.03, 0.03, 0.03))
 
     # ---------------- assets ----------------
     asset = _sub(root, "asset")
@@ -242,10 +248,19 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
 
     # ---------------- worldbody ----------------
     world = _sub(root, "worldbody")
-    _sub(world, "light", name="light0", pos=(0.0, 0.0, 1.6), dir=(0, 0, -1),
-         diffuse=(0.8, 0.8, 0.8), specular=(0.2, 0.2, 0.2), castshadow="true")
-    _sub(world, "light", name="light1", pos=(0.6, 0.6, 1.0), dir=(-0.5, -0.5, -1),
-         diffuse=(0.35, 0.35, 0.35), castshadow="false")
+    fill_lights = (
+        ("fill_front", (-0.10, -0.85, 1.35), (0.0, 0.35, -1.0),
+         (0.28, 0.28, 0.28)),
+        ("fill_left", (-0.65, 0.50, 1.05), (0.35, -0.35, -1.0),
+         (0.24, 0.26, 0.28)),
+        ("fill_right", (0.82, 0.55, 1.45), (-0.45, -0.30, -1.0),
+         (0.26, 0.26, 0.25)),
+        ("fill_tray", (-0.70, -0.05, 0.80), (0.30, 0.0, -1.0),
+         (0.22, 0.24, 0.27)),
+    )
+    for name, pos, direction, diffuse in fill_lights:
+        _sub(world, "light", name=name, pos=pos, dir=direction,
+             diffuse=diffuse, specular=(0.02, 0.02, 0.02), castshadow=False)
 
     # The perception camera. Fixed for the whole episode, identical for training
     # and testing -- nothing may move it.

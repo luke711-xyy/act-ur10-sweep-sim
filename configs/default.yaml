@@ -241,12 +241,12 @@ video:
       pos: [0.30, -0.55, 0.40]
       fovy_deg: 45.0
     inspection_cam:
-      # Human-only oblique-front-above view: close enough to inspect parts and
-      # brush contact, while keeping the full tray lane in frame.
-      pos: [0.36, -0.58, 0.60]
-      lookat: [0.16, 0.04, 0.04]
+      # Human-only far oblique-front-above view: frame the complete UR10e,
+      # table and the -X collection tray in one square inspection pane.
+      pos: [1.10, -1.45, 1.15]
+      lookat: [0.05, 0.0, 0.24]
       up: [0.0, 0.0, 1.0]
-      fovy_deg: 44.0
+      fovy_deg: 52.0
 
 act:
   enabled: true

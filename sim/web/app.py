@@ -7,6 +7,7 @@ import io
 import json
 import math
 from pathlib import Path
+from threading import RLock
 
 
 HTML = r"""<!doctype html>
@@ -98,6 +99,7 @@ def create_app(cfg):
     app = FastAPI(title="ACT MuJoCo Sweep Workbench")
     app.state.cfg = cfg
     app.state.env = None
+    app.state.env_lock = RLock()
     dataset_root = Path(str(cfg.act.dataset_dir))
     if not dataset_root.is_absolute():
         dataset_root = project_root / dataset_root
@@ -126,32 +128,35 @@ def create_app(cfg):
 
     @app.get("/api/health")
     def health():
-        e = env()
-        current = app.state.cfg
-        return {"time": e.time, "components": len(e.layout),
-                "collected": int(e.collected_mask().sum()),
-                "tcp": e.tcp().tolist(), "normal_force": e.normal_force(),
-                "model": str(current.end_effector.type),
-                "camera_roles": {"overhead": "perception", "wrist": "act_input",
-                                 "inspection": "inspection_only"}}
+        with app.state.env_lock:
+            e = env()
+            current = app.state.cfg
+            return {"time": e.time, "components": len(e.layout),
+                    "collected": int(e.collected_mask().sum()),
+                    "tcp": e.tcp().tolist(), "normal_force": e.normal_force(),
+                    "model": str(current.end_effector.type),
+                    "camera_roles": {"overhead": "perception", "wrist": "act_input",
+                                     "inspection": "inspection_only"}}
 
     @app.post("/api/reset")
     def reset():
-        if app.state.env is not None:
-            app.state.env.close()
-        app.state.env = None
-        env()
-        return {"ok": True}
+        with app.state.env_lock:
+            if app.state.env is not None:
+                app.state.env.close()
+            app.state.env = None
+            env()
+            return {"ok": True}
 
     @app.get("/api/frames")
-    def frames():
-        e = env()
-        size = tuple(int(v) for v in app.state.cfg.act.image_size)
-        return {"overhead": _png_bytes(e.render_rgb("overhead_cam", size=size)),
-                "wrist": _png_bytes(e.render_wrist_rgb(size=size)),
-                "inspection": _png_bytes(e.render_rgb("inspection_cam", size=size)),
-                "camera_roles": {"overhead": "perception", "wrist": "act_input",
-                                 "inspection": "inspection_only"}}
+    async def frames():
+        with app.state.env_lock:
+            e = env()
+            size = tuple(int(v) for v in app.state.cfg.act.image_size)
+            return {"overhead": _png_bytes(e.render_rgb("overhead_cam", size=size)),
+                    "wrist": _png_bytes(e.render_wrist_rgb(size=size)),
+                    "inspection": _png_bytes(e.render_rgb("inspection_cam", size=size)),
+                    "camera_roles": {"overhead": "perception", "wrist": "act_input",
+                                     "inspection": "inspection_only"}}
 
     @app.get("/api/episodes")
     def episodes():
