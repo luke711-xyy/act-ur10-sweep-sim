@@ -68,10 +68,12 @@ end_effector:
     # wrist housing and just above the brush.  This mirrors a UR10 wrist-camera
     # adapter: the tool remains in view while the optical axis points at the
     # work surface instead of into the robot's own wrist shell.
-    pos: [0.0, 0.12, -0.05]
-    # MuJoCo camera looks along local -Z; local +Y is the image-up direction.
-    xyaxes: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-    fovy_deg: 84.0
+    pos: [0.12, 0.12, -0.05]
+    # MuJoCo camera looks along local -Z.  This frame looks slightly ahead of
+    # the brush in the sweep direction while keeping the brush in the lower
+    # part of the image and the workpieces in front of it.
+    xyaxes: [-0.3939193, 0.919145, 0.0, -0.3071316, -0.1316278, 0.9425202]
+    fovy_deg: 74.0
 
 workspace:
   # Region the TCP may travel in.  x_min reaches inside the tray mouth so the
@@ -213,10 +215,10 @@ video:
     overhead_cam:
       # Kept under the historical ``overhead_cam`` name for the ACT input
       # contract; geometrically this is now a front-oblique global view.
-      pos: [0.48, -0.78, 0.78]
-      lookat: [-0.05, 0.0, 0.0]
+      pos: [0.30, -0.52, 0.56]
+      lookat: [-0.04, 0.0, 0.0]
       up: [0.0, 0.0, 1.0]
-      fovy_deg: 58.0
+      fovy_deg: 44.0
     side_cam:
       pos: [0.05, -0.80, 0.17]
       lookat: [-0.14, 0.0, 0.02]
@@ -228,10 +230,12 @@ video:
       pos: [0.30, -0.55, 0.40]
       fovy_deg: 45.0
     inspection_cam:
-      pos: [0.95, -1.10, 0.90]
-      lookat: [0.28, 0.0, 0.24]
+      # Human-only oblique-front-above view: close enough to inspect parts and
+      # brush contact, while keeping the full tray lane in frame.
+      pos: [0.36, -0.58, 0.60]
+      lookat: [0.16, 0.04, 0.04]
       up: [0.0, 0.0, 1.0]
-      fovy_deg: 60.0
+      fovy_deg: 44.0
 
 act:
   enabled: true
