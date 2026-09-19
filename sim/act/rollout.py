@@ -20,6 +20,9 @@ class ActRolloutResult:
     success: bool
     failure_reason: str
     observations: list[dict] = field(default_factory=list)
+    # Optional RGB-derived schema-v5 observations captured alongside an expert
+    # rollout.  The ordinary v4 writer never reads this field.
+    object_observations: list[dict] = field(default_factory=list)
     actions: np.ndarray = field(default_factory=lambda: np.zeros((0, 4), dtype=np.float32))
     action_valid: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
     trace: list[dict] = field(default_factory=list)
@@ -283,7 +286,8 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                     target_indices: np.ndarray | None = None,
                     recovery_planner=None,
                     max_recovery_rounds: int = 0,
-                    failure_mode: str = "") -> ActRolloutResult:
+                    failure_mode: str = "",
+                    object_builder=None) -> ActRolloutResult:
     """Execute expert absolute targets and record full-episode ACT labels.
 
     Approach, descent, contact build and sweep are all behavior-cloning
@@ -294,7 +298,11 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
     builder = ACTObservationBuilder(cfg)
     builder.reset()
     admittance = _force_loop(cfg)
-    observations, targets, target_valid, trace = [], [], [], []
+    observations, object_observations, targets, target_valid, trace = [], [], [], [], []
+    if object_builder is not None:
+        reset = getattr(object_builder, "reset", None)
+        if callable(reset):
+            reset()
     contact = False
     admittance_active = False
     z_nominal = None
@@ -397,6 +405,54 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                 "z_owner": "admittance" if contact else "policy",
                 "action_delta": delta,
             })
+            if object_builder is not None:
+                v5 = object_builder.observe(env, contact_latched=contact)
+                object_observations.append({
+                    "overhead": np.clip(
+                        np.transpose(v5["observation.images.overhead"], (1, 2, 0)) * 255,
+                        0, 255,
+                    ).astype(np.uint8),
+                    "wrist": np.clip(
+                        np.transpose(v5["observation.images.wrist"], (1, 2, 0)) * 255,
+                        0, 255,
+                    ).astype(np.uint8),
+                    "inspection": np.asarray(
+                        env.render_rgb("inspection_cam", size=builder.spec.image_size),
+                        dtype=np.uint8,
+                    ),
+                    "robot_state": np.asarray(
+                        v5["observation.robot_state"], dtype=np.float32
+                    ),
+                    "task_state": np.asarray(
+                        v5["observation.task_state"], dtype=np.float32
+                    ),
+                    "object_tokens": np.asarray(
+                        v5["observation.object_tokens"], dtype=np.float32
+                    ),
+                    "object_valid": np.asarray(
+                        v5["observation.object_valid"], dtype=bool
+                    ),
+                    "instance_bev": np.asarray(
+                        v5["observation.instance_bev"], dtype=bool
+                    ),
+                    "action_delta": delta.copy(),
+                    "policy_mask": bool(valid),
+                    "t": float(env.time),
+                    "phase": str(phase),
+                    "joint_position": joints,
+                    "tcp_pose": np.array([*tcp, float(env.ee.tcp_yaw())], dtype=np.float32),
+                    "wrench": wrench,
+                    "normal_force": sampled_force,
+                    "contact": bool(contact),
+                    "contact_latched": bool(contact),
+                    "fully_collected": int(env.collected_mask().sum()),
+                    "reference": executed_reference.copy(),
+                    "policy_reference": reference.copy(),
+                    "applied_reference": executed_reference.copy(),
+                    "policy_z": float(reference[2]),
+                    "applied_z": float(executed_reference[2]),
+                    "z_owner": "admittance" if contact else "policy",
+                })
             captured_index = len(observations) - 1
             targets.append(delta)
             target_valid.append(bool(valid))
@@ -683,6 +739,7 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
         failure = exact_reason or "target count was not collected"
     return ActRolloutResult(success=success, failure_reason=failure,
                             observations=observations,
+                            object_observations=object_observations,
                             actions=np.asarray(targets, dtype=np.float32),
                             action_valid=np.asarray(target_valid, dtype=bool),
                             trace=trace, collected=collected, total=total,
@@ -812,7 +869,7 @@ def _annotate_expert_result(result: ActRolloutResult, plan: ExpertPlan,
 
 
 def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
-                       failure_mode: str = "") -> ActRolloutResult:
+                       failure_mode: str = "", object_builder_factory=None) -> ActRolloutResult:
     """Execute and physically vet a shortlist of deterministic expert plans.
 
     Geometry is still the first filter, but one open-loop lane can lose a
@@ -885,12 +942,16 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
         try:
             path, phases = _expert_execution_path(
                 cfg, candidate, failure_mode, failure_seed=seed)
+            object_builder = (
+                object_builder_factory() if capture_observations
+                and object_builder_factory is not None else None
+            )
             out = run_action_path(
                 env, cfg, path, collect_observations=capture_observations,
                 phases=phases,
                 target_indices=np.asarray(candidate.target_indices, dtype=int),
                 recovery_planner=None, max_recovery_rounds=0,
-                failure_mode=failure_mode)
+                failure_mode=failure_mode, object_builder=object_builder)
             out = _annotate_expert_result(out, candidate, attempt)
             if failure_mode and not out.failure_reason:
                 out.failure_reason = f"deliberate failure: {failure_mode}"

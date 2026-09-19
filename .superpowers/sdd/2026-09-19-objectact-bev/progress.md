@@ -49,3 +49,8 @@ contact-latched Z handoff, and a separate ObjectACT runtime loop with the
 existing 5 Hz/25 Hz scheduler, late-preview alignment, temporal chunk
 ensembling, 20 N protection, 500-frame cap, and visual collection timers;
 ordinary v4 evaluator remains the default)
+
+Task 5C: complete (schema-v5 atomic writer, RGB-derived expert observation
+capture, offline actual-final-collected selection labels, and a guarded
+single-episode v5 generation CLI; it refuses to generate policy data without
+an explicit RGB detector checkpoint)

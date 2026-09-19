@@ -8,6 +8,8 @@ reproducible while v5 perception sidecars are added incrementally.
 from __future__ import annotations
 
 import json
+import shutil
+import uuid
 from collections import Counter
 from pathlib import Path
 
@@ -16,7 +18,160 @@ import numpy as np
 from .v5_bev import build_bev_from_sidecar
 from .v5 import (
     read_v5_sidecar,
+    write_v5_sidecar,
 )
+
+
+class ObjectActDatasetWriter:
+    """Atomic writer for RGB-derived schema-v5 expert episodes."""
+
+    def __init__(self, root: str):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.manifest = self.root / "manifest_v5.jsonl"
+
+    def add_episode(
+        self,
+        episode_id: str,
+        observations: list[dict],
+        selection_target: np.ndarray,
+        success: bool,
+        metadata: dict,
+    ) -> Path:
+        from PIL import Image
+
+        if not success:
+            raise ValueError("v5 training writer accepts successful expert episodes only")
+        if not observations:
+            raise ValueError("v5 episode must contain observations")
+        labels = np.asarray(selection_target, dtype=bool)
+        if labels.shape != (len(observations), 6):
+            raise ValueError("selection_target must have shape (frames, 6)")
+        actions = np.stack([
+            np.asarray(item["action_delta"], dtype=np.float32).reshape(4)
+            for item in observations
+        ])
+        robot_state = np.stack([
+            np.asarray(item["robot_state"], dtype=np.float32).reshape(36)
+            for item in observations
+        ])
+        task_state = np.stack([
+            np.asarray(item["task_state"], dtype=np.float32).reshape(6)
+            for item in observations
+        ])
+        object_tokens = np.stack([
+            np.asarray(item["object_tokens"], dtype=np.float32).reshape(6, 29)
+            for item in observations
+        ])
+        object_valid = np.stack([
+            np.asarray(item["object_valid"], dtype=bool).reshape(6)
+            for item in observations
+        ])
+        instance_bev = np.stack([
+            np.asarray(item["instance_bev"], dtype=bool).reshape(6, 128, 160)
+            for item in observations
+        ])
+        action_valid = np.asarray([
+            bool(item.get("policy_mask", True)) for item in observations
+        ], dtype=bool)
+        episode_dir = self.root / str(episode_id)
+        if episode_dir.exists():
+            raise FileExistsError(episode_dir)
+        temporary = self.root / f".{episode_id}.tmp-{uuid.uuid4().hex}"
+        temporary.mkdir(parents=True, exist_ok=False)
+        created = False
+        committed = False
+        try:
+            overhead, wrist, inspection = [], [], []
+            for index, item in enumerate(observations):
+                for key, paths in (("overhead", overhead), ("wrist", wrist)):
+                    path = temporary / f"{key}_{index:05d}.png"
+                    Image.fromarray(np.asarray(item[key], dtype=np.uint8)).save(path)
+                    paths.append(str(Path(str(episode_id)) / path.name))
+                image = item.get("inspection")
+                if image is None:
+                    inspection.append("")
+                else:
+                    path = temporary / f"inspection_{index:05d}.png"
+                    Image.fromarray(np.asarray(image, dtype=np.uint8)).save(path)
+                    inspection.append(str(Path(str(episode_id)) / path.name))
+
+            def matrix(name: str, width: int) -> np.ndarray:
+                return np.stack([
+                    np.asarray(item.get(name, np.zeros(width)), dtype=np.float32).reshape(width)
+                    for item in observations
+                ])
+
+            np.savez_compressed(
+                temporary / "arrays.npz",
+                robot_state=robot_state,
+                action=actions,
+                action_valid=action_valid,
+                t=np.asarray([float(item.get("t", index / 25.0)) for index, item in enumerate(observations)], dtype=np.float64),
+                phase=np.asarray([str(item.get("phase", "unknown")) for item in observations], dtype="U16"),
+                joint_position=matrix("joint_position", 6),
+                tcp_pose=matrix("tcp_pose", 4),
+                wrench=matrix("wrench", 6),
+                normal_force=np.asarray([float(item.get("normal_force", 0.0)) for item in observations], dtype=np.float32),
+                contact=np.asarray([bool(item.get("contact", False)) for item in observations], dtype=bool),
+                contact_latched=np.asarray([bool(item.get("contact_latched", item.get("contact", False))) for item in observations], dtype=bool),
+                fully_collected=np.asarray([int(item.get("fully_collected", 0)) for item in observations], dtype=np.int16),
+                reference=np.stack([np.asarray(item.get("reference", np.zeros(4)), dtype=np.float32).reshape(4) for item in observations]),
+                policy_reference=np.stack([np.asarray(item.get("policy_reference", np.zeros(4)), dtype=np.float32).reshape(4) for item in observations]),
+                policy_z=np.asarray([float(item.get("policy_z", 0.0)) for item in observations], dtype=np.float32),
+                applied_z=np.asarray([float(item.get("applied_z", 0.0)) for item in observations], dtype=np.float32),
+                z_owner=np.asarray([str(item.get("z_owner", "unknown")) for item in observations], dtype="U24"),
+            )
+            sidecar = temporary / "perception_v5.npz"
+            write_v5_sidecar(
+                sidecar,
+                object_tokens,
+                object_valid,
+                instance_bev,
+                task_state,
+                selection_target=labels,
+                visual_count=np.rint(task_state[:, 0] * 6.0).astype(np.int16),
+            )
+            record = {
+                **metadata,
+                "perception_source": str(metadata.get("perception_source", "rgb_detector")),
+                "episode_id": str(episode_id),
+                "schema_version": 5,
+                "episode_kind": "expert",
+                "split": str(metadata.get("split", "train")),
+                "success": True,
+                "frame_count": len(observations),
+                "action_dim": 4,
+                "robot_state_dim": 36,
+                "task_state_dim": 6,
+                "object_slots": 6,
+                "object_token_dim": 29,
+                "bev_shape": [6, 128, 160],
+                "arrays": str(Path(str(episode_id)) / "arrays.npz"),
+                "perception_sidecar": str(Path(str(episode_id)) / "perception_v5.npz"),
+                "overhead": overhead,
+                "wrist": wrist,
+                "inspection": inspection,
+            }
+            temporary.rename(episode_dir)
+            created = True
+            old_manifest = self.manifest.read_text(encoding="utf-8") if self.manifest.exists() else ""
+            manifest_tmp = self.root / f".{self.manifest.name}.tmp-{uuid.uuid4().hex}"
+            try:
+                manifest_tmp.write_text(
+                    old_manifest + json.dumps(record, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                manifest_tmp.replace(self.manifest)
+            finally:
+                manifest_tmp.unlink(missing_ok=True)
+            committed = True
+            return episode_dir
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary, ignore_errors=True)
+            if created and not committed and episode_dir.exists():
+                shutil.rmtree(episode_dir, ignore_errors=True)
 
 
 def validate_v5_manifest(
