@@ -85,3 +85,18 @@ def test_selector_rewrites_bev_selection_channels_and_reports_selection_loss():
     assert torch.isfinite(loss)
     assert "selection_bce_loss" in logs
     assert policy.last_selection.shape == (1, 6)
+
+
+def test_objectact_policy_factory_can_bootstrap_before_first_checkpoint():
+    from sim.act.policy import build_objectact_policy
+    from sim.config import load_config
+
+    cfg = load_config(overrides=[
+        "act.image_size=[64,64]",
+        "act.device=cpu",
+        "act.objectact_pretrained_weights=null",
+    ])
+    policy, object_config, checkpoint = build_objectact_policy(cfg)
+    assert checkpoint is None
+    assert object_config.robot_state_dim == 36
+    assert policy.config.device == "cpu"

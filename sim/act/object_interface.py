@@ -212,9 +212,13 @@ class RGBObjectPerceptionFrontend:
         size = (int(overhead_rgb.shape[1]), int(overhead_rgb.shape[0]))
         scene_fovy = float(env.cfg.perception.camera.fovy_deg)
         wrist_fovy = float(env.cfg.perception.wrist_camera.fovy_deg)
+        overhead_cfg = env.cfg.get_path("video.extra_cameras.overhead_cam", None)
+        overhead_fovy = float(
+            overhead_cfg.fovy_deg if overhead_cfg is not None else scene_fovy
+        )
         detections = []
         for image, camera_name, fovy, visibility in (
-            (overhead_rgb, "overhead_cam", scene_fovy, (1.0, 0.0)),
+            (overhead_rgb, "overhead_cam", overhead_fovy, (1.0, 0.0)),
             (wrist_rgb, "wrist_cam", wrist_fovy, (0.0, 1.0)),
         ):
             camera = self._camera(env, camera_name, size, fovy)

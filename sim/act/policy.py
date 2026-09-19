@@ -134,10 +134,16 @@ def _resolve_objectact_checkpoint(model_path: str | None, cfg) -> Path | None:
     if not candidate:
         return None
     path = Path(str(candidate))
+    explicit = model_path is not None
+    if not path.exists() and not explicit:
+        return None
     pointer = path / "latest_checkpoint.txt"
     if pointer.exists():
         relative = pointer.read_text(encoding="utf-8").strip()
         path = path / relative
+    elif not explicit and not (path / "model.pt").exists():
+        # Training uses this constructor before the first checkpoint exists.
+        return None
     if not (path / "model.pt").exists() or not (path / "training_state.pt").exists():
         raise FileNotFoundError(
             f"ObjectACT checkpoint not found under {path}; expected model.pt and training_state.pt"
