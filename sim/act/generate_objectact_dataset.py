@@ -278,6 +278,10 @@ def _read_layout_assignments(root: Path) -> dict[str, dict]:
     return assignments
 
 
+def _progress(event: str, **payload) -> None:
+    print(json.dumps({"event": event, **payload}, ensure_ascii=False), flush=True)
+
+
 def _existing_v5_slots(root: Path) -> tuple[list[dict], set[tuple[str, int]]]:
     records = _read_v5_manifest(root)
     slots: set[tuple[str, int]] = set()
@@ -370,6 +374,12 @@ def generate_objectact_training_dataset(
         assignment = assignments.get(layout_id)
         if assignment is None:
             requested_seed = int(seed_base) + paired_index * 1_000
+            _progress(
+                "screen_shared_layout",
+                layout_id=layout_id,
+                requested_seed=requested_seed,
+                target_counts=list(range(1, 7)),
+            )
             accepted_seed, attempt = find_shared_layout_seed(
                 cfg,
                 requested_seed,
@@ -387,10 +397,18 @@ def generate_objectact_training_dataset(
             }
             _append_layout_assignment(root, assignment)
             assignments[layout_id] = assignment
+            _progress("layout_assigned", **assignment)
         elif set(int(value) for value in assignment.get("target_counts", [])) != set(range(1, 7)):
             raise ValueError(f"paired assignment {layout_id} does not cover targets 1..6")
         for target_count in missing:
             try:
+                _progress(
+                    "capture_start",
+                    layout_id=layout_id,
+                    layout_kind="paired",
+                    target_count=int(target_count),
+                    seed=int(assignment["seed"]),
+                )
                 generate_one(
                     cfg,
                     root=root,
@@ -403,6 +421,13 @@ def generate_objectact_training_dataset(
                     requested_seed=int(assignment["requested_seed"]),
                     generation_attempt=int(assignment["generation_attempt"]),
                     detector_device=detector_device,
+                )
+                _progress(
+                    "capture_success",
+                    layout_id=layout_id,
+                    layout_kind="paired",
+                    target_count=int(target_count),
+                    seed=int(assignment["seed"]),
                 )
             except Exception as exc:
                 _append_v5_failure(root, {
@@ -424,6 +449,12 @@ def generate_objectact_training_dataset(
         layout_id = str(planned.layout_id)
         assignment = assignments.get(layout_id)
         if assignment is None:
+            _progress(
+                "screen_independent_layout",
+                layout_id=layout_id,
+                target_count=int(planned.target_count),
+                requested_seed=int(planned.seed),
+            )
             accepted_seed, attempt = _find_independent_seed(
                 cfg,
                 target_count=int(planned.target_count),
@@ -443,7 +474,15 @@ def generate_objectact_training_dataset(
             }
             _append_layout_assignment(root, assignment)
             assignments[layout_id] = assignment
+            _progress("layout_assigned", **assignment)
         try:
+            _progress(
+                "capture_start",
+                layout_id=layout_id,
+                layout_kind="independent",
+                target_count=int(planned.target_count),
+                seed=int(assignment["seed"]),
+            )
             generate_one(
                 cfg,
                 root=root,
@@ -456,6 +495,13 @@ def generate_objectact_training_dataset(
                 requested_seed=int(assignment["requested_seed"]),
                 generation_attempt=int(assignment["generation_attempt"]),
                 detector_device=detector_device,
+            )
+            _progress(
+                "capture_success",
+                layout_id=layout_id,
+                layout_kind="independent",
+                target_count=int(planned.target_count),
+                seed=int(assignment["seed"]),
             )
         except Exception as exc:
             _append_v5_failure(root, {
