@@ -245,8 +245,31 @@ python -m sim.act.generate_objectact_dataset \
   --detector-checkpoint runs/objectact_detector
 ```
 
+For the formal policy dataset, use the resumable batch command. It screens
+the expert-only A* layouts first, writes only successful RGB-derived episodes,
+keeps rejected attempts in a lightweight failure log, and uses MPS
+automatically on Apple Silicon:
+
+```bash
+python -m sim.act.generate_objectact_dataset --batch \
+  --out runs/objectact_dataset --seed-base 4100 --max-attempts 64 \
+  --detector-checkpoint runs/objectact_detector --detector-device auto
+```
+
+The batch validator requires exactly 120 successful v5 episodes: 20 for each
+target count, including eight shared layouts and twelve independent layouts
+per target. It also freezes disjoint validation/test layout assignments.
+
 Train the new policy explicitly with `act.policy_variant: objectact`; the
 ordinary `sim.act.train` and `sim.act.evaluate` defaults remain v4.
+
+After the manifest validator passes, start the formal ObjectACT run with:
+
+```bash
+python -m sim.act.object_training --config configs/default.yaml \
+  --dataset runs/objectact_dataset --out runs/objectact_model \
+  --steps 80000 --batch-size 4 --checkpoint-every 2500
+```
 
 ### Useful flags
 
