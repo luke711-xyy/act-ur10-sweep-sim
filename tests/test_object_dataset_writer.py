@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+import pytest
 
 
 def _observation(frame: int):
@@ -69,3 +70,33 @@ def test_selection_targets_are_offline_labels_from_final_collected_parts():
     assert labels.shape == (1, 6)
     assert labels[0, 0]
     assert not labels[0, 1]
+
+
+def test_workbench_reads_v5_episode_without_merging_it_into_v4_arrays(tmp_path):
+    from sim.act.object_dataset import ObjectActDatasetWriter
+    from sim.config import load_config
+    from sim.web.workbench import WorkbenchState
+
+    dataset = tmp_path / "objectact"
+    ObjectActDatasetWriter(str(dataset)).add_episode(
+        "expert_v5_n2_s1",
+        [_observation(0), _observation(1)],
+        np.array([[True, False, False, False, False, False]] * 2),
+        True,
+        {"split": "train", "target_count": 2, "total_count": 6, "fps": 25.0},
+    )
+    state = WorkbenchState(
+        load_config(),
+        dataset_root=tmp_path / "ordinary",
+        objectact_dataset_root=dataset,
+        preview_root=tmp_path / "previews",
+    )
+    assert state.list_episodes()[0]["schema_version"] == 5
+    frame = state.load_episode_frame("expert_v5_n2_s1", 0)
+    assert frame["inspection"] is not None
+    data = state.load_episode_frame_data("expert_v5_n2_s1", 0)
+    assert data["perception"]["object_tokens"]
+    perception = state.load_episode_perception("expert_v5_n2_s1", 0)
+    assert np.asarray(perception["bev"]).shape == (6, 128, 160)
+    signals = state.load_episode_signals("expert_v5_n2_s1")
+    assert signals["environment_state"][0][1] == pytest.approx(2.0)

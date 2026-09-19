@@ -456,9 +456,12 @@ def main(argv=None) -> int:
     replay_error = ""
     if args.record_replay:
         try:
-            from .replay import save_inference_replay
+            if str(cfg.act.get("policy_variant", "ordinary")).lower() == "objectact":
+                from .replay import save_objectact_inference_replay as save_replay
+            else:
+                from .replay import save_inference_replay as save_replay
 
-            replay_episode_id = save_inference_replay(
+            replay_episode_id = save_replay(
                 cfg, args.seed, result, args.replay_root, model=args.model
             )
         except Exception as exc:  # keep the physical result visible if replay fails

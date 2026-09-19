@@ -42,7 +42,7 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 </section>
 <section class="panel telemetry"><div class="telemetry-head"><div><h2>Frame inspector <span class="muted">· synchronized observation and action traces</span></h2><div class="hint">拖动上方帧滑块，图线游标、三路画面和右侧数值会同步更新。</div></div><label>Signal group<select id="signalGroup" onchange="renderTelemetry(Number($('frameSlider').value||0))"><option value="tcp">TCP pose</option><option value="action">ACT label</option><option value="zcontrol">Policy / applied Z</option><option value="wrench">6D wrench</option><option value="joints">UR10 joints</option><option value="counts">Counts & contact</option></select></label></div><div class="telemetry-layout"><div class="telemetry-chart"><svg viewBox="0 0 900 260" role="img" aria-label="Selected episode signals"><g id="telemetryGrid"></g><g id="telemetryPaths"></g><line id="telemetryCursor" class="fz-cursor" x1="42" y1="18" x2="42" y2="224"></line><text id="telemetryEmpty" class="signal-empty" x="450" y="126" text-anchor="middle">Select an episode with detailed signals</text></svg><div id="telemetryLegend" class="telemetry-legend"></div><div class="axis"><span id="telemetryStart">0 s</span><span id="telemetryRange">—</span><span id="telemetryEnd">—</span></div></div><div class="frame-detail"><table class="frame-table"><tbody id="frameData"><tr><th>Frame</th><td>—</td></tr></tbody></table></div></div></section>
 <section class="panel training"><h2>Training <span class="muted">· local ACT</span></h2>
-<label>Dataset directory<input id="trainDataset" value="runs/act_dataset"></label><label>Output directory<input id="trainOut" value="runs/act_model"></label><label>Steps (optional)<input id="trainSteps" type="number" min="1" placeholder="use config default"></label>
+<label>Policy variant<select id="trainVariant" onchange="toggleTrainVariant()"><option value="ordinary">ordinary ACT · v4</option><option value="objectact">ObjectACT-BEV · v5</option></select></label><label>Dataset directory<input id="trainDataset" value="runs/act_dataset"></label><label>Output directory<input id="trainOut" value="runs/act_model"></label><label>Steps (optional)<input id="trainSteps" type="number" min="1" placeholder="use config default"></label>
 <div class="row"><button class="primary" onclick="startTraining()">Start training job</button><button class="danger" onclick="stopLatest('train')">Stop</button></div><div id="trainJob" class="job">No training job.</div>
 </section>
 <section class="panel inference"><h2>Inference <span class="muted">· MuJoCo rollout</span></h2>
@@ -79,10 +79,11 @@ function togglePlay(){if(timer){clearInterval(timer);timer=null;$('playButton').
 function toggleFailureMode(){const failed=$('previewOutcome').value==='failed';$('previewFailureModeWrap').style.display=failed?'block':'none'}
 async function makePreview(){try{const target=Number($('previewTarget').value),outcome=$('previewOutcome').value,count=Math.max(1,Math.min(100,Number($('previewCount').value)||1)),failure_mode=$('previewFailureMode').value;$('globalStatus').textContent=`Generating ${count} ${outcome} demonstration${count===1?'':'s'} in MuJoCo…`;const response=await json('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({seed:Date.now()%100000,target_count:target,outcome,count,failure_mode})});if(response.job_id){previewJobId=response.job_id;previewJobHandled=null;$('globalStatus').textContent=`后台生成已启动 · 0/${count} · 工作台仍可操作`;await refreshJobs();return}const records=response.records||[response];const latest=records[records.length-1];selectedEpisodeId=latest.episode_id;await loadEpisodes();$('episodeSelect').value=latest.episode_id;await selectEpisode(latest.episode_id);$('globalStatus').textContent=`Generated ${records.length} ${outcome} demonstration${records.length===1?'':'s'} · latest ${latest.episode_id} · goal ${target}/6.`}catch(e){$('globalStatus').textContent='Generation failed: '+e.message}}
 async function resetScene(){if(timer){clearInterval(timer);timer=null;$('playButton').textContent='Play'}await json('/api/reset',{method:'POST'});await refreshAll()}
-function fillParameters(c){$('pForce').value=c.controller.desired_force;$('pSpeed').value=c.controller.sweep_speed;$('pSafe').value=c.controller.safe_max_force;$('pTime').value=c.episode.max_time;$('pTarget').value=c.task.target_count;$('previewTarget').value=c.task.target_count;$('inferTarget').value=c.task.target_count;$('pBatch').value=c.act.batch_size}
+function toggleTrainVariant(){const objectact=$('trainVariant').value==='objectact';if(objectact){$('trainDataset').value='runs/objectact_dataset';$('trainOut').value='runs/objectact_model'}else{$('trainDataset').value='runs/act_dataset';$('trainOut').value='runs/act_model'}}
+function fillParameters(c){$('pForce').value=c.controller.desired_force;$('pSpeed').value=c.controller.sweep_speed;$('pSafe').value=c.controller.safe_max_force;$('pTime').value=c.episode.max_time;$('pTarget').value=c.task.target_count;$('previewTarget').value=c.task.target_count;$('inferTarget').value=c.task.target_count;$('pBatch').value=c.act.batch_size;if(c.act.policy_variant){$('trainVariant').value=c.act.policy_variant;toggleTrainVariant()}}
 async function initParameters(){try{fillParameters(await json('/api/config'))}catch(e){$('parameterStatus').textContent=e.message}}
 async function applyParameters(){const values={"controller.desired_force":Number($('pForce').value),"controller.sweep_speed":Number($('pSpeed').value),"controller.safe_max_force":Number($('pSafe').value),"episode.max_time":Number($('pTime').value),"task.target_count":Number($('pTarget').value),"act.batch_size":Number($('pBatch').value)};try{await json('/api/config/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});$('parameterStatus').textContent='Applied and saved to runs/workbench/config.yaml.';await refreshAll()}catch(e){$('parameterStatus').textContent='Rejected: '+e.message}}
-async function startTraining(){try{const body={dataset:$('trainDataset').value,out:$('trainOut').value};if($('trainSteps').value)body.steps=Number($('trainSteps').value);await json('/api/jobs/train',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await refreshJobs()}catch(e){$('trainJob').textContent=e.message}}
+async function startTraining(){try{const body={variant:$('trainVariant').value,dataset:$('trainDataset').value,out:$('trainOut').value};if($('trainSteps').value)body.steps=Number($('trainSteps').value);await json('/api/jobs/train',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await refreshJobs()}catch(e){$('trainJob').textContent=e.message}}
 async function startInference(){try{let seed=Number($('inferSeed').value);if($('inferRandomize').checked){seed=Math.floor(Math.random()*1000000000);$('inferSeed').value=seed}await json('/api/jobs/inference',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:$('inferModel').value,seed,target_count:Number($('inferTarget').value),preview:$('inferPreview').checked})});await refreshJobs()}catch(e){$('inferJob').textContent=e.message}}
 function renderJob(jobNode,j){const outputNode=jobNode.querySelector('pre');const scrollTop=outputNode?.scrollTop||0;const wasAtBottom=outputNode?outputNode.scrollTop+outputNode.clientHeight>=outputNode.scrollHeight-8:true;jobNode.innerHTML=`<strong>${j.state}</strong> · ${j.job_id}<pre>${(j.output||[]).join('\n')}</pre>`;const nextOutputNode=jobNode.querySelector('pre');if(nextOutputNode)nextOutputNode.scrollTop=wasAtBottom?nextOutputNode.scrollHeight:scrollTop}
 async function refreshJobs(){const jobs=await json('/api/jobs');for(const kind of ['train','inference']){const j=jobs.find(x=>x.kind===kind);if(j){const jobNode=$(kind==='train'?'trainJob':'inferJob');renderJob(jobNode,j)}}const preview=previewJobId?jobs.find(x=>x.kind==='preview'&&x.job_id===previewJobId):jobs.find(x=>x.kind==='preview'&&['starting','running','stopping'].includes(x.state));if(preview&&!previewJobId)previewJobId=preview.job_id;if(!preview)return;const p=preview.progress||{};if(preview.state==='stopping'){$('globalStatus').textContent=`正在停止示教生成… · ${p.completed||0}/${p.total||'?'} · 请等待当前回合退出`;}else if(['starting','running'].includes(preview.state)){$('globalStatus').textContent=`后台生成示教中 · ${p.completed||0}/${p.total||'?'} · 工作台仍可操作`;}else if(previewJobHandled!==preview.job_id){previewJobHandled=preview.job_id;await loadEpisodes();if(p.latest_episode_id)await selectEpisode(p.latest_episode_id);$('globalStatus').textContent=`示教生成${preview.state==='done'?'完成':'结束'} · ${p.completed||0}/${p.total||'?'} 条已保存`}}
@@ -123,9 +124,15 @@ def create_app(cfg):
     dataset_root = Path(str(cfg.act.dataset_dir))
     if not dataset_root.is_absolute():
         dataset_root = project_root / dataset_root
+    objectact_dataset_root = Path(
+        str(cfg.act.get("objectact_dataset_dir", "runs/objectact_dataset"))
+    )
+    if not objectact_dataset_root.is_absolute():
+        objectact_dataset_root = project_root / objectact_dataset_root
     app.state.workbench = WorkbenchState(
         cfg, dataset_root=dataset_root,
-        preview_root=project_root / "runs" / "workbench_previews")
+        preview_root=project_root / "runs" / "workbench_previews",
+        objectact_dataset_root=objectact_dataset_root)
     app.state.jobs = JobRegistry(project_root)
 
     def env():
@@ -217,6 +224,13 @@ def create_app(cfg):
         try:
             return app.state.workbench.load_episode_frame_data(episode_id, frame_index)
         except (EpisodeNotFound, FrameNotFound, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/episodes/{episode_id}/frame/{frame_index}/perception")
+    def episode_frame_perception(episode_id: str, frame_index: int):
+        try:
+            return app.state.workbench.load_episode_perception(episode_id, frame_index)
+        except (EpisodeNotFound, FrameNotFound, FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/api/preview/{preview_id}")
@@ -384,11 +398,24 @@ def create_app(cfg):
 
     @app.post("/api/jobs/train")
     def train(payload: dict):
+        variant = str(payload.get(
+            "variant", app.state.cfg.act.get("policy_variant", "ordinary")
+        )).lower()
+        if variant not in {"ordinary", "objectact"}:
+            raise HTTPException(status_code=422, detail="variant must be ordinary or objectact")
+        default_dataset = (
+            app.state.cfg.act.get("objectact_dataset_dir", "runs/objectact_dataset")
+            if variant == "objectact" else app.state.cfg.act.dataset_dir
+        )
+        default_output = (
+            app.state.cfg.act.get("objectact_model_dir", "runs/objectact_model")
+            if variant == "objectact" else app.state.cfg.act.model_dir
+        )
         argv = build_train_argv(project_root, payload.get("config", str(app.state.cfg.get_path("_source_config"))),
-                                payload.get("dataset", str(app.state.cfg.act.dataset_dir)),
-                                payload.get("out", str(app.state.cfg.act.model_dir)), payload.get("steps"),
+                                payload.get("dataset", str(default_dataset)),
+                                payload.get("out", str(default_output)), payload.get("steps"),
                                 preview_training=bool(payload.get("preview_training", False)),
-                                resume=payload.get("resume"))
+                                resume=payload.get("resume"), variant=variant)
         try:
             return app.state.jobs.start("train", argv)
         except RuntimeError as exc:

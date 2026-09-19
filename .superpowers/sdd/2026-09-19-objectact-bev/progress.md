@@ -54,3 +54,8 @@ Task 5C: complete (schema-v5 atomic writer, RGB-derived expert observation
 capture, offline actual-final-collected selection labels, and a guarded
 single-episode v5 generation CLI; it refuses to generate policy data without
 an explicit RGB detector checkpoint)
+
+Task 6A: complete (workbench discovers v5 train/replay manifests separately,
+loads v5 token/selection/BEV inspection payloads, exposes v5 perception API
+data, and can launch ordinary or ObjectACT training modules without changing
+the ordinary defaults; focused workbench regressions pass)

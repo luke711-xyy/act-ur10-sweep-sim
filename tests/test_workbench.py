@@ -135,6 +135,11 @@ def test_job_commands_are_typed_and_use_project_modules(tmp_path):
     preview_infer = build_inference_argv(tmp_path, "cfg.yaml", 3, "model.pt", 4,
                                          preview=True)
     assert "--preview" in preview_infer
+    objectact = build_train_argv(
+        tmp_path, "cfg.yaml", "v5", "v5-model", 80,
+        variant="objectact",
+    )
+    assert objectact[1:3] == ["-m", "sim.act.object_training"]
 
 
 def test_evaluate_cli_accepts_exact_target_count():

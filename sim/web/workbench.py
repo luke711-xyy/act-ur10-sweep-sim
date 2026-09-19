@@ -40,8 +40,8 @@ def _resolve_failure_mode(mode: str, target_count: int, ordinal: int = 0) -> str
     return "wrong_count_over" if int(ordinal) % 2 == 0 else "wrong_count_under"
 
 
-def _read_manifest(root: Path) -> list[dict]:
-    path = root / "manifest.jsonl"
+def _read_manifest(root: Path, manifest_name: str = "manifest.jsonl") -> list[dict]:
+    path = root / manifest_name
     if not path.exists():
         return []
     records = []
@@ -60,9 +60,9 @@ def _read_manifest(root: Path) -> list[dict]:
     return records
 
 
-def _write_manifest(root: Path, records: list[dict]) -> None:
+def _write_manifest(root: Path, records: list[dict], manifest_name: str = "manifest.jsonl") -> None:
     """Replace a manifest atomically so polling cannot see a half-file."""
-    manifest = root / "manifest.jsonl"
+    manifest = root / manifest_name
     if not records:
         manifest.unlink(missing_ok=True)
         return
@@ -88,11 +88,19 @@ def _image(root: Path, relative: str):
 class WorkbenchState:
     """Expose saved demonstrations and isolated expert previews."""
 
-    def __init__(self, cfg, dataset_root=None, preview_root=None):
+    def __init__(self, cfg, dataset_root=None, preview_root=None,
+                 objectact_dataset_root=None):
         self.cfg = cfg
         self.dataset_root = Path(dataset_root or cfg.act.dataset_dir)
         self.preview_root = Path(
             preview_root or Path(cfg.logging.out_dir) / "workbench_previews")
+        self.objectact_dataset_root = Path(
+            objectact_dataset_root
+            or cfg.act.get(
+                "objectact_dataset_dir",
+                Path(cfg.logging.out_dir) / "objectact_dataset",
+            )
+        )
         # Episode refreshes run while the UI can delete a record or a preview
         # job can publish one.  Keep manifest reads and directory mutations
         # from observing a half-committed episode.
@@ -103,12 +111,28 @@ class WorkbenchState:
         with self._io_lock:
             records = [(self.dataset_root, rec, False)
                        for rec in _read_manifest(self.dataset_root)]
+            objectact_records = _read_manifest(
+                self.objectact_dataset_root, "manifest_v5.jsonl"
+            )
+            for rec in objectact_records:
+                rec["_manifest_name"] = "manifest_v5.jsonl"
+            records.extend(
+                (self.objectact_dataset_root, rec, False)
+                for rec in objectact_records
+            )
             preview_records = _read_manifest(self.preview_root)
             self._preview_records = {
                 rec["episode_id"]: rec for rec in preview_records
             }
             records.extend((self.preview_root, rec, True)
                            for rec in preview_records)
+            preview_v5_records = _read_manifest(
+                self.preview_root, "manifest_v5.jsonl"
+            )
+            for rec in preview_v5_records:
+                rec["_manifest_name"] = "manifest_v5.jsonl"
+            records.extend((self.preview_root, rec, True)
+                           for rec in preview_v5_records)
             return records
 
     def list_episodes(self) -> list[dict]:
@@ -153,6 +177,11 @@ class WorkbenchState:
                     "duration": _frame_count(root, rec) / max(float(rec.get("fps", 25.0)), 1.0),
                     "failure_reason": rec.get("failure_reason", ""),
                     "preview": preview,
+                    "perception_source": rec.get("perception_source", "legacy_simulator"),
+                    "detector_checkpoint": rec.get("detector_checkpoint", ""),
+                    "object_slots": rec.get("object_slots"),
+                    "object_token_dim": rec.get("object_token_dim"),
+                    "bev_shape": rec.get("bev_shape"),
                 })
             return output
 
@@ -165,7 +194,11 @@ class WorkbenchState:
     def episode_metadata(self, episode_id: str) -> dict:
         with self._io_lock:
             root, rec, preview = self._find(episode_id)
-            return {**rec, "length": _frame_count(root, rec), "preview": preview}
+            return {
+                key: value for key, value in {
+                    **rec, "length": _frame_count(root, rec), "preview": preview
+                }.items() if not str(key).startswith("_")
+            }
 
     def delete_episode(self, episode_id: str) -> dict:
         """Delete exactly one episode directory and its manifest record."""
@@ -178,13 +211,14 @@ class WorkbenchState:
 
             # Resolve the record again from the manifest so a malformed or stale
             # directory cannot cause an unrelated entry to be removed.
-            records = _read_manifest(root)
+            manifest_name = str(rec.get("_manifest_name", "manifest.jsonl"))
+            records = _read_manifest(root, manifest_name)
             if not any(str(item.get("episode_id")) == episode_id for item in records):
                 raise EpisodeNotFound(episode_id)
             shutil.rmtree(episode_dir)
             remaining = [item for item in records
                          if str(item.get("episode_id")) != episode_id]
-            _write_manifest(root, remaining)
+            _write_manifest(root, remaining, manifest_name)
             self._preview_records.pop(episode_id, None)
             return {"episode_id": episode_id, "preview": bool(preview),
                     "success": bool(rec.get("success", False)), "deleted": True}
@@ -223,6 +257,17 @@ class WorkbenchState:
                 return [[float(item) for item in row] for row in values]
 
             env_state = matrix("environment_state", 3)
+            if int(rec.get("schema_version", 0)) == 5 and rec.get("perception_sidecar"):
+                from ..act.v5 import read_v5_sidecar
+
+                sidecar = read_v5_sidecar(root / rec["perception_sidecar"])
+                # The v5 task state stores normalized visual counts.  Expose
+                # the same count-shaped view used by the existing chart while
+                # retaining the raw sidecar for the perception endpoint.
+                env_state = (
+                    (np.asarray(sidecar["task_state"], dtype=float)[:, :3] * 6.0)
+                    .tolist()
+                )
             return {
                 "episode_id": rec["episode_id"],
                 "t": [float(value) for value in arrays["t"]],
@@ -289,7 +334,11 @@ class WorkbenchState:
                 return [0.0] * width
             return [float(value) for value in np.asarray(arrays[name][index]).reshape(width)]
 
-        env_state = vector("environment_state", int(arrays["environment_state"].shape[1]))
+        env_state = vector(
+            "environment_state",
+            int(arrays["environment_state"].shape[1])
+            if "environment_state" in arrays.files else 3,
+        )
         objects = []
         if "object_pose" in arrays.files:
             poses = np.asarray(arrays["object_pose"][index], dtype=float)
@@ -299,8 +348,25 @@ class WorkbenchState:
             objects = [{"index": int(i),
                         "position": [float(value) for value in pose[:3]],
                         "quaternion": [float(value) for value in pose[3:7]],
-                        "collected": bool(flags[i])}
+                       "collected": bool(flags[i])}
                        for i, pose in enumerate(poses)]
+        perception = None
+        if int(rec.get("schema_version", 0)) == 5 and rec.get("perception_sidecar"):
+            from ..act.v5 import read_v5_sidecar
+
+            sidecar = read_v5_sidecar(root / rec["perception_sidecar"])
+            tokens = np.asarray(sidecar["object_tokens"][index], dtype=float)
+            valid = np.asarray(sidecar["object_valid"][index], dtype=bool)
+            selected = (
+                np.asarray(sidecar["selection_target"][index], dtype=bool)
+                if "selection_target" in sidecar else np.zeros(6, dtype=bool)
+            )
+            perception = {
+                "object_tokens": tokens.tolist(),
+                "object_valid": valid.tolist(),
+                "selection_target": selected.tolist(),
+                "task_state": np.asarray(sidecar["task_state"][index], dtype=float).tolist(),
+            }
         return {
             "episode_id": episode_id,
             "frame": index,
@@ -339,7 +405,53 @@ class WorkbenchState:
             "target_collected": int(rec.get("target_collected", -1)),
             "unexpected_collected": int(rec.get("unexpected_collected", -1)),
             "target_indices": rec.get("target_indices", []),
+            "perception": perception,
         }
+
+    def load_episode_perception(self, episode_id: str, frame_index: int) -> dict:
+        """Return the v5 predicted BEV and token inspection payload."""
+        with self._io_lock:
+            root, rec, _ = self._find(episode_id)
+            if int(rec.get("schema_version", 0)) != 5 or not rec.get("perception_sidecar"):
+                raise EpisodeNotFound(f"{episode_id} has no schema-v5 perception sidecar")
+            arrays = np.load(root / rec["arrays"], allow_pickle=False)
+            length = len(arrays["action"])
+            index = int(frame_index)
+            if index < 0 or index >= length:
+                raise FrameNotFound(f"{episode_id}:{index}")
+            from ..act.v5 import read_v5_sidecar
+            from ..act.v5_bev import build_bev_from_sidecar
+
+            sidecar = read_v5_sidecar(root / rec["perception_sidecar"])
+            robot_state = np.asarray(arrays["robot_state"][index], dtype=np.float32)
+            tray = self.cfg.target
+            bev = build_bev_from_sidecar(
+                object_tokens=sidecar["object_tokens"][index],
+                object_valid=sidecar["object_valid"][index],
+                instance_bev=sidecar["instance_bev"][index],
+                robot_state=robot_state,
+                selection_target=(
+                    sidecar["selection_target"][index]
+                    if "selection_target" in sidecar else None
+                ),
+                tray_bounds=(float(tray.x_min), float(tray.x_max),
+                             float(tray.y_min), float(tray.y_max)),
+                brush_size=(
+                    float(self.cfg.end_effector.brush_width),
+                    float(self.cfg.end_effector.brush_depth),
+                ),
+            )
+            return {
+                "episode_id": episode_id,
+                "frame": index,
+                "object_tokens": np.asarray(sidecar["object_tokens"][index], dtype=float).tolist(),
+                "object_valid": np.asarray(sidecar["object_valid"][index], dtype=bool).tolist(),
+                "selection_target": (
+                    np.asarray(sidecar["selection_target"][index], dtype=bool).tolist()
+                    if "selection_target" in sidecar else None
+                ),
+                "bev": np.asarray(bev, dtype=float).tolist(),
+            }
 
     def _clone_success_as_wrong_count(self, seed: int, target_count: int,
                                       failure_mode: str,

@@ -15,12 +15,13 @@ from pathlib import Path
 
 
 def build_train_argv(project_root, config, dataset, out, steps=None,
-                     preview_training=False, resume=None):
-    argv = [sys.executable, "-m", "sim.act.train", "--config", str(config),
+                     preview_training=False, resume=None, variant="ordinary"):
+    module = "sim.act.object_training" if str(variant).lower() == "objectact" else "sim.act.train"
+    argv = [sys.executable, "-m", module, "--config", str(config),
             "--dataset", str(dataset), "--out", str(out)]
     if steps is not None:
         argv.extend(["--steps", str(int(steps))])
-    if preview_training:
+    if preview_training and module == "sim.act.train":
         argv.append("--preview-training")
     if resume:
         argv.extend(["--resume", str(resume)])

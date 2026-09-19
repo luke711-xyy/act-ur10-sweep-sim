@@ -40,8 +40,9 @@ class ObjectActDatasetWriter:
     ) -> Path:
         from PIL import Image
 
-        if not success:
-            raise ValueError("v5 training writer accepts successful expert episodes only")
+        episode_kind = str(metadata.get("episode_kind", "expert"))
+        if episode_kind == "expert" and not success:
+            raise ValueError("v5 expert writer accepts successful episodes only")
         if not observations:
             raise ValueError("v5 episode must contain observations")
         labels = np.asarray(selection_target, dtype=bool)
@@ -137,7 +138,7 @@ class ObjectActDatasetWriter:
                 "perception_source": str(metadata.get("perception_source", "rgb_detector")),
                 "episode_id": str(episode_id),
                 "schema_version": 5,
-                "episode_kind": "expert",
+                "episode_kind": episode_kind,
                 "split": str(metadata.get("split", "train")),
                 "success": True,
                 "frame_count": len(observations),
