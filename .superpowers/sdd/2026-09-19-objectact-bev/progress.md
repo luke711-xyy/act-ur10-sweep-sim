@@ -29,3 +29,9 @@ Task 3: complete (permutation-invariant selection head, exact Top-N
 straight-through selection, actual-collected-ID labels, and the 0–5k /
 5k–20k / post-20k teacher schedule; tests: `pytest -q
 tests/test_object_selection.py` → pass)
+
+Task 4: complete (ObjectACTConfig/ObjectACTPolicy with separate robot/task,
+object-token, BEV, and RGB branches; official LeRobot CVAE/decoder,
+L1/KL loss, zero-latent inference, and temporal ensembling; tests:
+`pytest -q tests/test_object_policy.py tests/test_v5_bev.py
+tests/test_objectact_v5_contract.py` and full `pytest -q` → pass)

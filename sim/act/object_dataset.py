@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .v5_bev import build_bev_from_sidecar
 from .v5 import (
     read_v5_sidecar,
 )
@@ -56,9 +57,13 @@ class ObjectActDataset:
         manifest_name: str = "manifest_v5.jsonl",
         chunk_size: int = 25,
         split: str = "train",
+        tray_bounds: tuple[float, float, float, float] = (-0.45, -0.31, -0.18, 0.18),
+        brush_size: tuple[float, float] = (0.12, 0.01),
     ):
         self.root = Path(root)
         self.chunk_size = int(chunk_size)
+        self.tray_bounds = tuple(float(value) for value in tray_bounds)
+        self.brush_size = tuple(float(value) for value in brush_size)
         manifest_path = self.root / manifest_name
         if not manifest_path.exists():
             raise FileNotFoundError(manifest_path)
@@ -138,6 +143,18 @@ class ObjectActDataset:
             ),
             "observation.instance_bev": np.asarray(
                 sidecar["instance_bev"][frame], dtype=bool
+            ),
+            "observation.bev": build_bev_from_sidecar(
+                object_tokens=np.asarray(sidecar["object_tokens"][frame], dtype=np.float32),
+                object_valid=np.asarray(sidecar["object_valid"][frame], dtype=bool),
+                instance_bev=np.asarray(sidecar["instance_bev"][frame], dtype=bool),
+                robot_state=robot_state,
+                selection_target=(
+                    np.asarray(sidecar["selection_target"][frame], dtype=bool)
+                    if "selection_target" in sidecar else None
+                ),
+                tray_bounds=self.tray_bounds,
+                brush_size=self.brush_size,
             ),
             "action": actions,
             "action_is_pad": ~valid,

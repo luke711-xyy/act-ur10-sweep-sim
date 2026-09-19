@@ -135,6 +135,7 @@ def test_objectact_dataset_reads_v5_manifest_and_sidecar(tmp_path):
     assert sample["observation.task_state"].shape == (6,)
     assert sample["observation.object_tokens"].shape == (6, 29)
     assert sample["observation.instance_bev"].shape == (6, 128, 160)
+    assert sample["observation.bev"].shape == (6, 128, 160)
     assert sample["action"].shape == (25, 4)
 
 
