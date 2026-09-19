@@ -20,3 +20,7 @@ Task 2: complete (predicted object tokens, camera-mask projection, dual-view
 fusion, geometry-only tracking, tray features, and six-channel BEV; tests:
 `pytest -q tests/test_object_tokens.py tests/test_object_bev.py` and full
 `pytest -q` → pass)
+
+Task 2 detector extension: complete (frozen/optionally ImageNet-initialized
+ResNet18-FPN semantic, center, and offset heads plus RGB-only instance
+decoding; tests: `pytest -q tests/test_object_detector.py` → pass)
