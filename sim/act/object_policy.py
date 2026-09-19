@@ -307,7 +307,15 @@ class ObjectACTPolicy(nn.Module):
         return [parameter for parameter in self.parameters() if parameter.requires_grad]
 
     @staticmethod
-    def _target_counts(task_state: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+    def _target_counts(
+        task_state: torch.Tensor,
+        valid: torch.Tensor,
+        raw_target_count: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if raw_target_count is not None:
+            return raw_target_count.reshape(-1).round().to(dtype=torch.long).clamp(
+                min=1, max=valid.shape[1]
+            )
         values = task_state[:, 1]
         # v5 stores counts normalized to the six-object maximum.  Accept raw
         # counts as well for a debugging batch, but never let a malformed
@@ -318,7 +326,11 @@ class ObjectACTPolicy(nn.Module):
     def _prepare_selection(self, batch: dict[str, torch.Tensor], *, training: bool):
         tokens = batch["observation.object_tokens"]
         valid = batch["observation.object_valid"]
-        counts = self._target_counts(batch["observation.task_state"], valid)
+        counts = self._target_counts(
+            batch["observation.task_state"],
+            valid,
+            raw_target_count=batch.get("objectact.target_count"),
+        )
         logits = self.selection_head(tokens, valid, counts)
         target = batch.get("selection_target")
         if target is not None:

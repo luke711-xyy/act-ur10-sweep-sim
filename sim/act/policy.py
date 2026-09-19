@@ -7,6 +7,10 @@ useful installation message when it is absent.
 
 from __future__ import annotations
 
+import json
+from dataclasses import fields
+from pathlib import Path
+
 
 def require_act_dependencies():
     try:
@@ -122,3 +126,66 @@ def build_act_processors(policy_cfg, dataset_stats=None, pretrained_path=None):
     from lerobot.policies.act import make_act_pre_post_processors
 
     return make_act_pre_post_processors(policy_cfg, dataset_stats=dataset_stats)
+
+
+def _resolve_objectact_checkpoint(model_path: str | None, cfg) -> Path | None:
+    """Resolve a v5 checkpoint directory without accepting an ordinary ACT one."""
+    candidate = model_path or cfg.act.get("objectact_model_dir", None)
+    if not candidate:
+        return None
+    path = Path(str(candidate))
+    pointer = path / "latest_checkpoint.txt"
+    if pointer.exists():
+        relative = pointer.read_text(encoding="utf-8").strip()
+        path = path / relative
+    if not (path / "model.pt").exists() or not (path / "training_state.pt").exists():
+        raise FileNotFoundError(
+            f"ObjectACT checkpoint not found under {path}; expected model.pt and training_state.pt"
+        )
+    return path
+
+
+def build_objectact_policy(cfg, pretrained_path: str | None = None):
+    """Build the schema-v5 policy and load a v5 checkpoint when supplied.
+
+    This deliberately has a separate constructor from ``build_act_policy``:
+    ordinary LeRobot ACT checkpoints and ObjectACT-BEV checkpoints cannot be
+    silently interchanged.
+    """
+    import torch
+
+    from .object_policy import ObjectACTConfig, ObjectACTPolicy
+    from .object_training import load_objectact_checkpoint
+
+    checkpoint = _resolve_objectact_checkpoint(pretrained_path, cfg)
+    payload = {}
+    if checkpoint is not None:
+        load_objectact_checkpoint(checkpoint, map_location="cpu")
+        config_path = checkpoint / "objectact_config.json"
+        if config_path.exists():
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+    allowed = {field.name for field in fields(ObjectACTConfig)}
+    values = {key: value for key, value in payload.items() if key in allowed}
+    if "image_size" in values:
+        values["image_size"] = tuple(int(value) for value in values["image_size"])
+    values.setdefault("image_size", tuple(int(value) for value in cfg.act.image_size))
+    values.setdefault("chunk_size", int(cfg.act.get("chunk_size", 25)))
+    values.setdefault(
+        "temporal_ensemble_coeff",
+        float(cfg.act.get("temporal_ensemble_coeff", 0.01)),
+    )
+    values.setdefault("device", str(cfg.act.get("device", "mps")))
+    values.setdefault(
+        "pretrained_backbone_weights",
+        cfg.act.get("objectact_pretrained_weights", None),
+    )
+    policy_config = ObjectACTConfig(**values)
+    policy = ObjectACTPolicy(policy_config)
+    device = str(policy.config.device)
+    if checkpoint is not None:
+        state = torch.load(checkpoint / "model.pt", map_location=device, weights_only=True)
+        policy.load_state_dict(state)
+    policy.to(device)
+    policy.eval()
+    return policy, policy_config, checkpoint

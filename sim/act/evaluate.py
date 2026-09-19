@@ -144,6 +144,12 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
     measured.  At that instant Z ownership transfers continuously to the 1 N
     admittance loop while ACT continues to own X, Y and yaw.
     """
+    if str(cfg.act.get("policy_variant", "ordinary")).lower() == "objectact":
+        from .object_runtime import run_objectact_episode
+
+        return run_objectact_episode(
+            cfg, seed=seed, model_path=model_path, preview=preview
+        )
     env = SweepEnv(cfg, seed=seed)
     env.reset(seed=seed)
     total = len(env.layout)

@@ -310,6 +310,10 @@ video:
 
 act:
   enabled: true
+  # ordinary = the schema-v4 baseline; objectact = schema-v5 ObjectACT-BEV.
+  # The latter is opt-in so legacy ACT checkpoints and workbench playback do
+  # not change when the perception experiment is enabled.
+  policy_variant: ordinary
   image_size: [320, 320]
   camera_hz: 25.0
   query_hz: 5.0
@@ -338,6 +342,11 @@ act:
   train_hours: 24
   dataset_dir: runs/act_dataset
   model_dir: runs/act_model
+  objectact_dataset_dir: runs/objectact_dataset
+  objectact_model_dir: runs/objectact_model
+  objectact_detector_checkpoint: null
+  objectact_detector_pretrained: false
+  objectact_pretrained_weights: null
   realtime_budget_seconds: 0.2
   approach_sample_fraction: 0.35
   tracking_project: act-ur10-sweep-full-episode-v1

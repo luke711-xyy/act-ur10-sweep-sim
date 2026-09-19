@@ -398,11 +398,13 @@ class SweepEnv:
         geom_ids = np.where(obj_type == int(mujoco.mjtObj.mjOBJ_GEOM), obj_id, -1)
         return geom_ids
 
-    def camera_pose(self) -> Tuple[np.ndarray, np.ndarray]:
+    def camera_pose(self, camera: str = "scene_cam") -> Tuple[np.ndarray, np.ndarray]:
         """Camera position and 3x3 rotation (columns = camera x/y/z axes, world)."""
         import mujoco
 
-        cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "scene_cam")
+        cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, str(camera))
+        if cam_id < 0:
+            raise ValueError(f"unknown MuJoCo camera {camera!r}")
         pos = np.array(self.data.cam_xpos[cam_id], dtype=float)
         rot = np.array(self.data.cam_xmat[cam_id], dtype=float).reshape(3, 3)
         return pos, rot

@@ -39,3 +39,13 @@ tests/test_objectact_v5_contract.py` and full `pytest -q` → pass)
 Task 4 selection integration: complete (policy-boundary selector applies
 teacher-scheduled or predicted Top-N to BEV selected/unselected channels and
 adds the BCE supervision term; focused policy tests pass)
+
+Task 5A: complete (v5 modality-aware statistics, CPU/MPS-safe preprocessing,
+resumable schema-v5 checkpoints, 80k/2500-step defaults, and milestone
+retention; focused training tests pass)
+
+Task 5B: complete (RGB-derived observation builder, camera-pose lookup,
+contact-latched Z handoff, and a separate ObjectACT runtime loop with the
+existing 5 Hz/25 Hz scheduler, late-preview alignment, temporal chunk
+ensembling, 20 N protection, 500-frame cap, and visual collection timers;
+ordinary v4 evaluator remains the default)
