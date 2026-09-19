@@ -314,6 +314,7 @@ def train_objectact(args=None) -> dict:
 
     from ..config import load_config
     from .object_dataset import ObjectActDataset, validate_v5_manifest
+    from .generate_objectact_dataset import validate_objectact_training_manifest
     from .object_policy import ObjectACTPolicy
 
     cfg = load_config(args.config)
@@ -323,7 +324,12 @@ def train_objectact(args=None) -> dict:
         json.loads(line) for line in (dataset_root / "manifest_v5.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    manifest_summary = validate_v5_manifest(records, expected_per_target=int(args.expected_per_target))
+    if int(args.expected_per_target) == 20:
+        manifest_summary = validate_objectact_training_manifest(dataset_root)
+    else:
+        manifest_summary = validate_v5_manifest(
+            records, expected_per_target=int(args.expected_per_target)
+        )
     dataset = ObjectActDataset(str(dataset_root), chunk_size=25)
     if len(dataset) == 0:
         raise ValueError("ObjectACT dataset has no valid expert frames")
