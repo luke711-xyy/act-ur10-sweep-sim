@@ -316,11 +316,30 @@ def _find_independent_seed(
 ) -> tuple[int, int]:
     for attempt in range(1, int(max_attempts) + 1):
         seed = int(requested_seed) + attempt - 1
-        result = run_expert_episode(
-            _v5_expert_config(cfg, target_count),
-            seed=seed,
-            collect_observations=False,
-        )
+        try:
+            result = run_expert_episode(
+                _v5_expert_config(cfg, target_count),
+                seed=seed,
+                collect_observations=False,
+            )
+        except Exception as exc:
+            # A random layout can fail before a rollout result exists (for
+            # example, an IK target can be just outside the reachable set).
+            # Treat that candidate exactly like any other rejected seed so a
+            # single geometry exception cannot terminate the resumable batch.
+            _append_v5_failure(root, {
+                "layout_id": str(layout_id),
+                "layout_kind": "independent",
+                "target_count": int(target_count),
+                "requested_seed": int(requested_seed),
+                "seed": int(seed),
+                "generation_attempt": int(attempt),
+                "collected": 0,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "planner_status": "exception",
+                "planner_strategy": "screening_rejected",
+            })
+            continue
         if result.success:
             return seed, attempt
         _append_v5_failure(root, {

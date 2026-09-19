@@ -447,6 +447,40 @@ def test_shared_layout_screen_records_ik_exception_as_rejected_seed(monkeypatch)
     assert "RuntimeError" in outcomes[0]["reason"]
 
 
+def test_independent_seed_screen_skips_ik_exception_and_logs_lightweight_failure(
+    monkeypatch, tmp_path
+):
+    from sim.act.generate_objectact_dataset import _find_independent_seed
+
+    calls = {"count": 0}
+
+    def fail_once(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("UR10 IK target is unreachable")
+        return SimpleNamespace(success=True)
+
+    monkeypatch.setattr("sim.act.generate_objectact_dataset.run_expert_episode", fail_once)
+    seed, attempt = _find_independent_seed(
+        load_config("configs/default.yaml"),
+        target_count=6,
+        requested_seed=49100,
+        max_attempts=2,
+        root=tmp_path,
+        layout_id="independent_n6_test",
+    )
+
+    assert (seed, attempt) == (49101, 2)
+    failures = [
+        json.loads(line)
+        for line in (tmp_path / "generation_failures.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(failures) == 1
+    assert failures[0]["planner_status"] == "exception"
+    assert "RuntimeError" in failures[0]["reason"]
+
+
 def test_manifest_validator_requires_exactly_20_successful_experts_per_target(tmp_path):
     records = []
     for index, spec in enumerate(training_episode_plan(4100)):
