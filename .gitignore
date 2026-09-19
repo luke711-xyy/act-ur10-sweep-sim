@@ -9,3 +9,4 @@ datasets/
 .pytest_cache/
 .DS_Store
 graphify-out/
+.worktrees/
