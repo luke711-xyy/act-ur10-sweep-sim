@@ -71,3 +71,17 @@ def test_objectact_select_action_can_use_official_temporal_ensemble():
     policy = make_policy(temporal_ensemble_coeff=0.01)
     action = policy.select_action(make_batch(batch_size=1, include_action=False))
     assert action.shape == (1, 4)
+
+
+def test_selector_rewrites_bev_selection_channels_and_reports_selection_loss():
+    policy = make_policy()
+    batch = make_batch(batch_size=1)
+    batch["observation.task_state"] = torch.tensor([[1.0, 0.5, 0.0, 1.0, 0.5, 0.0]])
+    batch["observation.instance_bev"] = torch.zeros(1, 6, 128, 160, dtype=torch.bool)
+    batch["observation.instance_bev"][0, 0, 64, 80] = True
+    batch["observation.instance_bev"][0, 1, 64, 90] = True
+    batch["selection_target"] = torch.tensor([[True, False, False, False, False, False]])
+    loss, logs = policy(batch)
+    assert torch.isfinite(loss)
+    assert "selection_bce_loss" in logs
+    assert policy.last_selection.shape == (1, 6)

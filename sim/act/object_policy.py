@@ -15,6 +15,14 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .selection import (
+    PermutationInvariantSelectionHead,
+    SelectionTeacherSchedule,
+    scheduled_selection,
+    selection_bce_loss,
+    straight_through_top_n,
+)
+
 
 @dataclass(frozen=True)
 class ObjectACTConfig:
@@ -265,6 +273,15 @@ class ObjectACTPolicy(nn.Module):
         self.object_config = config
         self.config = config.lerobot_config()
         self.model = ObjectACTModel(self.config, config)
+        self.selection_head = PermutationInvariantSelectionHead(
+            token_dim=config.object_token_dim,
+            hidden_dim=config.dim_model,
+            heads=config.n_heads,
+        )
+        self.selection_schedule = SelectionTeacherSchedule()
+        self.selection_step = 0
+        self.last_selection_logits = None
+        self.last_selection = None
         _, temporal_ensembler = _require_lerobot()
         if config.temporal_ensemble_coeff is not None:
             self.temporal_ensembler = temporal_ensembler(config.temporal_ensemble_coeff, config.chunk_size)
@@ -289,6 +306,54 @@ class ObjectACTPolicy(nn.Module):
     def get_optim_params(self):
         return [parameter for parameter in self.parameters() if parameter.requires_grad]
 
+    @staticmethod
+    def _target_counts(task_state: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+        values = task_state[:, 1]
+        # v5 stores counts normalized to the six-object maximum.  Accept raw
+        # counts as well for a debugging batch, but never let a malformed
+        # visual observation request more slots than the detector provides.
+        counts = torch.where(values.abs() <= 1.5, torch.round(values * 6.0), torch.round(values))
+        return counts.to(dtype=torch.long).clamp(min=1, max=valid.shape[1])
+
+    def _prepare_selection(self, batch: dict[str, torch.Tensor], *, training: bool):
+        tokens = batch["observation.object_tokens"]
+        valid = batch["observation.object_valid"]
+        counts = self._target_counts(batch["observation.task_state"], valid)
+        logits = self.selection_head(tokens, valid, counts)
+        target = batch.get("selection_target")
+        if target is not None:
+            selection = scheduled_selection(
+                logits,
+                target_mask=target.to(dtype=torch.bool),
+                target_count=counts,
+                valid_mask=valid,
+                step=self.selection_step,
+                schedule=self.selection_schedule,
+            )
+            selection_loss = selection_bce_loss(logits, target, valid)
+        else:
+            selection = straight_through_top_n(
+                logits, target_count=counts, valid_mask=valid
+            )
+            selection_loss = logits.sum() * 0.0
+        prepared = dict(batch)
+        if "observation.instance_bev" in batch:
+            masks = batch["observation.instance_bev"].to(dtype=torch.bool)
+            if masks.shape[1:] != (6, 128, 160):
+                raise ValueError("observation.instance_bev must have shape (B, 6, 128, 160)")
+            all_mask = (masks & valid[:, :, None, None]).any(dim=1).to(dtype=prepared["observation.bev"].dtype)
+            selected_mask = (
+                masks & valid[:, :, None, None] & selection.detach().to(dtype=torch.bool)[:, :, None, None]
+            ).any(dim=1).to(dtype=prepared["observation.bev"].dtype)
+            bev = prepared["observation.bev"].clone()
+            bev[:, 0] = all_mask
+            bev[:, 1] = selected_mask
+            bev[:, 2] = torch.clamp(all_mask - selected_mask, min=0.0)
+            prepared["observation.bev"] = bev
+        self.last_selection_logits = logits.detach()
+        self.last_selection = selection.detach()
+        return prepared, selection_loss
+
     def reset(self) -> None:
         if hasattr(self, "temporal_ensembler"):
             self.temporal_ensembler.reset()
@@ -297,6 +362,7 @@ class ObjectACTPolicy(nn.Module):
 
     def forward(self, batch: dict[str, torch.Tensor]):
         self._validate_batch(batch, training=True)
+        batch, selection_loss = self._prepare_selection(batch, training=True)
         actions_hat, (mu, log_sigma_x2) = self.model(batch)
         if batch["action"].shape != actions_hat.shape:
             raise ValueError(f"action target must have shape {tuple(actions_hat.shape)}")
@@ -305,16 +371,21 @@ class ObjectACTPolicy(nn.Module):
         num_valid = valid_mask.sum() * abs_err.shape[-1]
         l1_loss = (abs_err * valid_mask).sum() / num_valid.clamp_min(1)
         losses = {"l1_loss": float(l1_loss.detach().item())}
+        losses["selection_bce_loss"] = float(selection_loss.detach().item())
         if self.object_config.use_vae and log_sigma_x2 is not None:
             kld = (-0.5 * (1 + log_sigma_x2 - mu.pow(2) - log_sigma_x2.exp())).sum(-1).mean()
             losses["kld_loss"] = float(kld.detach().item())
-            return l1_loss + kld * float(self.object_config.kl_weight), losses
-        return l1_loss, losses
+            total = l1_loss + kld * float(self.object_config.kl_weight) + selection_loss
+            self.selection_step += 1
+            return total, losses
+        self.selection_step += 1
+        return l1_loss + selection_loss, losses
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         self._validate_batch(batch, training=False)
         self.eval()
+        batch, _ = self._prepare_selection(batch, training=False)
         return self.model(batch)[0]
 
     @torch.no_grad()

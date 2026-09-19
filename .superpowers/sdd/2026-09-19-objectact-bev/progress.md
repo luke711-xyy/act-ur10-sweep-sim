@@ -35,3 +35,7 @@ object-token, BEV, and RGB branches; official LeRobot CVAE/decoder,
 L1/KL loss, zero-latent inference, and temporal ensembling; tests:
 `pytest -q tests/test_object_policy.py tests/test_v5_bev.py
 tests/test_objectact_v5_contract.py` and full `pytest -q` → pass)
+
+Task 4 selection integration: complete (policy-boundary selector applies
+teacher-scheduled or predicted Top-N to BEV selected/unselected channels and
+adds the BCE supervision term; focused policy tests pass)
