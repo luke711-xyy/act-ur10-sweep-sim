@@ -24,3 +24,8 @@ fusion, geometry-only tracking, tray features, and six-channel BEV; tests:
 Task 2 detector extension: complete (frozen/optionally ImageNet-initialized
 ResNet18-FPN semantic, center, and offset heads plus RGB-only instance
 decoding; tests: `pytest -q tests/test_object_detector.py` → pass)
+
+Task 3: complete (permutation-invariant selection head, exact Top-N
+straight-through selection, actual-collected-ID labels, and the 0–5k /
+5k–20k / post-20k teacher schedule; tests: `pytest -q
+tests/test_object_selection.py` → pass)
