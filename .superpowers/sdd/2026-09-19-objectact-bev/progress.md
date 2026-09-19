@@ -59,3 +59,19 @@ Task 6A: complete (workbench discovers v5 train/replay manifests separately,
 loads v5 token/selection/BEV inspection payloads, exposes v5 perception API
 data, and can launch ordinary or ObjectACT training modules without changing
 the ordinary defaults; focused workbench regressions pass)
+
+Task 2 detector data/training gate: complete (RGB detector supervision writer,
+layout-grouped v4 replay source, dense semantic/centre/offset targets,
+held-out quality metrics and hard checkpoint verification; focused detector
+tests, real one-frame MuJoCo replay, one-step detector training and full
+pytest suite pass)
+
+Ruling: the revised RGB-first boundary removes the proposed truth-input warm-up
+stage. MuJoCo segmentation is retained only for offline detector supervision
+and audit because feeding it to the policy would not represent the intended
+real-scene deployment boundary.
+
+Pending: run the held-out detector gate, generate the v5 expert manifest, pass
+the six-episode gate, and start the formal 80,000-step ObjectACT run. These
+are intentionally not marked complete because no verified detector checkpoint
+or v5 policy dataset has been produced in this branch yet.

@@ -160,13 +160,19 @@ class RGBObjectPerceptionFrontend:
         import torch
 
         from ..perception.detector import FrozenResNet18FPN
+        from ..perception.detector_training import verified_detector_checkpoint
 
         self.device = str(device)
+        if detector is None and not detector_checkpoint:
+            raise ValueError(
+                "RGBObjectPerceptionFrontend requires a verified detector checkpoint"
+            )
         self.detector = detector or FrozenResNet18FPN(
             pretrained=bool(cfg.act.get("objectact_detector_pretrained", False)),
             freeze_backbone=True,
         )
         if detector_checkpoint:
+            detector_checkpoint = verified_detector_checkpoint(detector_checkpoint)
             state = torch.load(detector_checkpoint, map_location="cpu", weights_only=True)
             self.detector.load_state_dict(state)
         self.detector.to(self.device).eval()

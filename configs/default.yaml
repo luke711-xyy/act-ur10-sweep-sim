@@ -344,6 +344,8 @@ act:
   model_dir: runs/act_model
   objectact_dataset_dir: runs/objectact_dataset
   objectact_model_dir: runs/objectact_model
+  objectact_detector_dataset_dir: runs/objectact_detector_dataset
+  objectact_detector_model_dir: runs/objectact_detector
   objectact_detector_checkpoint: null
   objectact_detector_pretrained: false
   objectact_pretrained_weights: null

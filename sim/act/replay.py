@@ -174,6 +174,7 @@ def save_objectact_inference_replay(
     """Replay an ObjectACT trace into an isolated schema-v5 workbench record."""
     from .object_dataset import ObjectActDatasetWriter
     from .object_interface import ObjectACTObservationBuilder, RGBObjectPerceptionFrontend
+    from ..perception.detector_training import verified_detector_checkpoint
 
     trace = list(getattr(result, "trace", ()))
     if not trace:
@@ -186,6 +187,7 @@ def save_objectact_inference_replay(
     env = SweepEnv(replay_cfg, seed=int(seed))
     env.reset(seed=int(seed))
     detector_checkpoint = replay_cfg.act.get("objectact_detector_checkpoint", None)
+    detector_checkpoint = verified_detector_checkpoint(detector_checkpoint)
     frontend = RGBObjectPerceptionFrontend(
         replay_cfg, device="cpu", detector_checkpoint=detector_checkpoint
     )

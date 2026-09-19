@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import load_config
+from ..perception.detector_training import verified_detector_checkpoint
 from .object_dataset import ObjectActDatasetWriter
 from .object_interface import ObjectACTObservationBuilder, RGBObjectPerceptionFrontend
 from .rollout import run_expert_episode
@@ -62,9 +63,7 @@ def generate_one(
             "an RGB detector checkpoint is required; use the explicit detector "
             "training step before generating v5 policy data"
         )
-    checkpoint = Path(detector_checkpoint)
-    if not checkpoint.exists():
-        raise FileNotFoundError(checkpoint)
+    checkpoint = verified_detector_checkpoint(detector_checkpoint)
     local_cfg = cfg.copy()
     local_cfg.set_path("task.target_count", int(target_count))
 

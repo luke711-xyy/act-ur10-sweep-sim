@@ -209,6 +209,45 @@ instead of duplicating that functionality in this project.
 Every run writes a timestamped directory under `runs/` containing the exact
 configuration used, metrics, phase events, the dense control trace and the plots.
 
+### RGB-first ObjectACT-BEV path
+
+The structured-token experiment is opt-in and does not change ordinary v4
+ACT. Its first policy observation is already generated from the two RGB views:
+
+```text
+RGB -> grouped instance detector -> table-plane projection/tracking
+    -> six object tokens + six-channel BEV -> ObjectACT
+```
+
+MuJoCo segmentation is used only offline to supervise and audit the detector;
+truth positions, A* target identities and cached truth masks are rejected at
+the policy boundary. A verified detector checkpoint is required before v5
+episodes, replays or inference can run.
+
+Build detector supervision from the existing v4 expert frames, then train and
+audit the detector separately:
+
+```bash
+python -m sim.act.collect_detector_dataset \
+  --source runs/act_dataset --out runs/objectact_detector_dataset
+python -m sim.act.train_detector \
+  --dataset runs/objectact_detector_dataset \
+  --out runs/objectact_detector --device auto
+```
+
+Only a checkpoint whose `detector_quality.json` says the held-out gate passed
+may be supplied as `act.objectact_detector_checkpoint`. Then generate a v5
+expert episode with detector-derived observations:
+
+```bash
+python -m sim.act.generate_objectact_dataset \
+  --out runs/objectact_dataset --target-count 3 --seed 4100 \
+  --detector-checkpoint runs/objectact_detector
+```
+
+Train the new policy explicitly with `act.policy_variant: objectact`; the
+ordinary `sim.act.train` and `sim.act.evaluate` defaults remain v4.
+
 ### Useful flags
 
 | Flag | Effect |
