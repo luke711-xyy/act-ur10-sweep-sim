@@ -14,9 +14,10 @@ from .evaluate import run_act_episode
 def _paired_references(dataset_root: str | Path,
                        layout_id: str = "paired_000") -> dict[int, dict]:
     root = Path(dataset_root)
+    manifest_name = "manifest_v5.jsonl" if (root / "manifest_v5.jsonl").exists() else "manifest.jsonl"
     records = [
         json.loads(line)
-        for line in (root / "manifest.jsonl").read_text(
+        for line in (root / manifest_name).read_text(
             encoding="utf-8"
         ).splitlines()
         if line.strip()
@@ -100,13 +101,22 @@ def summarize_small_sample_gate(expert_records: dict[int, dict],
 
 
 def run_small_sample_gate(cfg, model_path: str,
-                          dataset_root: str | Path) -> dict:
+                          dataset_root: str | Path,
+                          detector_checkpoint: str | None = None) -> dict:
     references = _paired_references(dataset_root)
+    objectact = (Path(dataset_root) / "manifest_v5.jsonl").exists()
     results = {}
     for target_count in range(1, 7):
         record = references[target_count]
         local_cfg = cfg.copy()
         local_cfg.set_path("task.target_count", target_count)
+        if objectact:
+            local_cfg.set_path("act.policy_variant", "objectact")
+            if detector_checkpoint:
+                local_cfg.set_path(
+                    "act.objectact_detector_checkpoint",
+                    str(detector_checkpoint),
+                )
         results[target_count] = run_act_episode(
             local_cfg, seed=int(record["seed"]),
             model_path=model_path, preview=True,
@@ -125,6 +135,7 @@ def main(argv=None) -> int:
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--model", required=True)
     parser.add_argument("--dataset", default=None)
+    parser.add_argument("--detector-checkpoint", default=None)
     parser.add_argument("--out", default=None)
     args = parser.parse_args(argv)
 
@@ -132,7 +143,12 @@ def main(argv=None) -> int:
 
     cfg = load_config(args.config)
     summary = run_small_sample_gate(
-        cfg, args.model, args.dataset or str(cfg.act.dataset_dir)
+        cfg,
+        args.model,
+        args.dataset or str(
+            cfg.act.get("objectact_dataset_dir", cfg.act.dataset_dir)
+        ),
+        detector_checkpoint=args.detector_checkpoint,
     )
     text = json.dumps(summary, ensure_ascii=False, indent=2)
     print(text)

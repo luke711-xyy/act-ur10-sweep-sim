@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import numpy as np
 import pytest
@@ -51,3 +52,24 @@ def test_small_sample_gate_rejects_force_or_contact_regression():
     assert force["passed"] is False
     assert force["force_ok"] is False
     assert contact["passed"] is False
+
+
+def test_small_sample_gate_reads_the_v5_paired_layout_manifest(tmp_path):
+    records = [
+        {
+            "target_count": target,
+            "layout_id": "paired_000",
+            "episode_kind": "expert",
+            "split": "train",
+            "success": True,
+            "first_contact_position": [0.3, 0.0, 0.0],
+        }
+        for target in range(1, 7)
+    ]
+    (tmp_path / "manifest_v5.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    from sim.act.small_sample_gate import _paired_references
+
+    assert set(_paired_references(tmp_path)) == set(range(1, 7))
