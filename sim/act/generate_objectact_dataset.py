@@ -19,6 +19,7 @@ from ..perception.detector_training import verified_detector_checkpoint
 from .collect_dataset import (
     find_shared_layout_seed,
     training_episode_plan,
+    write_split_manifests,
 )
 from .object_dataset import ObjectActDatasetWriter
 from .object_interface import ObjectACTObservationBuilder, RGBObjectPerceptionFrontend
@@ -515,7 +516,13 @@ def generate_objectact_training_dataset(
         slots.add(slot)
 
     summary = validate_objectact_training_manifest(root)
-    return {**summary, "detector_checkpoint": checkpoint, "detector_device": detector_device}
+    split_manifests = write_split_manifests(root)
+    return {
+        **summary,
+        "detector_checkpoint": checkpoint,
+        "detector_device": detector_device,
+        "split_manifests": split_manifests,
+    }
 
 
 def main(argv=None) -> int:
