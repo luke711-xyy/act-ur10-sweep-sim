@@ -203,7 +203,11 @@ class RGBObjectPerceptionFrontend:
 
         from ..perception.detector import decode_detector_output
 
-        tensor = torch.as_tensor(np.transpose(image, (2, 0, 1)), dtype=torch.float32, device=self.device)
+        tensor = torch.as_tensor(
+            np.ascontiguousarray(np.transpose(image, (2, 0, 1))),
+            dtype=torch.float32,
+            device=self.device,
+        )
         tensor = tensor.unsqueeze(0) / 255.0
         with torch.no_grad():
             output = self.detector(tensor)
@@ -226,7 +230,12 @@ class RGBObjectPerceptionFrontend:
     ) -> ObjectPerceptionFrame:
         size = (int(overhead_rgb.shape[1]), int(overhead_rgb.shape[0]))
         scene_fovy = float(env.cfg.perception.camera.fovy_deg)
-        wrist_fovy = float(env.cfg.perception.wrist_camera.fovy_deg)
+        wrist_fovy = float(
+            env.cfg.get_path(
+                "end_effector.wrist_camera.fovy_deg",
+                env.cfg.get_path("perception.wrist_camera.fovy_deg", 58.0),
+            )
+        )
         overhead_cfg = env.cfg.get_path("video.extra_cameras.overhead_cam", None)
         overhead_fovy = float(
             overhead_cfg.fovy_deg if overhead_cfg is not None else scene_fovy
@@ -238,16 +247,27 @@ class RGBObjectPerceptionFrontend:
         ):
             camera = self._camera(env, camera_name, size, fovy)
             for prediction in self._detect(image):
-                projected = project_image_instance(
-                    prediction.mask,
-                    camera=camera,
-                    plane_z=float(env.table_top_z),
-                    bev_spec=self.bev_spec,
-                    class_probs=prediction.class_probs,
-                    confidence=prediction.confidence,
-                    overhead_visibility=visibility[0],
-                    wrist_visibility=visibility[1],
-                )
+                try:
+                    projected = project_image_instance(
+                        prediction.mask,
+                        camera=camera,
+                        plane_z=float(env.table_top_z),
+                        bev_spec=self.bev_spec,
+                        class_probs=prediction.class_probs,
+                        confidence=prediction.confidence,
+                        overhead_visibility=visibility[0],
+                        wrist_visibility=visibility[1],
+                    )
+                except ValueError as error:
+                    # A learned RGB detector can produce a false positive on
+                    # the robot/brush or outside the calibrated table.  Such
+                    # a detection is not a valid table object and must not
+                    # crash the policy loop.  Keep the strict projection
+                    # contract for standalone callers; reject only this
+                    # expected runtime rejection here.
+                    if "fixed table BEV" not in str(error):
+                        raise
+                    continue
                 detections.append(projected)
         fused = fuse_projected_instances(detections, spec=self.bev_spec)
         fused = [annotate_tray_features(item, spec=self.bev_spec, tray_bounds=tray_bounds) for item in fused]
