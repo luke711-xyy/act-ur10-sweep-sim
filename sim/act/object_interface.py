@@ -163,6 +163,11 @@ class RGBObjectPerceptionFrontend:
         from ..perception.detector_training import verified_detector_checkpoint
 
         self.device = str(device)
+        self.foreground_threshold = float(
+            cfg.act.get("objectact_detector_foreground_threshold", 0.60)
+        )
+        if not 0.0 < self.foreground_threshold < 1.0:
+            raise ValueError("objectact detector foreground threshold must be in (0, 1)")
         if detector is None and not detector_checkpoint:
             raise ValueError(
                 "RGBObjectPerceptionFrontend requires a verified detector checkpoint"
@@ -202,7 +207,11 @@ class RGBObjectPerceptionFrontend:
         tensor = tensor.unsqueeze(0) / 255.0
         with torch.no_grad():
             output = self.detector(tensor)
-        return decode_detector_output(output, batch_index=0)
+        return decode_detector_output(
+            output,
+            batch_index=0,
+            foreground_threshold=self.foreground_threshold,
+        )
 
     def observe(
         self,

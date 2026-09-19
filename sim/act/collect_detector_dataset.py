@@ -35,22 +35,37 @@ def assign_layout_splits(records: list[dict], *, val_group_modulo: int = 5) -> d
     }
 
 
-def render_camera_segmentation(env, camera_name: str, size: tuple[int, int]) -> np.ndarray:
-    """Render geom IDs for one camera without altering the environment state."""
+class CameraSegmentationRenderer:
+    """Reusable offline geom-id renderer for one environment/camera pair."""
 
-    import mujoco
+    def __init__(self, env, camera_name: str, size: tuple[int, int]):
+        import mujoco
 
-    width, height = (int(size[0]), int(size[1]))
-    renderer = mujoco.Renderer(env.model, height=height, width=width)
-    try:
-        renderer.enable_segmentation_rendering()
-        renderer.update_scene(env.data, camera=str(camera_name))
-        segmentation = renderer.render()
+        self._mujoco = mujoco
+        width, height = (int(size[0]), int(size[1]))
+        self._renderer = mujoco.Renderer(env.model, height=height, width=width)
+        self._renderer.enable_segmentation_rendering()
+        self.camera_name = str(camera_name)
+
+    def render(self, env) -> np.ndarray:
+        self._renderer.update_scene(env.data, camera=self.camera_name)
+        segmentation = self._renderer.render()
         object_id = segmentation[:, :, 0].astype(np.int32)
         object_type = segmentation[:, :, 1].astype(np.int32)
         return np.where(
-            object_type == int(mujoco.mjtObj.mjOBJ_GEOM), object_id, -1
+            object_type == int(self._mujoco.mjtObj.mjOBJ_GEOM), object_id, -1
         )
+
+    def close(self) -> None:
+        self._renderer.close()
+
+
+def render_camera_segmentation(env, camera_name: str, size: tuple[int, int]) -> np.ndarray:
+    """Render geom IDs for one camera without altering the environment state."""
+
+    renderer = CameraSegmentationRenderer(env, camera_name, size)
+    try:
+        return renderer.render(env)
     finally:
         renderer.close()
 
@@ -144,6 +159,11 @@ def collect_detector_dataset(
         frame_count = int(record.get("frame_count", len(arrays["t"])))
         image_paths = list(record.get("overhead", []))
         indices = _frame_indices(frame_count, frame_stride, max_frames_per_episode)
+        renderer = CameraSegmentationRenderer(
+            env,
+            "overhead_cam",
+            (int(local_cfg.act.image_size[0]), int(local_cfg.act.image_size[1])),
+        )
         try:
             for frame_index in indices:
                 if frame_index >= len(image_paths):
@@ -159,9 +179,7 @@ def collect_detector_dataset(
                     arrays["joint_position"][frame_index],
                     arrays["object_pose"][frame_index],
                 )
-                segmentation = render_camera_segmentation(
-                    env, "overhead_cam", (int(local_cfg.act.image_size[0]), int(local_cfg.act.image_size[1]))
-                )
+                segmentation = renderer.render(env)
                 instance_map, class_map = instance_maps_from_geom_ids(
                     segmentation,
                     geom_to_component=env.geom_to_component,
@@ -184,6 +202,7 @@ def collect_detector_dataset(
                 )
                 counts[splits[record["episode_id"]]] += 1
         finally:
+            renderer.close()
             env.close()
     return {"frames": int(sum(counts.values())), "splits": counts, "episodes": len(records)}
 

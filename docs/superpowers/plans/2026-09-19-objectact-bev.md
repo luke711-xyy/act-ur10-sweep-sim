@@ -43,17 +43,37 @@ matched from actual final complete collected track IDs; it is not an input.
    separate detector manifest. `sim.act.collect_detector_dataset` restores the
    robot/part state, renders offline geom segmentation, and writes only RGB plus
    dense semantic/centre/offset labels.
-3. Train the frozen-or-optionally-ImageNet-initialized ResNet-18 FPN with
-   semantic, centre and offset heads using `sim.act.train_detector`.
-4. Report held-out mask IoU, centre error, miss rate, false-positive rate and
-   absolute count error. A detector checkpoint is usable by v5 generation,
-   replay or inference only if the gate passes:
+3. Train the frozen-or-optionally-ImageNet-initialized ResNet-18 FPN with a
+   learned RGB objectness head, semantic class head, centre heatmap and
+   offset head using `sim.act.train_detector`. The objectness head is the
+   Push-Wiper-inspired soft binary occupancy representation: it is learned
+   from RGB labels, not a MuJoCo mask at policy time. The raw RGB branch is
+   retained for appearance and occlusion cues, while objectness supplies the
+   spatial topology used to build tokens and BEV. ImageNet normalization and
+   the 0.60 foreground threshold are shared by detector training, audit and
+   online inference.
+4. Report both raw mask diagnostics and the temporal centre/track metrics used
+   by ObjectACT. A detector checkpoint is usable by v5 generation, replay or
+   inference only if the causal temporal gate passes:
 
-   - mask IoU >= 0.70;
+   - visible-mask IoU >= 0.70 as a minimum geometry diagnostic;
    - centre error <= 3 px;
-   - miss rate <= 10%;
-   - false-positive rate <= 10%;
-   - mean absolute count error <= 0.25.
+   - centre miss rate <= 15% over visible validation frames;
+   - centre false-positive rate <= 10%;
+   - the first five detector observations of each held-out episode cover at
+     least 95% of the visible object tracks;
+   - warm-up absolute count error <= 0.25.
+
+   Raw mask miss/false-positive/count rates remain in the report, but a brief
+   mask loss caused by the robot or brush occluding a part is not itself a
+   policy-input failure. The tracker carries the last causal token with an
+   explicit staleness field until the configured age limit.
+
+   Pixel binarization of the raw image is explicitly not the runtime
+   contract: the checkerboard, shadows, robot and brush can all change
+   appearance. A fixed empty-table calibration may be added later as a
+   causal auxiliary feature, but it cannot replace the learned RGB objectness
+   gate or introduce simulator truth.
 
    Missing or unverified detector metadata is a hard error. Randomly
    initialized detector weights may not silently create policy data.

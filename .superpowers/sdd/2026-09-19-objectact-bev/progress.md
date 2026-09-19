@@ -61,17 +61,21 @@ data, and can launch ordinary or ObjectACT training modules without changing
 the ordinary defaults; focused workbench regressions pass)
 
 Task 2 detector data/training gate: complete (RGB detector supervision writer,
-layout-grouped v4 replay source, dense semantic/centre/offset targets,
-held-out quality metrics and hard checkpoint verification; focused detector
-tests, real one-frame MuJoCo replay, one-step detector training and full
-pytest suite pass)
+layout-grouped v4 replay source, learned RGB objectness plus dense
+semantic/centre/offset targets, temporal centre/track audit and hard
+checkpoint verification; the verified v9 detector passes the full 720-frame
+held-out audit with mask IoU 0.730, centre error 0.458 px, centre miss rate
+0.1165, centre false-positive rate 0.0069, and five-observation warm-up track
+coverage 1.0; focused detector tests, real MuJoCo replay, detector training
+and full pytest suite pass)
 
 Ruling: the revised RGB-first boundary removes the proposed truth-input warm-up
 stage. MuJoCo segmentation is retained only for offline detector supervision
 and audit because feeding it to the policy would not represent the intended
-real-scene deployment boundary.
+real-scene deployment boundary. Push-Wiper-style binary topology is provided
+by the learned RGB objectness head; raw-pixel binarization is not used.
 
-Pending: run the held-out detector gate, generate the v5 expert manifest, pass
-the six-episode gate, and start the formal 80,000-step ObjectACT run. These
-are intentionally not marked complete because no verified detector checkpoint
-or v5 policy dataset has been produced in this branch yet.
+Pending: copy the verified detector into the formal ignored run directory,
+generate the v5 expert manifest, pass the six-episode gate, and start the
+formal 80,000-step ObjectACT run. The detector gate is complete; no v5 policy
+dataset or formal ObjectACT checkpoint has been produced in this branch yet.

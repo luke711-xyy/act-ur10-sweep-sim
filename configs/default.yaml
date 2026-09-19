@@ -347,7 +347,10 @@ act:
   objectact_detector_dataset_dir: runs/objectact_detector_dataset
   objectact_detector_model_dir: runs/objectact_detector
   objectact_detector_checkpoint: null
-  objectact_detector_pretrained: false
+  # Detector checkpoints trained with ImageNet initialization normalize RGB
+  # inside the detector forward; keep training and runtime contracts aligned.
+  objectact_detector_pretrained: true
+  objectact_detector_foreground_threshold: 0.60
   objectact_pretrained_weights: null
   realtime_budget_seconds: 0.2
   approach_sample_fraction: 0.35

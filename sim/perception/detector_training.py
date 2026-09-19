@@ -54,7 +54,7 @@ def instance_maps_from_geom_ids(
 
 
 def dense_targets_from_instance_map(
-    instance_map: np.ndarray, class_map: np.ndarray
+    instance_map: np.ndarray, class_map: np.ndarray, *, center_sigma_px: float = 2.0
 ) -> dict[str, np.ndarray]:
     """Create semantic/centre/offset targets from an offline instance map.
 
@@ -74,6 +74,8 @@ def dense_targets_from_instance_map(
     foreground = instances > 0
     if np.any(foreground & (classes == 0)):
         raise ValueError("every foreground instance pixel needs a non-zero class")
+    if not np.isfinite(float(center_sigma_px)) or float(center_sigma_px) <= 0.0:
+        raise ValueError("center_sigma_px must be positive")
 
     height, width = instances.shape
     center = np.zeros((1, height, width), dtype=np.float32)
@@ -84,6 +86,19 @@ def dense_targets_from_instance_map(
         if rows.size == 0:
             continue
         centre = np.asarray([rows.mean(), cols.mean()], dtype=np.float32)
+        radius = int(np.ceil(3.0 * float(center_sigma_px)))
+        row_min = max(0, int(np.floor(centre[0])) - radius)
+        row_max = min(height - 1, int(np.floor(centre[0])) + radius)
+        col_min = max(0, int(np.floor(centre[1])) - radius)
+        col_max = min(width - 1, int(np.floor(centre[1])) + radius)
+        local_rows, local_cols = np.mgrid[row_min:row_max + 1, col_min:col_max + 1]
+        gaussian = np.exp(
+            -((local_rows - centre[0]) ** 2 + (local_cols - centre[1]) ** 2)
+            / (2.0 * float(center_sigma_px) ** 2)
+        ).astype(np.float32)
+        center[0, row_min:row_max + 1, col_min:col_max + 1] = np.maximum(
+            center[0, row_min:row_max + 1, col_min:col_max + 1], gaussian
+        )
         center[0, int(np.rint(centre[0])), int(np.rint(centre[1]))] = 1.0
         offset[0, rows, cols] = centre[0] - rows
         offset[1, rows, cols] = centre[1] - cols
@@ -101,6 +116,74 @@ def _instance_iou(prediction: np.ndarray, truth: np.ndarray) -> float:
     intersection = int(np.count_nonzero(prediction & truth))
     union = int(np.count_nonzero(prediction | truth))
     return float(intersection / union) if union else 0.0
+
+
+def match_prediction_centers(
+    predictions: Iterable[ImageInstancePrediction],
+    truth_instance_map: np.ndarray,
+    *,
+    distance_threshold_px: float,
+) -> tuple[list[tuple[float, int, int]], list[int], list[int]]:
+    """Greedily match predicted and ground-truth instance centres."""
+
+    truth = np.asarray(truth_instance_map)
+    if truth.ndim != 2 or not np.issubdtype(truth.dtype, np.integer):
+        raise ValueError("truth_instance_map must be a 2-D integer array")
+    if float(distance_threshold_px) <= 0.0:
+        raise ValueError("distance_threshold_px must be positive")
+    truth_ids = [int(value) for value in np.unique(truth) if int(value) > 0]
+    truth_centres = {}
+    for truth_id in truth_ids:
+        rows, cols = np.nonzero(truth == truth_id)
+        truth_centres[truth_id] = np.asarray([rows.mean(), cols.mean()], dtype=float)
+    predictions = list(predictions)
+    pairs: list[tuple[float, int, int]] = []
+    for prediction_index, prediction in enumerate(predictions):
+        centre = np.asarray(prediction.center_rc, dtype=float).reshape(2)
+        if not np.isfinite(centre).all():
+            continue
+        for truth_id, truth_centre in truth_centres.items():
+            pairs.append((float(np.linalg.norm(centre - truth_centre)), prediction_index, truth_id))
+    pairs.sort(key=lambda item: (item[0], item[1], item[2]))
+    used_predictions: set[int] = set()
+    used_truth: set[int] = set()
+    matched: list[tuple[float, int, int]] = []
+    for distance, prediction_index, truth_id in pairs:
+        if distance > float(distance_threshold_px):
+            break
+        if prediction_index in used_predictions or truth_id in used_truth:
+            continue
+        used_predictions.add(prediction_index)
+        used_truth.add(truth_id)
+        matched.append((distance, prediction_index, truth_id))
+    return matched, truth_ids, list(range(len(predictions)))
+
+
+def detector_center_quality_metrics(
+    predictions: Iterable[ImageInstancePrediction],
+    truth_instance_map: np.ndarray,
+    *,
+    distance_threshold_px: float = 8.0,
+) -> dict[str, float | int]:
+    """Measure visual object centres independently of mask boundary quality.
+
+    ObjectACT consumes projected centres, extents, and short-term tracks.  A
+    partially occluded mask may have poor pixel IoU while its centre remains
+    useful; this metric makes that distinction explicit for the temporal gate.
+    """
+
+    predictions = list(predictions)
+    matched, truth_ids, prediction_ids = match_prediction_centers(
+        predictions, truth_instance_map, distance_threshold_px=distance_threshold_px
+    )
+    return {
+        "sample_count": 1,
+        "matched_count": len(matched),
+        "center_error_px": float(np.mean([item[0] for item in matched])) if matched else float("inf"),
+        "miss_rate": float((len(truth_ids) - len(matched)) / max(len(truth_ids), 1)),
+        "false_positive_rate": float((len(prediction_ids) - len(matched)) / max(len(prediction_ids), 1)),
+        "mean_abs_count_error": float(abs(len(prediction_ids) - len(truth_ids))),
+    }
 
 
 def detector_quality_metrics(
@@ -165,15 +248,33 @@ def detector_quality_gate(
     max_miss_rate: float,
     max_false_positive_rate: float,
     max_count_error: float,
+    min_warmup_track_coverage: float | None = None,
+    max_warmup_count_error: float | None = None,
 ) -> bool:
     """Return whether all declared held-out detector thresholds pass."""
 
+    miss_rate = float(metrics.get("center_miss_rate", metrics.get("miss_rate", 1.0)))
+    false_positive_rate = float(
+        metrics.get("center_false_positive_rate", metrics.get("false_positive_rate", 1.0))
+    )
+    count_error = float(
+        metrics.get(
+            "warmup_mean_abs_count_error",
+            metrics.get("center_mean_abs_count_error", metrics.get("mean_abs_count_error", float("inf"))),
+        )
+    )
+    temporal_ok = True
+    if min_warmup_track_coverage is not None:
+        temporal_ok &= float(metrics.get("warmup_track_coverage", 0.0)) >= float(min_warmup_track_coverage)
+    if max_warmup_count_error is not None:
+        temporal_ok &= float(metrics.get("warmup_mean_abs_count_error", float("inf"))) <= float(max_warmup_count_error)
     return bool(
         float(metrics.get("mask_iou", 0.0)) >= float(min_mask_iou)
         and float(metrics.get("center_error_px", float("inf")) <= float(max_center_error_px))
-        and float(metrics.get("miss_rate", 1.0)) <= float(max_miss_rate)
-        and float(metrics.get("false_positive_rate", 1.0)) <= float(max_false_positive_rate)
-        and float(metrics.get("mean_abs_count_error", float("inf"))) <= float(max_count_error)
+        and miss_rate <= float(max_miss_rate)
+        and false_positive_rate <= float(max_false_positive_rate)
+        and count_error <= float(max_count_error)
+        and temporal_ok
     )
 
 

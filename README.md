@@ -232,7 +232,7 @@ python -m sim.act.collect_detector_dataset \
   --source runs/act_dataset --out runs/objectact_detector_dataset
 python -m sim.act.train_detector \
   --dataset runs/objectact_detector_dataset \
-  --out runs/objectact_detector --device auto
+  --out runs/objectact_detector --device auto --foreground-threshold 0.60
 ```
 
 Only a checkpoint whose `detector_quality.json` says the held-out gate passed

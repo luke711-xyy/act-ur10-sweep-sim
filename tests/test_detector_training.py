@@ -28,6 +28,28 @@ def test_dense_detector_targets_encode_instances_centres_and_offsets():
     # Decoder uses row + offset[0], col + offset[1] to recover a centre.
     np.testing.assert_allclose(targets["offset"][:, 2, 3], [1.0, 1.0])
     np.testing.assert_allclose(targets["offset"][:, 6, 8], [-0.5, -0.5])
+    assert np.count_nonzero(targets["center"] > 0.1) > 2
+
+
+def test_detector_loss_reweights_sparse_positive_center_pixels():
+    from sim.perception.detector import detector_loss
+
+    outputs = {
+        "semantic_logits": torch.zeros(1, 4, 4, 4, requires_grad=True),
+        "center_logits": torch.zeros(1, 1, 4, 4, requires_grad=True),
+        "offset": torch.zeros(1, 2, 4, 4, requires_grad=True),
+    }
+    targets = {
+        "semantic": torch.zeros(1, 4, 4, dtype=torch.long),
+        "center": torch.zeros(1, 1, 4, 4),
+        "offset": torch.zeros(1, 2, 4, 4),
+        "offset_valid": torch.zeros(1, 1, 4, 4),
+    }
+    targets["center"][0, 0, 1, 1] = 1.0
+    detector_loss(outputs, targets).backward()
+    positive = abs(float(outputs["center_logits"].grad[0, 0, 1, 1]))
+    negative = abs(float(outputs["center_logits"].grad[0, 0, 0, 0]))
+    assert positive > negative
 
 
 def test_detector_quality_metrics_match_instances_and_count_errors():
@@ -60,6 +82,34 @@ def test_detector_quality_metrics_match_instances_and_count_errors():
     assert np.isclose(metrics["miss_rate"], 0.5)
     assert np.isclose(metrics["false_positive_rate"], 0.5)
     assert np.isclose(metrics["mean_abs_count_error"], 0.0)
+
+
+def test_center_quality_metrics_are_not_penalized_by_mask_boundary_error():
+    from sim.perception.detector import ImageInstancePrediction
+    from sim.perception.detector_training import detector_center_quality_metrics
+
+    truth = np.zeros((12, 12), dtype=np.int32)
+    truth[2:5, 2:5] = 1
+    truth[7:10, 7:10] = 2
+    predictions = [
+        ImageInstancePrediction(
+            mask=np.zeros_like(truth, dtype=bool),
+            class_probs=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+            confidence=0.9,
+            center_rc=np.array([3.2, 3.1], dtype=np.float32),
+        ),
+        ImageInstancePrediction(
+            mask=np.zeros_like(truth, dtype=bool),
+            class_probs=np.array([0.0, 1.0, 0.0], dtype=np.float32),
+            confidence=0.8,
+            center_rc=np.array([8.1, 8.0], dtype=np.float32),
+        ),
+    ]
+    metrics = detector_center_quality_metrics(predictions, truth, distance_threshold_px=2.0)
+    assert metrics["matched_count"] == 2
+    assert metrics["miss_rate"] == 0.0
+    assert metrics["false_positive_rate"] == 0.0
+    assert metrics["center_error_px"] < 0.5
 
 
 def test_detector_dataset_writer_is_atomic_and_rejects_truth_policy_fields(tmp_path):
@@ -102,6 +152,32 @@ def test_detector_quality_gate_requires_all_declared_thresholds():
                                      max_count_error=0.25)
 
 
+def test_detector_quality_gate_can_use_temporal_center_metrics():
+    from sim.perception.detector_training import detector_quality_gate
+
+    metrics = {
+        "mask_iou": 0.72,
+        "center_error_px": 0.8,
+        "miss_rate": 0.4,  # raw mask miss rate, diagnostic only
+        "false_positive_rate": 0.3,  # raw mask FP rate, diagnostic only
+        "mean_abs_count_error": 0.6,  # raw frame count, diagnostic only
+        "center_miss_rate": 0.08,
+        "center_false_positive_rate": 0.04,
+        "warmup_track_coverage": 1.0,
+        "warmup_mean_abs_count_error": 0.0,
+    }
+    assert detector_quality_gate(
+        metrics,
+        min_mask_iou=0.70,
+        max_center_error_px=3.0,
+        max_miss_rate=0.10,
+        max_false_positive_rate=0.10,
+        max_count_error=0.25,
+        min_warmup_track_coverage=0.95,
+        max_warmup_count_error=0.25,
+    )
+
+
 def test_segmentation_ids_are_converted_to_grouped_instance_and_class_maps():
     from sim.perception.detector_training import instance_maps_from_geom_ids
 
@@ -141,6 +217,8 @@ def test_detector_training_parser_has_explicit_quality_gate_and_mps_safe_default
     assert args.batch_size == 4
     assert args.checkpoint_every == 500
     assert args.device == "auto"
+    assert args.pretrained is True
+    assert args.foreground_threshold == 0.60
     assert args.min_mask_iou == 0.70
     assert args.max_miss_rate == 0.10
 
