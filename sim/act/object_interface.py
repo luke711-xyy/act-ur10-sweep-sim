@@ -43,6 +43,16 @@ def apply_objectact_action(
     return values
 
 
+def is_expected_projection_rejection(error: ValueError) -> bool:
+    """Return whether a detector mask is geometrically not a table object."""
+
+    message = str(error)
+    return (
+        "fixed table BEV" in message
+        or "no valid intersection with the table plane" in message
+    )
+
+
 class ObjectACTObservationBuilder:
     """Build schema-v5 observations without simulator object bookkeeping."""
 
@@ -265,7 +275,7 @@ class RGBObjectPerceptionFrontend:
                     # crash the policy loop.  Keep the strict projection
                     # contract for standalone callers; reject only this
                     # expected runtime rejection here.
-                    if "fixed table BEV" not in str(error):
+                    if not is_expected_projection_rejection(error):
                         raise
                     continue
                 detections.append(projected)
