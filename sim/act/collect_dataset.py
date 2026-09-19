@@ -361,20 +361,33 @@ def screen_shared_layout(cfg, seed: int,
         (int(value) for value in target_counts), reverse=True
     )
     for target_count in ordered_targets:
-        result = run_expert_episode(
-            _expert_config(cfg, int(target_count)),
-            seed=int(seed), collect_observations=False,
-        )
-        item = {
-            "target_count": int(target_count),
-            "success": bool(result.success),
-            "collected": int(result.collected),
-            "reason": str(result.failure_reason),
-            "planner_status": str(result.planner_status),
-            "planner_strategy": str(result.planner_strategy),
-        }
+        try:
+            result = run_expert_episode(
+                _expert_config(cfg, int(target_count)),
+                seed=int(seed), collect_observations=False,
+            )
+            item = {
+                "target_count": int(target_count),
+                "success": bool(result.success),
+                "collected": int(result.collected),
+                "reason": str(result.failure_reason),
+                "planner_status": str(result.planner_status),
+                "planner_strategy": str(result.planner_strategy),
+            }
+        except Exception as exc:
+            # IK/collision failures are rejected layout attempts, not batch
+            # process failures.  Keep the reason in the lightweight screening
+            # result so the caller can advance to the next seed.
+            item = {
+                "target_count": int(target_count),
+                "success": False,
+                "collected": 0,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "planner_status": "exception",
+                "planner_strategy": "screening_rejected",
+            }
         outcomes.append(item)
-        accepted = accepted and bool(result.success)
+        accepted = accepted and bool(item["success"])
         if not accepted:
             break
     return accepted, outcomes

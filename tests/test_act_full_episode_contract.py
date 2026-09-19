@@ -430,6 +430,23 @@ def test_dataset_plans_have_exact_paired_independent_and_split_counts():
     assert {item.seed for item in validation}.isdisjoint(item.seed for item in test)
 
 
+def test_shared_layout_screen_records_ik_exception_as_rejected_seed(monkeypatch):
+    from sim.act.collect_dataset import screen_shared_layout
+    from sim.config import load_config
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("UR10 IK target is unreachable")
+
+    monkeypatch.setattr("sim.act.collect_dataset.run_expert_episode", fail)
+    accepted, outcomes = screen_shared_layout(
+        load_config("configs/default.yaml"), 4100, target_counts=[6]
+    )
+
+    assert accepted is False
+    assert outcomes[0]["success"] is False
+    assert "RuntimeError" in outcomes[0]["reason"]
+
+
 def test_manifest_validator_requires_exactly_20_successful_experts_per_target(tmp_path):
     records = []
     for index, spec in enumerate(training_episode_plan(4100)):
