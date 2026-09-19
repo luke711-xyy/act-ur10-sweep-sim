@@ -218,7 +218,7 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
          specular=0.1, shininess=0.1, reflectance=0.0)
     _sub(asset, "material", name="mat_tray", rgba=(0.20, 0.45, 0.75, 1.0))
     _sub(asset, "material", name="mat_tip", rgba=(0.15, 0.15, 0.18, 1.0))
-    _sub(asset, "material", name="mat_brush", rgba=(0.10, 0.20, 0.12, 1.0))
+    _sub(asset, "material", name="mat_brush", rgba=(0.95, 0.68, 0.05, 1.0))
 
     # Component specs (one per distinct geometry present in the layout).
     specs: Dict[str, ComponentSpec] = {}
@@ -238,8 +238,13 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
     # ---------------- defaults ----------------
     default = _sub(root, "default")
     comp_default = ET.SubElement(default, "default", {"class": "component"})
-    _sub(comp_default, "geom", condim=4, solref=(0.004, 1.0), solimp=(0.95, 0.99, 0.001),
-         margin=0.0, group=0)
+    # Components need MuJoCo's six-dimensional contact model: the third
+    # friction coefficient is rolling friction and is otherwise ignored by
+    # condim=4.  Without it, a fastener can retain a contact-induced roll
+    # indefinitely once the settling drop has ended.
+    _sub(comp_default, "geom", condim=6, solref=(0.004, 1.0), solimp=(0.95, 0.99, 0.001),
+         # bit 1: table/other parts; bit 2: rigid brush plate
+         contype=1, conaffinity=3, margin=0.0, group=0)
     tip_default = ET.SubElement(default, "default", {"class": "tip"})
     _sub(tip_default, "geom", type="box", material="mat_tip", condim=4,
          friction=(0.5, 0.01, 0.0002), solref=(0.004, 1.0), group=0)
@@ -273,6 +278,8 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
     _sub(world, "geom", name="table", type="box",
          size=table_half, pos=(0.0, 0.0, top_z - table_half[2]),
          material="mat_table", friction=cfg.table.friction, condim=4,
+         # bit 1: parts; bit 4: compliant brush sole
+         contype=1, conaffinity=5,
          solref=(0.004, 1.0), solimp=(0.95, 0.99, 0.001), group=0)
 
     _add_target_tray(world, cfg, top_z)
@@ -396,6 +403,27 @@ def _add_fixed_robotiq_2f85(tool: ET.Element, cfg) -> None:
          pos=(0.0, 0.0, plate_center_z), quat=(0.0, 1.0, 0.0, 0.0),
          material="mat_brush",
          friction=ee.get("brush_friction", (0.65, 0.01, 0.0004)),
+         # The rigid plate pushes parts (collision bit 2) but does not contact
+         # the table.  A separate thin sole below supplies the calibrated
+         # normal compliance, avoiding accidental softening of lateral pushes.
+         contype=2, conaffinity=0,
+         condim=4, margin=0.00005, mass=0.0)
+    sole_radius = float(ee.get("brush_sole_radius", brush_depth / 2.0))
+    _sub(gripper, "geom", name="brush_sole", type="sphere",
+         # A centred, yaw-symmetric contact patch represents the aggregate
+         # bristle compliance.  Using the full rectangular plate as the force
+         # contact made its four corners alternately impact the table during a
+         # pure wrist-yaw move, creating non-physical force spikes.
+         size=(sole_radius,),
+         # In the gripper frame +Z points down.  This places the sole inside
+         # the bottom millimetre of the visible plate with the same TCP plane.
+         pos=(0.0, 0.0, plate_center_z + brush_height / 2.0 - sole_radius),
+         quat=(0.0, 1.0, 0.0, 0.0), material="mat_brush",
+         friction=ee.get("brush_friction", (0.65, 0.01, 0.0004)),
+         solref=ee.get("brush_contact_solref", (0.20, 1.0)),
+         solimp=ee.get("brush_contact_solimp", (0.90, 0.95, 0.001)),
+         priority=int(ee.get("brush_contact_priority", 2)),
+         contype=4, conaffinity=0,
          condim=4, margin=0.00005, mass=0.0)
     _sub(gripper, "site", name="tcp_site",
          pos=(0.0, 0.0, plate_center_z + brush_height / 2.0),
@@ -515,14 +543,14 @@ def _add_target_tray(world: ET.Element, cfg, top_z: float) -> None:
     _sub(body, "geom", name="tray_wall_x", type="box",
          size=(t / 2.0, (y_max - y_min) / 2.0 + t, h / 2.0),
          pos=(x_min - t / 2.0, 0.5 * (y_min + y_max), top_z + h / 2.0),
-         material="mat_tray", condim=3, group=0)
+         material="mat_tray", contype=1, conaffinity=3, condim=3, group=0)
     # Side walls
     for tag, y_wall in (("yp", y_max), ("yn", y_min)):
         sign = 1.0 if y_wall > 0 else -1.0
         _sub(body, "geom", name=f"tray_wall_{tag}", type="box",
              size=((x_max - x_min) / 2.0 + t / 2.0, t / 2.0, h / 2.0),
              pos=(0.5 * (x_min + x_max) - t / 2.0, y_wall + sign * t / 2.0, top_z + h / 2.0),
-             material="mat_tray", condim=3, group=0)
+             material="mat_tray", contype=1, conaffinity=3, condim=3, group=0)
     # Visual-only floor patch marking the target footprint (no collisions).
     _sub(body, "geom", name="tray_floor_visual", type="box",
          size=((x_max - x_min) / 2.0, (y_max - y_min) / 2.0, 0.0005),
@@ -621,6 +649,13 @@ def _add_component(world: ET.Element, index: int, item: dict,
                 "mass": f"{mass_share:.6g}",
                 "friction": _fmt((mu, 0.008, 0.0004)),
                 "rgba": _fmt(geom.rgba),
+                # The brush plate uses collision bit 2 while the table uses
+                # bit 4 for its compliant sole.  The explicit proxy must
+                # inherit the component interaction bits; otherwise the
+                # visual mesh is inert and the plate can pass through every
+                # part without transferring any push impulse.
+                "contype": "1",
+                "conaffinity": "3",
             }
             ET.SubElement(body, "geom", proxy)
             continue

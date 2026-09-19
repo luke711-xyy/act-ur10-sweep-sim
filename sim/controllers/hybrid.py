@@ -371,8 +371,12 @@ class HybridForcePositionController:
             self._z_search = float(self._last_cmd.z)
         elif phase is Phase.CONTACT_DETECTED:
             # Latch the nominal contact height and clear the admittance state so
-            # every sweep starts from a known, zero-correction condition.
-            self._z_nominal = float(self._last_cmd.z)
+            # every sweep starts from a known, zero-correction condition.  Use
+            # the measured TCP, not the latest pre-delay command: with an
+            # actuation delay that command is several samples ahead and can
+            # place the nominal plane deeper than the release correction can
+            # safely recover from.
+            self._z_nominal = float(tcp[2])
             self.admittance.reset(delta_z=0.0, velocity=0.0)
         elif phase is Phase.RETRACT:
             kind = str(self.cfg.planner.interpolation)

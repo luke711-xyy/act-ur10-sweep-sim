@@ -102,19 +102,78 @@ def sample_layout(cfg, rng: np.random.Generator) -> List[dict]:
 
 
 def _sample_cluster(cfg, rng: np.random.Generator):
-    """Random cluster centre and spread for the single-cluster task."""
+    """Sample a reproducible, random-but-concentrated cluster centre.
+
+    The individual component offsets remain random.  The centre distribution
+    is deliberately narrower than the full spawn box so the policy sees a
+    useful range of initial layouts without having to learn a large global
+    translation.  ``center_x``/``center_y`` remain a backwards-compatible
+    uniform fallback for older configuration files.
+    """
     comp_cfg = cfg.components
     cluster = comp_cfg.cluster
     spawn = comp_cfg.spawn
     pad = float(cluster.get("max_radius", 0.12))
-    centre = np.array([
-        float(rng.uniform(max(cluster.center_x.min, float(spawn.x_min) + pad * 0.5),
-                          min(cluster.center_x.max, float(spawn.x_max) - pad * 0.5))),
-        float(rng.uniform(max(cluster.center_y.min, float(spawn.y_min) + pad * 0.5),
-                          min(cluster.center_y.max, float(spawn.y_max) - pad * 0.5))),
-    ])
+    safe_bounds = np.array([
+        [float(spawn.x_min) + pad * 0.5, float(spawn.x_max) - pad * 0.5],
+        [float(spawn.y_min) + pad * 0.5, float(spawn.y_max) - pad * 0.5],
+    ], dtype=float)
+
+    configured_bounds = cluster.get("center_bounds")
+    if configured_bounds is None:
+        configured_bounds = {
+            "x_min": float(cluster.center_x.min),
+            "x_max": float(cluster.center_x.max),
+            "y_min": float(cluster.center_y.min),
+            "y_max": float(cluster.center_y.max),
+        }
+    requested_bounds = np.array([
+        [float(configured_bounds.get("x_min", safe_bounds[0, 0])),
+         float(configured_bounds.get("x_max", safe_bounds[0, 1]))],
+        [float(configured_bounds.get("y_min", safe_bounds[1, 0])),
+         float(configured_bounds.get("y_max", safe_bounds[1, 1]))],
+    ], dtype=float)
+    bounds = np.column_stack((
+        np.maximum(safe_bounds[:, 0], requested_bounds[:, 0]),
+        np.minimum(safe_bounds[:, 1], requested_bounds[:, 1]),
+    ))
+    if np.any(bounds[:, 0] >= bounds[:, 1]):
+        raise ValueError("components.cluster.center_bounds do not fit in spawn")
+
+    if cluster.get("center_mean") is not None:
+        mean = np.asarray(cluster.center_mean, dtype=float).reshape(-1)
+        std = np.asarray(cluster.get("center_std", [0.0, 0.0]), dtype=float).reshape(-1)
+        if len(mean) != 2 or len(std) != 2 or np.any(std < 0):
+            raise ValueError("components.cluster.center_mean/std must be length-2 non-negative values")
+        centre = np.array([
+            _sample_bounded_normal(rng, mean[axis], std[axis],
+                                   bounds[axis, 0], bounds[axis, 1])
+            for axis in range(2)
+        ], dtype=float)
+    else:
+        centre = np.array([
+            float(rng.uniform(bounds[0, 0], bounds[0, 1])),
+            float(rng.uniform(bounds[1, 0], bounds[1, 1])),
+        ])
     spread = float(rng.uniform(cluster.spread_std.min, cluster.spread_std.max))
     return centre, spread
+
+
+def _sample_bounded_normal(rng: np.random.Generator, mean: float, std: float,
+                           low: float, high: float) -> float:
+    """Draw a normal variate inside ``[low, high]`` without scipy.
+
+    Rejection keeps the centre distribution smooth in its useful range.  The
+    clipped fallback is only a guard for pathological configurations and
+    ensures layout generation cannot hang forever.
+    """
+    if std == 0.0:
+        return float(np.clip(mean, low, high))
+    for _ in range(64):
+        value = float(rng.normal(mean, std))
+        if low <= value <= high:
+            return value
+    return float(np.clip(rng.normal(mean, std), low, high))
 
 
 def _inside_target(x: float, y: float, tgt, clearance: float) -> bool:

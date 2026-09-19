@@ -41,7 +41,10 @@ class UR10CB3EndEffector(CartesianEndEffector):
         self.tcp_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "tcp_site")
         self.ft_sensor_adr = self._sensor_adr("ft_force")
         self.torque_sensor_adr = self._sensor_adr("ft_torque")
-        self.tip_geom_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "brush_head")]
+        self.tip_geom_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+                             for name in ("brush_head", "brush_sole")]
+        self.normal_geom_ids = [mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_GEOM, "brush_sole")]
         self.component_geom_ids: set[int] = set()
         self._contact_sign: Optional[float] = None
         self._contact_buffer = np.zeros(6, dtype=float)
@@ -109,6 +112,33 @@ class UR10CB3EndEffector(CartesianEndEffector):
                 q[i] = float(np.clip(q[i], lo, hi))
             for i, name in enumerate(self.JOINT_NAMES):
                 self.data.qpos[self.qpos_adr[name]] = q[i]
+        mj.mj_forward(self.model, self.data)
+        final_pos = np.asarray(
+            self.data.site_xpos[self.tcp_site_id], dtype=float
+        )
+        final_mat = np.asarray(
+            self.data.site_xmat[self.tcp_site_id], dtype=float
+        ).reshape(3, 3)
+        cy, sy = np.cos(target[3]), np.sin(target[3])
+        desired = np.array(
+            ((cy, -sy, 0.0), (sy, cy, 0.0), (0.0, 0.0, 1.0)),
+            dtype=float,
+        )
+        position_error = float(np.linalg.norm(target[:3] - final_pos))
+        orientation_error = float(np.linalg.norm(
+            Rotation.from_matrix(desired @ final_mat.T).as_rotvec()
+        ))
+        if (not np.isfinite(position_error)
+                or not np.isfinite(orientation_error)
+                or position_error > float(self.cfg.end_effector.get(
+                    "ik_position_tolerance", 0.005))
+                or orientation_error > float(self.cfg.end_effector.get(
+                    "ik_orientation_tolerance", 0.02))):
+            raise RuntimeError(
+                "UR10 IK target is unreachable: "
+                f"position residual={position_error:.6f} m, "
+                f"orientation residual={orientation_error:.6f} rad"
+            )
         return q
 
     def tcp_position(self) -> np.ndarray:
@@ -156,7 +186,10 @@ class UR10CB3EndEffector(CartesianEndEffector):
         # simulated wrist normal readout; ``wrench()`` remains the raw 6D
         # sensor diagnostic.
         total = 0.0
-        brush = set(self.tip_geom_ids)
+        # Only the compliant sole is the single-axis normal-force channel.
+        # Lateral plate/part impulses remain present in the raw 6-D wrench but
+        # must not be mistaken for loss/excess of table-normal force.
+        brush = set(self.normal_geom_ids)
         buffer = np.zeros(6, dtype=float)
         for i in range(int(self.data.ncon)):
             contact = self.data.contact[i]

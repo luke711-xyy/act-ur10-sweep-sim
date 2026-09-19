@@ -39,6 +39,8 @@ class SweepEnv:
         self.component_body_ids: List[int] = []
         self.component_geom_ids: List[List[int]] = []
         self.geom_to_component: Dict[int, int] = {}
+        self.robot_geom_ids: set[int] = set()
+        self.brush_geom_ids: set[int] = set()
 
     # ------------------------------------------------------------------ setup
     def reset(self, seed: Optional[int] = None):
@@ -80,8 +82,26 @@ class SweepEnv:
         if hasattr(self.ee, "set_component_geoms"):
             self.ee.set_component_geoms(self.geom_to_component.keys())
 
+        base_body = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_BODY, "base"
+        )
+        self.robot_geom_ids = set()
+        if base_body >= 0:
+            for geom_id in range(int(self.model.ngeom)):
+                body_id = int(self.model.geom_bodyid[geom_id])
+                cursor = body_id
+                while cursor > 0 and cursor != base_body:
+                    cursor = int(self.model.body_parentid[cursor])
+                if cursor == base_body:
+                    self.robot_geom_ids.add(int(geom_id))
+        self.brush_geom_ids = {
+            int(value) for value in getattr(self.ee, "tip_geom_ids", ())
+            if int(value) >= 0
+        }
+
         mujoco.mj_forward(self.model, self.data)
         self._settle(float(cfg.episode.settle_time))
+        self._zero_component_velocities()
         # Settling the free components also lets the arm's position actuators
         # move under gravity.  Re-pin the commanded airborne pose afterwards
         # so every episode starts from the same task-space state.
@@ -97,6 +117,25 @@ class SweepEnv:
         for _ in range(max(0, steps)):
             mujoco.mj_step(self.model, self.data)
         mujoco.mj_rnePostConstraint(self.model, self.data)
+
+    def _zero_component_velocities(self) -> None:
+        """Start each free component at rest after the settling phase.
+
+        The settling drop is needed to resolve table contact, but its last
+        impact can leave a small translational or angular velocity on a
+        fastener.  That residual motion is an initial-condition artifact, not
+        part of the task, so the episode contract explicitly removes it.
+        """
+        import mujoco
+
+        for body_id in self.component_body_ids:
+            joint_id = int(self.model.body_jntadr[body_id])
+            if joint_id < 0:
+                continue
+            dof_start = int(self.model.jnt_dofadr[joint_id])
+            is_free = int(self.model.jnt_type[joint_id]) == int(mujoco.mjtJoint.mjJNT_FREE)
+            dof_count = 6 if is_free else 1
+            self.data.qvel[dof_start:dof_start + dof_count] = 0.0
 
     def _close_renderers(self) -> None:
         for attr in ("_renderer", "_seg_renderer", "_depth_renderer"):
@@ -161,6 +200,122 @@ class SweepEnv:
         return np.array([self.data.xquat[bid] for bid in self.component_body_ids], dtype=float)
 
     def collected_mask(self) -> np.ndarray:
+        """Conservative full-geometry inclusion mask for the collection tray.
+
+        The V1 fasteners are represented by simple convex bodies.  Their
+        ``nominal_radius`` is a planar bounding radius, so shrinking the target
+        rectangle by that radius guarantees the complete body footprint is in
+        the region.  This deliberately replaces the former centre-only test.
+        """
+        pos = self.component_positions()
+        if pos.size == 0:
+            return np.zeros(0, dtype=bool)
+        radii = np.asarray([float(item["nominal_radius"]) for item in self.layout],
+                           dtype=float)
+        tgt = self.cfg.target
+        return (
+            (pos[:, 0] >= float(tgt.x_min) + radii)
+            & (pos[:, 0] <= float(tgt.x_max) - radii)
+            & (pos[:, 1] >= float(tgt.y_min) + radii)
+            & (pos[:, 1] <= float(tgt.y_max) - radii)
+        )
+
+    def partial_collection_overlap_mask(self) -> np.ndarray:
+        """Return parts whose XY projection overlaps the tray but is not full.
+
+        The component footprint is conservatively represented by its nominal
+        planar radius.  ``collected_mask`` is the strict full-inclusion test;
+        this companion is the exact geometric complement we need for a partial
+        entry: the projected footprint intersects the target rectangle, but
+        the complete footprint is not inside it.  No contact history or
+        arbitrary "near-boundary" margin is used.
+        """
+        pos = self.component_positions()
+        if pos.size == 0:
+            return np.zeros(0, dtype=bool)
+        radii = np.asarray([float(item["nominal_radius"]) for item in self.layout],
+                           dtype=float)
+        tgt = self.cfg.target
+        overlaps = (
+            (pos[:, 0] + radii >= float(tgt.x_min))
+            & (pos[:, 0] - radii <= float(tgt.x_max))
+            & (pos[:, 1] + radii >= float(tgt.y_min))
+            & (pos[:, 1] - radii <= float(tgt.y_max))
+        )
+        return overlaps & ~self.collected_mask()
+
+    def brush_fully_inside_target(self) -> bool:
+        """Return whether the brush plate's complete XY footprint is in the tray."""
+        if self.ee is None:
+            return False
+        centre = np.asarray(self.tcp(), dtype=float)[:2]
+        yaw = float(self.ee.tcp_yaw())
+        half_depth = float(self.cfg.end_effector.brush_depth) / 2.0
+        half_width = float(self.cfg.end_effector.brush_width) / 2.0
+        local = np.asarray([
+            [-half_depth, -half_width],
+            [-half_depth, half_width],
+            [half_depth, -half_width],
+            [half_depth, half_width],
+        ], dtype=float)
+        rotation = np.asarray([
+            [np.cos(yaw), -np.sin(yaw)],
+            [np.sin(yaw), np.cos(yaw)],
+        ], dtype=float)
+        corners = local @ rotation.T + centre
+        tgt = self.cfg.target
+        return bool(
+            np.all(corners[:, 0] >= float(tgt.x_min))
+            and np.all(corners[:, 0] <= float(tgt.x_max))
+            and np.all(corners[:, 1] >= float(tgt.y_min))
+            and np.all(corners[:, 1] <= float(tgt.y_max))
+        )
+
+    def brush_component_contact_mask(self) -> np.ndarray:
+        """Return components in direct contact with the brush collision geoms."""
+        mask = np.zeros(len(self.layout), dtype=bool)
+        if self.data is None or self.ee is None:
+            return mask
+        brush_geoms = set(int(value) for value in getattr(self.ee, "tip_geom_ids", ()))
+        if not brush_geoms:
+            return mask
+        for index in range(int(self.data.ncon)):
+            contact = self.data.contact[index]
+            g1, g2 = int(contact.geom1), int(contact.geom2)
+            if g1 in brush_geoms:
+                component = self.geom_to_component.get(g2)
+            elif g2 in brush_geoms:
+                component = self.geom_to_component.get(g1)
+            else:
+                continue
+            if component is not None:
+                mask[int(component)] = True
+        return mask
+
+    def unsafe_robot_collision(self) -> bool:
+        """Return whether a non-brush robot geometry hit the scene.
+
+        Robot self contacts are ignored.  The brush plate/sole are the only
+        robot geoms allowed to touch the table, tray, or components during an
+        ACT rollout; any arm, wrist, gripper, or handle contact is a safety
+        violation.
+        """
+        if self.data is None:
+            return False
+        protected = self.robot_geom_ids - self.brush_geom_ids
+        if not protected:
+            return False
+        for index in range(int(self.data.ncon)):
+            contact = self.data.contact[index]
+            g1, g2 = int(contact.geom1), int(contact.geom2)
+            if g1 in self.robot_geom_ids and g2 in self.robot_geom_ids:
+                continue
+            if g1 in protected or g2 in protected:
+                return True
+        return False
+
+    def centre_collected_mask(self) -> np.ndarray:
+        """Legacy centre-only mask retained for diagnostics and regression plots."""
         pos = self.component_positions()
         if pos.size == 0:
             return np.zeros(0, dtype=bool)

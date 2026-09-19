@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from sim.config import load_config
+from sim.act.rollout import _contact_loss_ready
 from sim.controllers.hybrid import ControlRecord, HybridForcePositionController
 from sim.environments.layout import in_target_region, sample_layout
 from sim.export_dataset import (N_WAYPOINTS, _resample_xy_yaw, _wrench_history,
@@ -120,6 +121,38 @@ def test_cluster_mode_is_reproducible_and_randomises_the_centre(cfg):
     assert np.mean([i["x"] for i in a]) != np.mean([i["x"] for i in c])
 
 
+def test_cluster_mode_randomises_but_concentrates_group_centres(cfg):
+    """The main task keeps layout diversity without moving the whole group far away."""
+    cfg.set_path("components.spawn_mode", "cluster")
+    cfg.set_path("components.count", 6)
+    centres = []
+    for seed in range(128):
+        layout = sample_layout(cfg, np.random.default_rng(seed))
+        xy = np.array([[item["x"], item["y"]] for item in layout])
+        centres.append(xy.mean(axis=0))
+    centres = np.asarray(centres)
+
+    # The centre remains random, but is concentrated around the canonical
+    # work area rather than spanning most of the spawn box.
+    assert np.std(centres[:, 0]) < 0.065
+    assert np.std(centres[:, 1]) < 0.060
+    assert np.mean(centres[:, 0]) == pytest.approx(0.20, abs=0.030)
+    assert np.mean(centres[:, 1]) == pytest.approx(0.0, abs=0.025)
+    assert np.std(centres[:, 0]) > 0.010
+    assert np.std(centres[:, 1]) > 0.010
+
+
+def test_cluster_mode_slightly_spreads_components_within_the_group(cfg):
+    cfg.set_path("components.spawn_mode", "cluster")
+    pair_means = []
+    for seed in range(128):
+        xy = np.array([[item["x"], item["y"]]
+                       for item in sample_layout(cfg, np.random.default_rng(seed))])
+        distances = np.linalg.norm(xy[:, None, :] - xy[None, :, :], axis=2)
+        pair_means.append(float(distances[np.triu_indices(len(xy), 1)].mean()))
+    assert np.mean(pair_means) > 0.075
+
+
 def test_unknown_spawn_mode_is_rejected(cfg):
     cfg.set_path("components.spawn_mode", "nope")
     with pytest.raises(ValueError):
@@ -196,6 +229,20 @@ def test_failure_metrics_reach_the_episode_record():
     assert m.n_ride_over == 2 and m.n_jam_events == 1
     assert m.touchdown_overshoot_max == pytest.approx(1.4)
     assert "n_ride_over" in m.to_dict()
+
+
+def test_deliberate_contact_loss_waits_for_a_real_sweep():
+    # Touchdown plus a few centimetres is not enough context for a useful
+    # mid-sweep failure record.
+    assert not _contact_loss_ready(
+        contact_sweep_time=0.2, contact_sweep_path=0.02,
+        planned_sweep_time=8.0, planned_sweep_path=0.50)
+    assert not _contact_loss_ready(
+        contact_sweep_time=2.0, contact_sweep_path=0.10,
+        planned_sweep_time=8.0, planned_sweep_path=0.50)
+    assert _contact_loss_ready(
+        contact_sweep_time=2.5, contact_sweep_path=0.16,
+        planned_sweep_time=8.0, planned_sweep_path=0.50)
 
 
 # ------------------------------------------------------------ ACT export

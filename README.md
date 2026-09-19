@@ -63,9 +63,17 @@ python -m sim.visualize_results --run runs/experiment-*
 # 5. export demonstrations for later ACT training (no training happens here)
 python -m sim.export_dataset --planner visual_greedy --episodes 200
 
-# 6. default UR10 + ACT vertical slice
+# 6. schema-v4 UR10 + ACT full-episode pipeline
 uv pip install -e '.[act,web]'
-python -m sim.act.collect_dataset --split train --episodes 300
+# First generate one common layout with exact goals 1..6 for visual approval.
+python -m sim.act.generate_preview_batch --seed-base 4100 \
+    --max-attempts-per-preview 64 --set sim.real_time=false
+# After approval, promote those six records and complete the 120-demo plan.
+python -m sim.act.collect_dataset --out runs/act_dataset \
+    --promote-preview runs/workbench_previews
+python -m sim.act.collect_dataset --out runs/act_dataset \
+    --approved-plan --seed-base 4100 --max-attempts-per-episode 64
+# Formal training validates exactly 120 successful expert records before it starts.
 python -m sim.act.train --config configs/default.yaml
 python -m sim.act.evaluate --config configs/default.yaml --model runs/act_model
 python -m sim.web.run --config configs/default.yaml
@@ -91,19 +99,108 @@ the ACT wrist camera, and a third **inspection-only** oblique-front-above
 camera. The third camera is rendered and stored for human review but is never
 included in `act.observation_keys` or passed to the ACT policy.
 
-“Generate expert preview” runs the existing force-controlled expert once and
-stores it under `runs/workbench_previews/`; this is separate from the formal
-dataset, so preview failures (including excessive normal force or a component
-sliding out of the safe workspace) remain visible without silently becoming
-training labels. Training and inference are local subprocesses with captured
-logs and stop controls; the panel does not upload data or control a real arm.
+"Generate expert preview" runs the force-controlled expert and stores the
+accepted rollout under `runs/workbench_previews/`; a failed layout is retried
+with a reproducible replacement seed before it is persisted. This is separate
+from the formal dataset, so preview failures (including excessive normal force
+or a component sliding out of the safe workspace) remain visible without
+silently becoming training labels. Training and inference are local
+subprocesses with captured logs and stop controls; the panel does not upload
+data or control a real arm.
+
+For a small local preview batch, generate one *shared* six-part scene and run
+the six exact target counts 1 through 6 against that same layout with:
+
+```bash
+python -m sim.act.generate_preview_batch \
+    --out runs/workbench_previews --seed-base 4100 \
+    --max-attempts-per-preview 64 --set sim.real_time=false
+```
+
+The command screens target 6 first, reuses the workbench's orientation-aware
+A* one-pass expert and admittance rollout, and replaces the *whole shared
+layout seed* if any of targets 1--6 fails. Rejected attempts write only a
+lightweight reason to `generation_failures.jsonl`; they never write images or
+trajectories. The accepted batch writes one record per target count. It
+does not start ACT training or use a remote service; rerunning it appends
+another six previews. Workbench records use the stable
+`preview_goal_<target_count>_<serial>` naming scheme. The Demonstrations panel
+can filter by target count (`all` or 1--6) and outcome (`all`, `success`, or
+`failed`); its generation controls can create one or a bounded batch of
+quality-gated successes, or deliberately labelled failures in three families:
+side-wall stalls at the real tray mouth, wrong counts (over/under-count
+episodes reused from adjacent exact-count successes where possible), and route
+deviation. A stall plans against a deliberately laterally shifted *virtual*
+tray, while the MuJoCo scene keeps the real tray fixed. The resulting A* route
+carries the selected group through the real mouth at the wrong lane, so the
+real side wall can retain only part of the group. A physical quality gate
+rejects any sample whose missed parts are still in the middle of the table.
+Deliberate failures are excluded from the formal ACT dataset by the normal
+dataset reader. With the fixed six-part scene, target 6 can produce an
+under-count but an over-count is rejected because seven physical parts do not
+exist.
 
 The UR10 preview uses a continuous task-space-to-joint adapter. Its IK solve is
 performed in scratch state, the physical joint state is restored before stepping,
 and `end_effector.ik_max_joint_step` bounds each joint target update. This keeps
 near-singular least-squares solves from causing a visible branch jump. Demo
-playback renders into separate image elements from the live simulation views, so
-the periodic live refresh cannot overwrite a selected demo frame.
+playback takes over the same three top-row image panes and pauses the periodic
+live refresh, so all three cameras remain synchronized with the episode slider.
+The full-run Fz chart and the selectable TCP/action/wrench/joint/count plots use
+the same frame cursor; the frame table includes the exact values and all six
+object poses. The normal-force target remains 1 N, while 20 N is the independent
+transient safety ceiling.
+
+The current exact-target expert uses a single contact pass. It lets the A*
+expert choose a feasible exact-cardinality subset, searches a lattice of brush
+orientations and offsets inside
+the common capture corridor, and uses a 2-D grid A* state whose previous
+heading carries a turn cost. Connectors use physical clearance; the continuous
+capture segment uses an exact-count capture envelope, so harmless edge grazes
+are not confused with carrying a distractor into the tray. A line-of-sight
+shortcut removes one-cell staircases. Candidates are scored by path length,
+centred target capture, turn count, and distractor clearance. Before a rollout
+is accepted as an expert demonstration, the shortlist is replayed in MuJoCo
+on the same layout; a dynamically bad candidate is rejected and the next one
+is tried. An episode with target `N` succeeds when any exactly `N` parts are
+fully inside the tray and no part's XY footprint only partially overlaps the
+tray. Planner-selected identities are not part of the success label or ACT
+input. Recovery phases are not appended to expert demonstrations.
+
+### Schema-v4 ACT/control contract
+
+ACT starts at the same fixed UR10 reset pose for every goal. A* is imported
+only by expert generation; training and learned inference never request an
+expert staging point, target index, or object pose. The policy observes the two
+320×320 RGB views, environment counts, and a 42-value state consisting of the
+current and previous 21-value robot/contact records. It predicts fixed-table
+frame `[Δx, Δy, Δz, Δyaw]` chunks at 5 Hz; references execute at 25 Hz with
+100 Hz substep interpolation, speed limiting, IK residual validation, and
+non-brush robot collision checks.
+
+Before measured contact, ACT owns all four action dimensions. The force latch
+then transfers physical Z continuously to the 1 N admittance controller; ACT's
+post-contact Z is retained for audit but not executed, and its training `Δz`
+label is zero. The workbench plots policy Z, applied Z, ownership, force, and
+the first measured contact position. Stability/unload frames remain viewable
+but are masked from behavior cloning.
+
+The rebuilt training set is schema v4 and contains exactly 120 successful
+experts: eight paired layouts × six goals (48) plus twelve independent layouts
+per goal (72). Training allocates 35% of samples to approach/descent and 65%
+to contact-build/sweep, uses ImageNet ResNet-18, runs for at most 80,000 steps
+or 24 cumulative hours across resumes, saves every 2,500 steps, and keeps the
+newest three checkpoints.
+Trackio recreates the private `Luke711/act-ur10-sweep-tracking` Space when
+training actually starts.
+
+If the full candidate search cannot find a route, the expert does not execute
+a guessed target-centre fallback. It records a short bounded contact probe and
+marks the episode with
+`astar_no_feasible_path` or `no_single_capture_lane`. The workbench exposes the
+planner status, strategy, attempt count, turn count and score separately from
+the physical termination reason, so geometry failures and dynamic candidate
+rejections remain auditable.
 
 For richer dataset browsing, video playback, action plots, filtering, and
 annotations, use the upstream [LeRobot Dataset Visualizer](https://huggingface.co/spaces/lerobot/visualize_dataset)
@@ -208,7 +305,7 @@ the signs unambiguous; see the module docstring in `sim/controllers/admittance.p
 `z_nominal` is latched only after a post-step brush contact load is measured, and it uses
 the actual TCP height at that instant rather than a guessed or teleported command. The
 admittance state is **reset at the start of every sweep**. The default search height is
-1 mm below the table reference (`workspace.z_search_start=-0.001`), a small controlled
+0.13 mm below the table reference (`workspace.z_search_start=-0.00013`), a small controlled
 preload that gives MuJoCo a real contact constraint instead of relying on an exact
 zero-gap equilibrium.
 
@@ -218,7 +315,7 @@ Implemented safeguards:
 * first-order low-pass filter on the normal force (`force_filter_cutoff_hz`)
 * force-target slew-rate ramping, up **and** down (`force_ramp_rate`)
 * force-target saturation (`max_force`) and a hard measured-force abort (`safe_max_force`)
-  (`safe_max_force=100 N` is the current official-UR10e contact-peak calibration)
+  (`safe_max_force=20 N` is the current user-approved normal operating ceiling)
 * transient-force dwell (`safe_force_dwell_steps`) before the hard abort is declared
 * `Δz` saturation (`delta_z_limit`) and `dΔz/dt` limit (`delta_z_rate_limit`), both with
   anti-windup
@@ -416,7 +513,7 @@ Written for every episode (`*_metrics.json`, and `episodes.csv` for batches):
 | Metric | Meaning |
 |---|---|
 | `collection_rate` | components in the target / initial count |
-| `success` | `collection_rate ≥ episode.success_collection_rate` |
+| `success` (legacy planner metrics) | `collection_rate ≥ episode.success_collection_rate`; the ACT expert uses the stricter exact-target contract described above |
 | `completion_time` | simulated seconds |
 | `n_strokes` | number of sweeping strokes |
 | `path_length`, `path_length_xy` | total TCP path |
@@ -451,13 +548,13 @@ planner-independent). `paired_*.csv` holds the per-seed differences and
 
 The official Menagerie UR10e is mounted at `[0.62, 0, 0.22]` in the default scene. This
 is a task-layout choice: it keeps the tray-mouth lane reachable while the full official
-link and collision geometry remains in the model. The brush stops at the tray mouth
-(`target.x_max - max(0.02, brush_depth/2)`) rather than asking IK to reach the tray back
-wall outside the command workspace. Once all components are inside the tray, the expert
-rollout terminates immediately; it does not run extra recovery lanes that could create a
-new collision after success. The last component is first pushed horizontally at its own
-contact lane, and the endpoint is held for `episode.final_push_time` so actuator lag does
-not peel the brush away before the collection check.
+link and collision geometry remains in the model. The brush crosses the tray mouth
+continuously and ends at the wall-safe configured depth
+(`planner.expert_tray_push_depth`) rather than stopping at the entrance or asking IK to
+reach the tray back wall outside the command workspace. Once all components are inside
+the tray, the expert rollout terminates immediately; it does not run extra recovery lanes
+that could create a new collision after success. The one-second stable confirmation is
+performed after the exact count is reached and is masked from ACT behavior cloning.
 
 Collection rate alone does not say *why* a run went badly. Three failure modes are
 detected per stroke and aggregated per episode.
@@ -512,11 +609,17 @@ real fasteners (see Limitations).
 
 | Mode | What it is | What it is for |
 |---|---|---|
-| `uniform` *(default)* | parts scattered independently across the spawn box | the **planner** comparison — this is what makes full-cover expensive and rewards re-planning |
-| `cluster` | all parts drawn around one randomly placed centre with randomised spread (`components.cluster.*`) | the **demonstration** task — keeps tool-object and object-object contact while removing the combinatorial initial-state space that makes a ~50-demo imitation dataset hopeless |
+| `cluster` *(default)* | all parts drawn around one seed-randomised but concentrated centre with a compact randomised spread (`components.cluster.*`) | the main six-part scene and exact partial-target previews |
+| `uniform` | parts scattered independently across the spawn box | planner comparison and deliberately wide-layout failure cases |
 
 Both are reproducible from `(config, seed)` and both enforce the same guarantees (nothing
-starts inside the target, minimum separation, inside the spawn box).
+starts inside the target, minimum separation, inside the spawn box).  In the default
+cluster mode, `center_mean`, `center_std`, and `center_bounds` randomise the group
+centre without allowing it to wander across the full spawn box; component offsets,
+orientations, masses, and frictions remain random.  Exact `N<6`
+previews still contain six physical parts and use `components.exact_partial_spawn_mode`,
+which is `cluster` by default; changing it to `uniform` is an explicit wider-layout
+experiment, not a hidden change to the task count.
 
 ---
 
@@ -854,8 +957,9 @@ Read this before quoting any number from this simulator.
 14. Force regulation has an inherent steady-state offset proportional to `k_d` (see
     "Controller tuning"). Do not read `desired_force` as the achieved force — read
     `mean_contact_force` and `rms_force_error`.
-15. "Collected" means the component's **centre** lies inside the tray footprint. A part
-    balanced on the tray lip counts as collected.
+15. In the current ACT task, "collected" means the component's **complete conservative
+    footprint** lies inside the tray opening; a part balanced on the lip does not count.
+    Older legacy planner metrics may still use centre-only collection.
 16. Episode budgets (`sim.max_episode_time`, `planner.max_strokes`) truncate long episodes;
     `failure_reason` says which limit was hit. Truncated episodes drag the mean collection
     rate down, which is intended — the baseline is supposed to look expensive.
