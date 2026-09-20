@@ -87,6 +87,28 @@ def test_selector_rewrites_bev_selection_channels_and_reports_selection_loss():
     assert policy.last_selection.shape == (1, 6)
 
 
+def test_selector_feeds_hard_binary_occupancy_to_act():
+    policy = make_policy()
+    batch = make_batch(batch_size=1)
+    batch["observation.task_state"] = torch.tensor(
+        [[1.0, 2.0 / 6.0, 0.0, 1.0, 2.0 / 6.0, 0.0]]
+    )
+    batch["observation.instance_bev"] = torch.zeros(
+        1, 6, 128, 160, dtype=torch.bool
+    )
+    batch["observation.instance_bev"][0, 0, 64, 80] = True
+    batch["observation.instance_bev"][0, 1, 64, 90] = True
+    # Deliberately make the incoming dense map confidence-like and non-binary.
+    batch["observation.bev"] = torch.full((1, 6, 128, 160), 0.37)
+
+    prepared, _ = policy._prepare_selection(batch, training=False)
+    bev = prepared["observation.bev"]
+    assert set(torch.unique(bev[:, :3]).tolist()) <= {0.0, 1.0}
+    assert bev[0, 0, 64, 80] == 1.0
+    assert bev[0, 0, 64, 90] == 1.0
+    torch.testing.assert_close(bev[:, 2], (bev[:, 0] - bev[:, 1]).clamp_min(0.0))
+
+
 def test_objectact_policy_factory_can_bootstrap_before_first_checkpoint():
     from sim.act.policy import build_objectact_policy
     from sim.config import load_config

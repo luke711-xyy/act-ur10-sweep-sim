@@ -350,6 +350,12 @@ class ObjectACTPolicy(nn.Module):
             selection_loss = logits.sum() * 0.0
         prepared = dict(batch)
         if "observation.instance_bev" in batch:
+            # The detector confidence is retained in the object tokens, but
+            # the spatial topology presented to ACT is deliberately hard
+            # binary, in the same spirit as Push-Wiper's occupancy map.  Do
+            # not pass confidence-weighted pixels through these three
+            # channels: a detector score must not change the apparent shape
+            # or connectivity of a part in the policy's table map.
             masks = batch["observation.instance_bev"].to(dtype=torch.bool)
             if masks.shape[1:] != (6, 128, 160):
                 raise ValueError("observation.instance_bev must have shape (B, 6, 128, 160)")
