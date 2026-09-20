@@ -19,7 +19,9 @@ def test_objectact_preprocessor_normalizes_declared_modalities_separately(tmp_pa
         "observation.images.overhead": torch.full((1, 3, 4, 4), 255, dtype=torch.uint8),
         "observation.images.wrist": torch.zeros((1, 3, 4, 4), dtype=torch.uint8),
         "observation.robot_state": torch.ones((1, 36)),
-        "observation.task_state": torch.ones((1, 6)),
+        "observation.task_state": torch.tensor(
+            [[1.0, 1.0 / 6.0, 0.0, 1.0, 1.0 / 6.0, 0.0]]
+        ),
         "observation.object_tokens": torch.ones((1, 6, 29)),
         "observation.object_valid": torch.ones((1, 6), dtype=torch.bool),
         "observation.instance_bev": torch.zeros((1, 6, 128, 160), dtype=torch.bool),
@@ -33,6 +35,7 @@ def test_objectact_preprocessor_normalizes_declared_modalities_separately(tmp_pa
     assert torch.allclose(processed["observation.robot_state"], torch.ones((1, 36)))
     assert processed["observation.object_valid"].dtype == torch.bool
     assert processed["observation.instance_bev"].dtype == torch.bool
+    assert processed["objectact.target_count"].tolist() == [1]
 
     path = tmp_path / "stats.json"
     preprocessor.save(path)

@@ -91,10 +91,12 @@ class ObjectACTPreprocessor:
         for key, value in batch.items():
             tensor = value.to(self.device) if hasattr(value, "to") else torch.as_tensor(value, device=self.device)
             if key == "observation.task_state" and tensor.ndim >= 2:
-                # Preserve the physical target cardinality for the
-                # permutation-invariant selector while normalizing the full
-                # task-state history for the Transformer branch.
-                result["objectact.target_count"] = tensor[:, 1].detach().clone()
+                # The v5 task state stores target_count / 6.  Preserve the
+                # physical cardinality for the permutation-invariant
+                # selector before normalizing the full task-state history.
+                result["objectact.target_count"] = torch.round(
+                    tensor[:, 1] * 6.0
+                ).to(dtype=torch.long).clamp(min=1, max=6).detach().clone()
             if key in IMAGE_FEATURES:
                 tensor = tensor.to(dtype=torch.float32)
                 if value.dtype == torch.uint8 or float(tensor.detach().amax().item()) > 1.5:
