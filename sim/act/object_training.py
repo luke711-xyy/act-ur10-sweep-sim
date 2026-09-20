@@ -497,12 +497,31 @@ def train_objectact(args=None) -> dict:
                 if tracker is not None:
                     tracker.log({"checkpoint_step": int(completed)})
             if tracker is not None and completed % 100 == 0:
-                tracker.log({
+                progress = {
                     "step": int(completed),
                     "loss": float(loss.detach().cpu()),
                     **_numeric_metrics(metrics),
                     "elapsed_s": float(elapsed),
-                })
+                }
+                print(json.dumps({
+                    "step": int(completed),
+                    "loss": progress["loss"],
+                    "metrics": {
+                        key: value for key, value in progress.items()
+                        if key not in {"step", "loss", "elapsed_s"}
+                    },
+                    "elapsed_s": progress["elapsed_s"],
+                    "device": device,
+                }, ensure_ascii=False), flush=True)
+                tracker.log(progress)
+            elif tracker is None and completed % 100 == 0:
+                print(json.dumps({
+                    "step": int(completed),
+                    "loss": float(loss.detach().cpu()),
+                    "metrics": _numeric_metrics(metrics),
+                    "elapsed_s": float(elapsed),
+                    "device": device,
+                }, ensure_ascii=False), flush=True)
             if (
                 tracker is not None
                 and tracking is not None
