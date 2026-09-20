@@ -335,6 +335,31 @@ class _TrainingStop:
         self.requested = True
 
 
+def _safe_trackio_call(
+    tracker,
+    method: str,
+    *args,
+    failures: list[str] | None = None,
+    **kwargs,
+) -> bool:
+    """Keep optional dashboard failures from terminating a training run.
+
+    Trackio logging and static-Space uploads are observability side effects;
+    they must never prevent a checkpoint or the local training loop from
+    completing when the network is transiently unavailable.
+    """
+
+    try:
+        getattr(tracker, method)(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - the dashboard is best-effort
+        message = f"{method}: {type(exc).__name__}: {exc}"
+        if failures is not None:
+            failures.append(message)
+        print(f"WARNING: Trackio {message}; continuing training", flush=True)
+        return False
+    return True
+
+
 def train_objectact(args=None) -> dict:
     """Run the resumable v5 behavior-cloning loop.
 
@@ -419,6 +444,7 @@ def train_objectact(args=None) -> dict:
         static=bool(args.trackio_static),
     )
     tracker = None
+    tracking_failures: list[str] = []
     last_static_sync_elapsed = -60.0
     if tracking is not None:
         try:
@@ -495,7 +521,12 @@ def train_objectact(args=None) -> dict:
                 )
                 prune_objectact_checkpoints(out_root, keep_latest=int(args.keep_checkpoints), milestones=milestones)
                 if tracker is not None:
-                    tracker.log({"checkpoint_step": int(completed)})
+                    _safe_trackio_call(
+                        tracker,
+                        "log",
+                        {"checkpoint_step": int(completed)},
+                        failures=tracking_failures,
+                    )
             if tracker is not None and completed % 100 == 0:
                 progress = {
                     "step": int(completed),
@@ -513,7 +544,12 @@ def train_objectact(args=None) -> dict:
                     "elapsed_s": progress["elapsed_s"],
                     "device": device,
                 }, ensure_ascii=False), flush=True)
-                tracker.log(progress)
+                _safe_trackio_call(
+                    tracker,
+                    "log",
+                    progress,
+                    failures=tracking_failures,
+                )
             elif tracker is None and completed % 100 == 0:
                 print(json.dumps({
                     "step": int(completed),
@@ -531,28 +567,22 @@ def train_objectact(args=None) -> dict:
                 # Public static Spaces are free but read-only.  Keep the
                 # training loop local and push a snapshot asynchronously so a
                 # slow HF upload cannot pause MPS optimization.
-                tracker.sync(
+                _safe_trackio_call(
+                    tracker,
+                    "sync",
                     project=str(tracking["project"]),
                     space_id=str(tracking["space_id"]),
                     force=True,
                     run_in_background=True,
                     sdk="static",
+                    failures=tracking_failures,
                 )
                 last_static_sync_elapsed = float(elapsed)
             if stop.requested or elapsed >= max_seconds:
                 break
     finally:
         if tracker is not None:
-            tracker.finish()
-            if tracking is not None and bool(tracking["static"]):
-                # The final snapshot is synchronous so the summary is not
-                # reported before its public dashboard has the last metrics.
-                tracker.sync(
-                    project=str(tracking["project"]),
-                    space_id=str(tracking["space_id"]),
-                    force=True,
-                    sdk="static",
-                )
+            _safe_trackio_call(tracker, "finish", failures=tracking_failures)
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)
     elapsed = elapsed_before + time.monotonic() - started
@@ -572,9 +602,28 @@ def train_objectact(args=None) -> dict:
         "max_steps": int(args.steps),
         "checkpoint_every": int(args.checkpoint_every),
         "tracking": tracking,
+        "tracking_failures": tracking_failures,
         "elapsed_seconds": elapsed,
     }
     (out_root / "training_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    if tracker is not None and tracking is not None and bool(tracking["static"]):
+        # The final snapshot is best-effort and deliberately happens only
+        # after the local checkpoint and summary are durable.  A transient HF
+        # or proxy failure must not erase the completed training result.
+        _safe_trackio_call(
+            tracker,
+            "sync",
+            project=str(tracking["project"]),
+            space_id=str(tracking["space_id"]),
+            force=True,
+            sdk="static",
+            failures=tracking_failures,
+        )
+        # Persist the warning list after the final sync attempt as well.
+        summary["tracking_failures"] = tracking_failures
+        (out_root / "training_summary.json").write_text(
+            json.dumps(summary, indent=2), encoding="utf-8"
+        )
     return summary
 
 

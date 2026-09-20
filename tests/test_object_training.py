@@ -130,6 +130,21 @@ def test_objectact_training_parser_accepts_trackio_options():
     assert args.trackio_private is None
 
 
+def test_trackio_failures_are_best_effort(capsys):
+    from sim.act.object_training import _safe_trackio_call
+
+    class BrokenTracker:
+        def sync(self, **_kwargs):
+            raise RuntimeError("temporary network failure")
+
+    failures = []
+    assert not _safe_trackio_call(
+        BrokenTracker(), "sync", failures=failures, project="demo"
+    )
+    assert failures and "temporary network failure" in failures[0]
+    assert "continuing training" in capsys.readouterr().out
+
+
 def test_objectact_defaults_to_imagenet_backbone_weights():
     from sim.act.object_training import _objectact_config_from_sim_config
     from sim.config import load_config
