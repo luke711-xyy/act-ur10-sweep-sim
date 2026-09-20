@@ -623,7 +623,7 @@ def train_objectact(args=None) -> dict:
                 # slow HF upload cannot pause MPS optimization.  The gate is
                 # important because Trackio starts a new thread per sync.
                 if static_sync_gate is not None:
-                    started = static_sync_gate.start(
+                    static_sync_gate.start(
                         lambda: _safe_trackio_call(
                             tracker,
                             "sync",
