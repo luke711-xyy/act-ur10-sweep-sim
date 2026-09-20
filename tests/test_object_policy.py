@@ -109,7 +109,7 @@ def test_selector_feeds_hard_binary_occupancy_to_act():
     torch.testing.assert_close(bev[:, 2], (bev[:, 0] - bev[:, 1]).clamp_min(0.0))
 
 
-def test_objectact_policy_factory_can_bootstrap_before_first_checkpoint():
+def test_objectact_policy_factory_can_bootstrap_before_first_checkpoint(tmp_path):
     from sim.act.policy import build_objectact_policy
     from sim.config import load_config
 
@@ -117,6 +117,7 @@ def test_objectact_policy_factory_can_bootstrap_before_first_checkpoint():
         "act.image_size=[64,64]",
         "act.device=cpu",
         "act.objectact_pretrained_weights=null",
+        f"act.objectact_model_dir={tmp_path / 'missing-objectact-model'}",
     ])
     policy, object_config, checkpoint = build_objectact_policy(cfg)
     assert checkpoint is None
