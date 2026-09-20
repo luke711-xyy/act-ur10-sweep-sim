@@ -77,6 +77,10 @@ def run_objectact_episode(
         )
     preprocessor = ObjectACTPreprocessor.load(normalizer_path, device=device)
     detector_checkpoint = cfg.act.get("objectact_detector_checkpoint", None)
+    if not detector_checkpoint:
+        detector_checkpoint = cfg.act.get(
+            "objectact_detector_model_dir", "runs/objectact_detector"
+        )
     frontend = RGBObjectPerceptionFrontend(
         cfg,
         device=device,

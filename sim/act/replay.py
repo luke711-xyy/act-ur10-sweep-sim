@@ -187,6 +187,10 @@ def save_objectact_inference_replay(
     env = SweepEnv(replay_cfg, seed=int(seed))
     env.reset(seed=int(seed))
     detector_checkpoint = replay_cfg.act.get("objectact_detector_checkpoint", None)
+    if not detector_checkpoint:
+        detector_checkpoint = replay_cfg.act.get(
+            "objectact_detector_model_dir", "runs/objectact_detector"
+        )
     detector_checkpoint = verified_detector_checkpoint(detector_checkpoint)
     frontend = RGBObjectPerceptionFrontend(
         replay_cfg, device="cpu", detector_checkpoint=detector_checkpoint

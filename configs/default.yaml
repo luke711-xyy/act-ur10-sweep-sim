@@ -346,7 +346,9 @@ act:
   objectact_model_dir: runs/objectact_model
   objectact_detector_dataset_dir: runs/objectact_detector_dataset
   objectact_detector_model_dir: runs/objectact_detector
-  objectact_detector_checkpoint: null
+  # Use the quality-gated detector by default for ObjectACT inference and
+  # workbench replay. An explicit checkpoint still overrides this path.
+  objectact_detector_checkpoint: runs/objectact_detector
   # Detector checkpoints trained with ImageNet initialization normalize RGB
   # inside the detector forward; keep training and runtime contracts aligned.
   objectact_detector_pretrained: true

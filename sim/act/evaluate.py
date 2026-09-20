@@ -448,6 +448,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--policy-variant", choices=("ordinary", "objectact"), default=None,
+        help="override the config policy variant for this rollout",
+    )
     parser.add_argument("--target-count", type=int, default=None,
                         help="exact number of the six components to collect")
     parser.add_argument("--record-replay", action="store_true",
@@ -466,6 +470,8 @@ def main(argv=None) -> int:
     if args.target_count is not None and not 1 <= args.target_count <= 6:
         parser.error("--target-count must be between 1 and 6")
     cfg = load_config(args.config)
+    if args.policy_variant is not None:
+        cfg.set_path("act.policy_variant", args.policy_variant)
     if args.target_count is not None:
         cfg.set_path("task.target_count", args.target_count)
     result = run_act_episode(cfg, seed=args.seed, model_path=args.model,

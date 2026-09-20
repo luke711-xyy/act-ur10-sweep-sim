@@ -29,9 +29,12 @@ def build_train_argv(project_root, config, dataset, out, steps=None,
 
 
 def build_inference_argv(project_root, config, seed, model=None, target_count=None,
-                         replay_root="runs/workbench_previews", preview=False):
+                         replay_root="runs/workbench_previews", preview=False,
+                         variant="objectact"):
     argv = [sys.executable, "-m", "sim.act.evaluate", "--config", str(config),
             "--seed", str(int(seed))]
+    if variant:
+        argv.extend(["--policy-variant", str(variant).lower()])
     if model:
         argv.extend(["--model", str(model)])
     if target_count is not None:

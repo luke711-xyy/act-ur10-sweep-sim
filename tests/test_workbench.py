@@ -130,6 +130,8 @@ def test_job_commands_are_typed_and_use_project_modules(tmp_path):
     assert infer[1:3] == ["-m", "sim.act.evaluate"]
     assert "--model" in infer and "model.pt" in infer
     assert "--target-count" in infer and "4" in infer
+    assert "--policy-variant" in infer
+    assert infer[infer.index("--policy-variant") + 1] == "objectact"
     assert "--record-replay" in infer
     assert "--replay-root" in infer
     preview_infer = build_inference_argv(tmp_path, "cfg.yaml", 3, "model.pt", 4,
@@ -145,10 +147,11 @@ def test_job_commands_are_typed_and_use_project_modules(tmp_path):
 def test_evaluate_cli_accepts_exact_target_count():
     args = build_arg_parser().parse_args([
         "--config", "cfg.yaml", "--seed", "9", "--model", "checkpoint",
-        "--target-count", "4",
+        "--target-count", "4", "--policy-variant", "objectact",
     ])
     assert args.seed == 9
     assert args.target_count == 4
+    assert args.policy_variant == "objectact"
 
 
 def test_evaluate_cli_accepts_preview_mode():
@@ -173,6 +176,7 @@ def test_inference_route_passes_target_count_to_job(tmp_path):
     assert calls[0][0] == "inference"
     assert "--target-count" in calls[0][1]
     assert calls[0][1][calls[0][1].index("--target-count") + 1] == "4"
+    assert calls[0][1][calls[0][1].index("--policy-variant") + 1] == "objectact"
     assert "--preview" in calls[0][1]
 
 
