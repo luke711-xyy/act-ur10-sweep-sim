@@ -6,6 +6,7 @@ import argparse
 import json
 import random
 import signal
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -360,6 +361,55 @@ def _safe_trackio_call(
     return True
 
 
+class _BackgroundSyncGate:
+    """Allow at most one asynchronous static-Space sync at a time.
+
+    ``trackio.sync(..., run_in_background=True)`` creates a new thread for
+    every call.  A periodic training loop must therefore gate calls itself;
+    otherwise a slow upload can leave several full snapshots competing for
+    the same SQLite database and HF bucket.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._closed = False
+
+    def start(self, callback) -> bool:
+        """Start ``callback`` if no previous upload is still in flight."""
+
+        with self._lock:
+            if self._closed or (self._thread is not None and self._thread.is_alive()):
+                return False
+            thread = threading.Thread(
+                target=self._run,
+                args=(callback,),
+                name="objectact-trackio-sync",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
+            return True
+
+    def _run(self, callback) -> None:
+        try:
+            callback()
+        finally:
+            with self._lock:
+                self._thread = None
+
+    def close_and_wait(self, timeout: float) -> bool:
+        """Prevent new uploads and wait for the current one if possible."""
+
+        with self._lock:
+            self._closed = True
+            thread = self._thread
+        if thread is not None:
+            thread.join(max(0.0, float(timeout)))
+        with self._lock:
+            return self._thread is None
+
+
 def train_objectact(args=None) -> dict:
     """Run the resumable v5 behavior-cloning loop.
 
@@ -446,6 +496,8 @@ def train_objectact(args=None) -> dict:
     tracker = None
     tracking_failures: list[str] = []
     last_static_sync_elapsed = -60.0
+    static_sync_gate: _BackgroundSyncGate | None = None
+    static_sync_idle_at_shutdown = True
     if tracking is not None:
         try:
             import trackio
@@ -486,6 +538,8 @@ def train_objectact(args=None) -> dict:
                 "bev_shape": [6, 128, 160],
             },
         )
+        if bool(tracking["static"]):
+            static_sync_gate = _BackgroundSyncGate()
     out_root.mkdir(parents=True, exist_ok=True)
     iterator = iter(loader)
     stop = _TrainingStop()
@@ -566,21 +620,36 @@ def train_objectact(args=None) -> dict:
             ):
                 # Public static Spaces are free but read-only.  Keep the
                 # training loop local and push a snapshot asynchronously so a
-                # slow HF upload cannot pause MPS optimization.
-                _safe_trackio_call(
-                    tracker,
-                    "sync",
-                    project=str(tracking["project"]),
-                    space_id=str(tracking["space_id"]),
-                    force=True,
-                    run_in_background=True,
-                    sdk="static",
-                    failures=tracking_failures,
-                )
-                last_static_sync_elapsed = float(elapsed)
+                # slow HF upload cannot pause MPS optimization.  The gate is
+                # important because Trackio starts a new thread per sync.
+                if static_sync_gate is not None:
+                    started = static_sync_gate.start(
+                        lambda: _safe_trackio_call(
+                            tracker,
+                            "sync",
+                            project=str(tracking["project"]),
+                            space_id=str(tracking["space_id"]),
+                            force=True,
+                            # The gate owns the background thread.  Calling
+                            # Trackio with run_in_background=True here would
+                            # immediately create a second, ungated thread.
+                            run_in_background=False,
+                            sdk="static",
+                            failures=tracking_failures,
+                        )
+                    )
+                    # Avoid retrying the gate on every training step while a
+                    # slow upload is still in flight.
+                    last_static_sync_elapsed = float(elapsed)
             if stop.requested or elapsed >= max_seconds:
                 break
     finally:
+        if static_sync_gate is not None:
+            static_sync_idle_at_shutdown = static_sync_gate.close_and_wait(timeout=120.0)
+            if not static_sync_idle_at_shutdown:
+                tracking_failures.append(
+                    "sync: background upload still running at shutdown"
+                )
         if tracker is not None:
             _safe_trackio_call(tracker, "finish", failures=tracking_failures)
         for sig, handler in old_handlers.items():
@@ -606,7 +675,12 @@ def train_objectact(args=None) -> dict:
         "elapsed_seconds": elapsed,
     }
     (out_root / "training_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    if tracker is not None and tracking is not None and bool(tracking["static"]):
+    if (
+        tracker is not None
+        and tracking is not None
+        and bool(tracking["static"])
+        and static_sync_idle_at_shutdown
+    ):
         # The final snapshot is best-effort and deliberately happens only
         # after the local checkpoint and summary are durable.  A transient HF
         # or proxy failure must not erase the completed training result.
@@ -620,6 +694,12 @@ def train_objectact(args=None) -> dict:
             failures=tracking_failures,
         )
         # Persist the warning list after the final sync attempt as well.
+        summary["tracking_failures"] = tracking_failures
+        (out_root / "training_summary.json").write_text(
+            json.dumps(summary, indent=2), encoding="utf-8"
+        )
+    elif tracker is not None and tracking is not None and bool(tracking["static"]):
+        tracking_failures.append("sync: final upload skipped because a prior upload was still running")
         summary["tracking_failures"] = tracking_failures
         (out_root / "training_summary.json").write_text(
             json.dumps(summary, indent=2), encoding="utf-8"

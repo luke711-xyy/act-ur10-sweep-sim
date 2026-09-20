@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from threading import Event
 
 
 def test_objectact_preprocessor_normalizes_declared_modalities_separately(tmp_path):
@@ -143,6 +144,27 @@ def test_trackio_failures_are_best_effort(capsys):
     )
     assert failures and "temporary network failure" in failures[0]
     assert "continuing training" in capsys.readouterr().out
+
+
+def test_background_static_sync_gate_does_not_overlap_uploads():
+    from sim.act.object_training import _BackgroundSyncGate
+
+    entered = Event()
+    release = Event()
+    calls = []
+
+    def upload():
+        calls.append("started")
+        entered.set()
+        release.wait(timeout=1.0)
+
+    gate = _BackgroundSyncGate()
+    assert gate.start(upload)
+    assert entered.wait(timeout=1.0)
+    assert not gate.start(upload)
+    release.set()
+    assert gate.close_and_wait(timeout=1.0)
+    assert calls == ["started"]
 
 
 def test_objectact_defaults_to_imagenet_backbone_weights():
