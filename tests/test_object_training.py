@@ -113,3 +113,11 @@ def test_objectact_training_parser_defaults_to_formal_80k_schedule():
     assert args.checkpoint_every == 2500
     assert args.keep_checkpoints == 3
     assert args.expected_per_target == 20
+
+
+def test_objectact_defaults_to_imagenet_backbone_weights():
+    from sim.act.object_training import _objectact_config_from_sim_config
+    from sim.config import load_config
+
+    config = _objectact_config_from_sim_config(load_config("configs/default.yaml"))
+    assert config.pretrained_backbone_weights == "ResNet18_Weights.IMAGENET1K_V1"

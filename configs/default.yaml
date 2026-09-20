@@ -351,7 +351,7 @@ act:
   # inside the detector forward; keep training and runtime contracts aligned.
   objectact_detector_pretrained: true
   objectact_detector_foreground_threshold: 0.60
-  objectact_pretrained_weights: null
+  objectact_pretrained_weights: ResNet18_Weights.IMAGENET1K_V1
   realtime_budget_seconds: 0.2
   approach_sample_fraction: 0.35
   tracking_project: act-ur10-sweep-full-episode-v1

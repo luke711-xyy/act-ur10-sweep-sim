@@ -294,7 +294,9 @@ def _objectact_config_from_sim_config(cfg):
         image_size=image_size,
         chunk_size=int(cfg.act.get("chunk_size", 25)),
         temporal_ensemble_coeff=float(cfg.act.get("temporal_ensemble_coeff", 0.01)),
-        pretrained_backbone_weights=cfg.act.get("objectact_pretrained_weights", None),
+        pretrained_backbone_weights=cfg.act.get(
+            "objectact_pretrained_weights", "ResNet18_Weights.IMAGENET1K_V1"
+        ),
         device=device,
     )
 

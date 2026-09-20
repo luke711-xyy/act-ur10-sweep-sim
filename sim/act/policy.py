@@ -184,7 +184,9 @@ def build_objectact_policy(cfg, pretrained_path: str | None = None):
     values.setdefault("device", str(cfg.act.get("device", "mps")))
     values.setdefault(
         "pretrained_backbone_weights",
-        cfg.act.get("objectact_pretrained_weights", None),
+        cfg.act.get(
+            "objectact_pretrained_weights", "ResNet18_Weights.IMAGENET1K_V1"
+        ),
     )
     policy_config = ObjectACTConfig(**values)
     policy = ObjectACTPolicy(policy_config)
