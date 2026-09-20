@@ -352,6 +352,10 @@ act:
   objectact_detector_pretrained: true
   objectact_detector_foreground_threshold: 0.60
   objectact_pretrained_weights: ResNet18_Weights.IMAGENET1K_V1
+  # The default policy sees binary topology and target cardinality, not the
+  # expert's offline choice of object identities.  Enable only for ablations.
+  objectact_use_selection_channel: false
+  objectact_cumulative_action_loss_weight: 0.5
   realtime_budget_seconds: 0.2
   approach_sample_fraction: 0.35
   tracking_project: act-ur10-sweep-full-episode-v1
