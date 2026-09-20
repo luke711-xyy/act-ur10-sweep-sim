@@ -177,3 +177,20 @@ def test_sparse_scheduler_temporally_ensembles_overlapping_chunks():
     action = scheduler.action_for(0.4)
     assert action is not None
     assert 1.0 < float(action[0]) < 3.0
+
+
+def test_scheduler_accepts_late_chunk_at_the_current_action_index():
+    cfg = load_config(overrides=[
+        "act.device=cpu", "act.temporal_ensemble_coeff=0.01",
+    ])
+    scheduler = ActionChunkScheduler(cfg, allow_late=True)
+    scheduler.reset(0.0)
+    values = np.zeros((25, 4), dtype=np.float32)
+    values[:, 0] = np.arange(25, dtype=np.float32) * 0.01
+    assert scheduler.accept(0.0, values, 0.25)
+    action = scheduler.action_for(0.25)
+    assert action is not None
+    # Preview mode does not replay action[0] when the query is late.  The
+    # absolute target remains on the policy's command-reference frame and the
+    # scheduler selects the point whose timestamp is current (index 6 here).
+    np.testing.assert_allclose(action[0], values[6, 0], atol=1e-6)
