@@ -44,6 +44,21 @@ def test_straight_through_top_n_keeps_gradient_path():
     assert torch.isfinite(logits.grad).all()
 
 
+def test_straight_through_top_n_degrades_gracefully_when_detector_misses_parts():
+    logits = torch.tensor([[0.1, 4.0, 3.0, 2.0, 9.0, 8.0]])
+    valid = torch.tensor([[True, True, True, False, False, False]])
+    selected = straight_through_top_n(
+        logits, target_count=torch.tensor([6]), valid_mask=valid
+    )
+    assert selected.detach().bool().tolist() == [[True, True, True, False, False, False]]
+
+    empty = straight_through_top_n(
+        logits, target_count=torch.tensor([3]),
+        valid_mask=torch.zeros_like(valid, dtype=torch.bool),
+    )
+    assert torch.equal(empty, torch.zeros_like(empty))
+
+
 def test_selection_bce_ignores_invalid_slots():
     logits = torch.tensor([[0.0, 0.0, 100.0]])
     targets = torch.tensor([[1.0, 0.0, 0.0]])

@@ -48,13 +48,19 @@ class PermutationInvariantSelectionHead(nn.Module):
             target_count = target_count[:, 0]
         if target_count.ndim != 1 or target_count.shape[0] != object_tokens.shape[0]:
             raise ValueError("target_count must have shape (B,)")
-        if not torch.all(object_valid.any(dim=1)):
-            raise ValueError("each batch item needs at least one valid object")
+        # A causal RGB detector can temporarily miss every part (or some of
+        # the parts behind the brush).  Keep the attention numerically valid
+        # with a dummy unmasked key, but leave the returned logits invalid so
+        # downstream selection never treats that key as a real object.
+        attention_valid = object_valid.clone()
+        empty_rows = ~attention_valid.any(dim=1)
+        if torch.any(empty_rows):
+            attention_valid[empty_rows, 0] = True
         h = self.token_projection(object_tokens)
         normalized_target = target_count.to(dtype=h.dtype).reshape(-1, 1, 1) / 6.0
         h = h + self.target_projection(normalized_target)
         attended, _ = self.attention(
-            h, h, h, key_padding_mask=~object_valid
+            h, h, h, key_padding_mask=~attention_valid
         )
         h = self.attention_norm(h + attended)
         h = self.output_norm(h + self.feed_forward(h))
@@ -94,11 +100,23 @@ def straight_through_top_n(
     outputs = []
     for batch_index, count_tensor in enumerate(counts):
         count = int(count_tensor.item())
+        row = logits[batch_index]
         valid = valid_mask[batch_index]
         valid_count = int(valid.sum().item())
-        if count < 1 or count > valid_count:
-            raise ValueError(f"target_count={count} is incompatible with {valid_count} valid objects")
-        row = logits[batch_index]
+        if valid_count == 0:
+            # No visible instances is a valid transient RGB observation.  A
+            # zero selection keeps the BEV branch finite and lets the next
+            # causal frame recover instead of aborting the rollout.
+            outputs.append(row * 0.0)
+            continue
+        # Occlusion can temporarily make valid_count smaller than the task
+        # cardinality.  Select every currently visible instance; the policy
+        # still receives the requested count through task_state and can
+        # recover when the missing track reappears.
+        count = min(count, valid_count)
+        if count < 1:
+            outputs.append(row * 0.0)
+            continue
         valid_logits = row.masked_fill(~valid, torch.finfo(row.dtype).min)
         indices = torch.topk(valid_logits, k=count, dim=0, largest=True, sorted=True).indices
         hard = torch.zeros_like(row)
