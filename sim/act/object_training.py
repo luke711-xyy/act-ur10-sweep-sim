@@ -282,6 +282,32 @@ def build_objectact_train_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stats-samples", type=int, default=4000)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument(
+        "--trackio-project",
+        default=None,
+        help="Trackio project name; requires --trackio-space for HF visibility",
+    )
+    parser.add_argument(
+        "--trackio-space",
+        default=None,
+        help="Hugging Face Space ID used for the live Trackio dashboard",
+    )
+    parser.add_argument(
+        "--trackio-private",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Create/use a private Trackio Space (default follows config)",
+    )
+    parser.add_argument(
+        "--trackio-static",
+        action="store_true",
+        help="Log locally and publish a public static HF Space via trackio sync",
+    )
+    parser.add_argument(
+        "--no-trackio",
+        action="store_true",
+        help="Disable remote/local Trackio logging for this run",
+    )
     return parser
 
 
@@ -324,6 +350,7 @@ def train_objectact(args=None) -> dict:
     from .object_dataset import ObjectActDataset, validate_v5_manifest
     from .generate_objectact_dataset import validate_objectact_training_manifest
     from .object_policy import ObjectACTPolicy
+    from .train import _numeric_metrics, tracking_settings
 
     cfg = load_config(args.config)
     dataset_root = Path(args.dataset or str(cfg.act.get("objectact_dataset_dir", cfg.act.dataset_dir)))
@@ -369,6 +396,69 @@ def train_objectact(args=None) -> dict:
         if normalizer_path.exists():
             preprocessor = ObjectACTPreprocessor.load(normalizer_path, device="cpu")
             preprocessor.device = device
+
+    tracking_project = (
+        args.trackio_project
+        if args.trackio_project is not None
+        else cfg.act.get("tracking_project")
+    )
+    tracking_space = (
+        args.trackio_space
+        if args.trackio_space is not None
+        else cfg.act.get("tracking_space")
+    )
+    tracking_private = (
+        bool(cfg.act.get("tracking_private", True))
+        if args.trackio_private is None
+        else bool(args.trackio_private)
+    )
+    tracking = None if args.no_trackio else tracking_settings(
+        tracking_project,
+        tracking_space,
+        tracking_private,
+        static=bool(args.trackio_static),
+    )
+    tracker = None
+    if tracking is not None:
+        try:
+            import trackio
+        except ImportError as exc:
+            raise RuntimeError(
+                "Remote Trackio requested but trackio is not installed; "
+                "install the ACT extras first"
+            ) from exc
+        tracker = trackio
+        tracking_init = {
+            key: value
+            for key, value in tracking.items()
+            if key not in {"space_id", "private", "static"}
+        }
+        if not tracking["static"]:
+            tracking_init.update({
+                "space_id": tracking["space_id"],
+                "private": tracking["private"],
+            })
+        tracker.init(
+            **tracking_init,
+            config={
+                "schema_version": 5,
+                "dataset": str(dataset_root),
+                "dataset_manifest": manifest_summary,
+                "dataset_valid_frames": int(len(dataset)),
+                "batch_size": int(args.batch_size),
+                "max_steps": int(args.steps),
+                "checkpoint_every_steps": int(args.checkpoint_every),
+                "keep_checkpoints": int(args.keep_checkpoints),
+                "resume_step": int(start_step),
+                "device": device,
+                "action_dim": 4,
+                "robot_state_dim": 36,
+                "task_state_dim": 6,
+                "object_slots": 6,
+                "object_token_dim": 29,
+                "bev_shape": [6, 128, 160],
+            },
+        )
     out_root.mkdir(parents=True, exist_ok=True)
     iterator = iter(loader)
     stop = _TrainingStop()
@@ -403,9 +493,20 @@ def train_objectact(args=None) -> dict:
                     dataset_root=str(dataset_root), elapsed_seconds=elapsed,
                 )
                 prune_objectact_checkpoints(out_root, keep_latest=int(args.keep_checkpoints), milestones=milestones)
+                if tracker is not None:
+                    tracker.log({"checkpoint_step": int(completed)})
+            if tracker is not None and completed % 100 == 0:
+                tracker.log({
+                    "step": int(completed),
+                    "loss": float(loss.detach().cpu()),
+                    **_numeric_metrics(metrics),
+                    "elapsed_s": float(elapsed),
+                })
             if stop.requested or elapsed >= max_seconds:
                 break
     finally:
+        if tracker is not None:
+            tracker.finish()
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)
     elapsed = elapsed_before + time.monotonic() - started
@@ -424,6 +525,7 @@ def train_objectact(args=None) -> dict:
         "device": device,
         "max_steps": int(args.steps),
         "checkpoint_every": int(args.checkpoint_every),
+        "tracking": tracking,
         "elapsed_seconds": elapsed,
     }
     (out_root / "training_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

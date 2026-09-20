@@ -115,6 +115,21 @@ def test_objectact_training_parser_defaults_to_formal_80k_schedule():
     assert args.expected_per_target == 20
 
 
+def test_objectact_training_parser_accepts_trackio_options():
+    from sim.act.object_training import build_objectact_train_parser
+
+    args = build_objectact_train_parser().parse_args([
+        "--trackio-project", "objectact-bev",
+        "--trackio-space", "Luke711/act-ur10-sweep-tracking",
+        "--trackio-static",
+    ])
+
+    assert args.trackio_project == "objectact-bev"
+    assert args.trackio_space == "Luke711/act-ur10-sweep-tracking"
+    assert args.trackio_static is True
+    assert args.trackio_private is None
+
+
 def test_objectact_defaults_to_imagenet_backbone_weights():
     from sim.act.object_training import _objectact_config_from_sim_config
     from sim.config import load_config
