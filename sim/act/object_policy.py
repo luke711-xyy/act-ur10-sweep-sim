@@ -47,11 +47,6 @@ class ObjectACTConfig:
     kl_weight: float = 10.0
     dropout: float = 0.1
     temporal_ensemble_coeff: float | None = 0.01
-    # The policy must not be given the expert's final object identities by
-    # default.  It should infer a trajectory from the observed topology and
-    # requested cardinality, because any exact N objects are acceptable.
-    use_selection_channel: bool = False
-    cumulative_action_loss_weight: float = 0.5
     pretrained_backbone_weights: str | None = "ResNet18_Weights.IMAGENET1K_V1"
     device: str = "mps"
 
@@ -68,8 +63,6 @@ class ObjectACTConfig:
             raise ValueError("ObjectACT v5 uses a 25-step action chunk")
         if self.temporal_ensemble_coeff is not None and self.chunk_size < 1:
             raise ValueError("temporal ensembling requires a positive chunk size")
-        if float(self.cumulative_action_loss_weight) < 0.0:
-            raise ValueError("cumulative_action_loss_weight must be non-negative")
 
     def lerobot_config(self):
         try:
@@ -333,40 +326,28 @@ class ObjectACTPolicy(nn.Module):
     def _prepare_selection(self, batch: dict[str, torch.Tensor], *, training: bool):
         tokens = batch["observation.object_tokens"]
         valid = batch["observation.object_valid"]
-        if self.object_config.use_selection_channel:
-            counts = self._target_counts(
-                batch["observation.task_state"],
-                valid,
-                raw_target_count=batch.get("objectact.target_count"),
+        counts = self._target_counts(
+            batch["observation.task_state"],
+            valid,
+            raw_target_count=batch.get("objectact.target_count"),
+        )
+        logits = self.selection_head(tokens, valid, counts)
+        target = batch.get("selection_target")
+        if target is not None:
+            selection = scheduled_selection(
+                logits,
+                target_mask=target.to(dtype=torch.bool),
+                target_count=counts,
+                valid_mask=valid,
+                step=self.selection_step,
+                schedule=self.selection_schedule,
             )
-            logits = self.selection_head(tokens, valid, counts)
-            target = batch.get("selection_target")
-            if target is not None:
-                selection = scheduled_selection(
-                    logits,
-                    target_mask=target.to(dtype=torch.bool),
-                    target_count=counts,
-                    valid_mask=valid,
-                    step=self.selection_step,
-                    schedule=self.selection_schedule,
-                )
-                selection_loss = selection_bce_loss(logits, target, valid)
-            else:
-                selection = straight_through_top_n(
-                    logits, target_count=counts, valid_mask=valid
-                )
-                selection_loss = logits.sum() * 0.0
-            self.last_selection_logits = logits.detach()
-            self.last_selection = selection.detach()
+            selection_loss = selection_bce_loss(logits, target, valid)
         else:
-            # Keep these tensors available for diagnostics, but do not derive
-            # them from selection_target or a learned identity selector.  The
-            # policy receives all observed occupancy and an unselected copy;
-            # target_count remains in the task state.
-            selection = torch.zeros_like(valid)
-            selection_loss = tokens.sum() * 0.0
-            self.last_selection_logits = None
-            self.last_selection = selection.detach()
+            selection = straight_through_top_n(
+                logits, target_count=counts, valid_mask=valid
+            )
+            selection_loss = logits.sum() * 0.0
         prepared = dict(batch)
         if "observation.instance_bev" in batch:
             # The detector confidence is retained in the object tokens, but
@@ -379,18 +360,16 @@ class ObjectACTPolicy(nn.Module):
             if masks.shape[1:] != (6, 128, 160):
                 raise ValueError("observation.instance_bev must have shape (B, 6, 128, 160)")
             all_mask = (masks & valid[:, :, None, None]).any(dim=1).to(dtype=prepared["observation.bev"].dtype)
-            if self.object_config.use_selection_channel:
-                selected_mask = (
-                    masks & valid[:, :, None, None]
-                    & selection.detach().to(dtype=torch.bool)[:, :, None, None]
-                ).any(dim=1).to(dtype=prepared["observation.bev"].dtype)
-            else:
-                selected_mask = torch.zeros_like(all_mask)
+            selected_mask = (
+                masks & valid[:, :, None, None] & selection.detach().to(dtype=torch.bool)[:, :, None, None]
+            ).any(dim=1).to(dtype=prepared["observation.bev"].dtype)
             bev = prepared["observation.bev"].clone()
             bev[:, 0] = all_mask
             bev[:, 1] = selected_mask
             bev[:, 2] = torch.clamp(all_mask - selected_mask, min=0.0)
             prepared["observation.bev"] = bev
+        self.last_selection_logits = logits.detach()
+        self.last_selection = selection.detach()
         return prepared, selection_loss
 
     def reset(self) -> None:
@@ -409,32 +388,16 @@ class ObjectACTPolicy(nn.Module):
         valid_mask = ~batch["action_is_pad"].to(dtype=torch.bool).unsqueeze(-1)
         num_valid = valid_mask.sum() * abs_err.shape[-1]
         l1_loss = (abs_err * valid_mask).sum() / num_valid.clamp_min(1)
-        cumulative_hat = torch.cumsum(actions_hat, dim=1)
-        cumulative_target = torch.cumsum(batch["action"], dim=1)
-        cumulative_err = F.l1_loss(
-            cumulative_target, cumulative_hat, reduction="none"
-        )
-        cumulative_loss = (cumulative_err * valid_mask).sum() / num_valid.clamp_min(1)
         losses = {"l1_loss": float(l1_loss.detach().item())}
-        losses["cumulative_l1_loss"] = float(cumulative_loss.detach().item())
         losses["selection_bce_loss"] = float(selection_loss.detach().item())
         if self.object_config.use_vae and log_sigma_x2 is not None:
             kld = (-0.5 * (1 + log_sigma_x2 - mu.pow(2) - log_sigma_x2.exp())).sum(-1).mean()
             losses["kld_loss"] = float(kld.detach().item())
-            total = (
-                l1_loss
-                + cumulative_loss * float(self.object_config.cumulative_action_loss_weight)
-                + kld * float(self.object_config.kl_weight)
-                + selection_loss
-            )
+            total = l1_loss + kld * float(self.object_config.kl_weight) + selection_loss
             self.selection_step += 1
             return total, losses
         self.selection_step += 1
-        return (
-            l1_loss
-            + cumulative_loss * float(self.object_config.cumulative_action_loss_weight)
-            + selection_loss
-        ), losses
+        return l1_loss + selection_loss, losses
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:

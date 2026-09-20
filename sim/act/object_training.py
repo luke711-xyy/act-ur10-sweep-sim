@@ -321,10 +321,6 @@ def _objectact_config_from_sim_config(cfg):
         image_size=image_size,
         chunk_size=int(cfg.act.get("chunk_size", 25)),
         temporal_ensemble_coeff=float(cfg.act.get("temporal_ensemble_coeff", 0.01)),
-        use_selection_channel=bool(cfg.act.get("objectact_use_selection_channel", False)),
-        cumulative_action_loss_weight=float(
-            cfg.act.get("objectact_cumulative_action_loss_weight", 0.5)
-        ),
         pretrained_backbone_weights=cfg.act.get(
             "objectact_pretrained_weights", "ResNet18_Weights.IMAGENET1K_V1"
         ),
@@ -540,10 +536,6 @@ def train_objectact(args=None) -> dict:
                 "object_slots": 6,
                 "object_token_dim": 29,
                 "bev_shape": [6, 128, 160],
-                "use_selection_channel": bool(policy_config.use_selection_channel),
-                "cumulative_action_loss_weight": float(
-                    policy_config.cumulative_action_loss_weight
-                ),
             },
         )
         if bool(tracking["static"]):

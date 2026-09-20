@@ -5,7 +5,7 @@ import torch
 from sim.act.object_policy import ObjectACTConfig, ObjectACTPolicy
 
 
-def make_policy(temporal_ensemble_coeff=None, use_selection_channel=False):
+def make_policy(temporal_ensemble_coeff=None):
     config = ObjectACTConfig(
         image_size=(64, 64),
         dim_model=64,
@@ -16,7 +16,6 @@ def make_policy(temporal_ensemble_coeff=None, use_selection_channel=False):
         pretrained_backbone_weights=None,
         device="cpu",
         temporal_ensemble_coeff=temporal_ensemble_coeff,
-        use_selection_channel=use_selection_channel,
     )
     return ObjectACTPolicy(config)
 
@@ -43,7 +42,7 @@ def test_objectact_forward_preserves_action_chunk_and_standard_act_losses():
     loss, logs = policy(batch)
     assert loss.ndim == 0
     assert torch.isfinite(loss)
-    assert {"l1_loss", "cumulative_l1_loss", "kld_loss"} <= set(logs)
+    assert {"l1_loss", "kld_loss"} <= set(logs)
     with torch.no_grad():
         actions = policy.predict_action_chunk(make_batch(include_action=False))
     assert actions.shape == (2, 25, 4)
@@ -75,7 +74,7 @@ def test_objectact_select_action_can_use_official_temporal_ensemble():
 
 
 def test_selector_rewrites_bev_selection_channels_and_reports_selection_loss():
-    policy = make_policy(use_selection_channel=True)
+    policy = make_policy()
     batch = make_batch(batch_size=1)
     batch["observation.task_state"] = torch.tensor([[1.0, 0.5, 0.0, 1.0, 0.5, 0.0]])
     batch["observation.instance_bev"] = torch.zeros(1, 6, 128, 160, dtype=torch.bool)
@@ -89,7 +88,7 @@ def test_selector_rewrites_bev_selection_channels_and_reports_selection_loss():
 
 
 def test_selector_feeds_hard_binary_occupancy_to_act():
-    policy = make_policy(use_selection_channel=True)
+    policy = make_policy()
     batch = make_batch(batch_size=1)
     batch["observation.task_state"] = torch.tensor(
         [[1.0, 2.0 / 6.0, 0.0, 1.0, 2.0 / 6.0, 0.0]]
@@ -108,32 +107,6 @@ def test_selector_feeds_hard_binary_occupancy_to_act():
     assert bev[0, 0, 64, 80] == 1.0
     assert bev[0, 0, 64, 90] == 1.0
     torch.testing.assert_close(bev[:, 2], (bev[:, 0] - bev[:, 1]).clamp_min(0.0))
-
-
-def test_default_policy_uses_all_binary_occupancy_without_identity_selection():
-    policy = make_policy()
-    batch = make_batch(batch_size=1)
-    batch["observation.task_state"] = torch.tensor(
-        [[1.0, 2.0 / 6.0, 0.0, 1.0, 2.0 / 6.0, 0.0]]
-    )
-    batch["observation.instance_bev"] = torch.zeros(
-        1, 6, 128, 160, dtype=torch.bool
-    )
-    batch["observation.instance_bev"][0, 0, 64, 80] = True
-    batch["observation.instance_bev"][0, 1, 64, 90] = True
-    batch["observation.bev"] = torch.full((1, 6, 128, 160), 0.37)
-    batch["selection_target"] = torch.tensor(
-        [[True, False, False, False, False, False]]
-    )
-
-    prepared, selection_loss = policy._prepare_selection(batch, training=True)
-    bev = prepared["observation.bev"]
-    assert float(selection_loss) == 0.0
-    assert policy.last_selection_logits is None
-    assert not policy.last_selection.any()
-    torch.testing.assert_close(bev[:, 1], torch.zeros_like(bev[:, 1]))
-    torch.testing.assert_close(bev[:, 2], bev[:, 0])
-    assert set(torch.unique(bev[:, :3]).tolist()) <= {0.0, 1.0}
 
 
 def test_objectact_policy_factory_can_bootstrap_before_first_checkpoint():
