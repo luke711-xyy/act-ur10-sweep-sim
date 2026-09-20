@@ -419,6 +419,7 @@ def train_objectact(args=None) -> dict:
         static=bool(args.trackio_static),
     )
     tracker = None
+    last_static_sync_elapsed = -60.0
     if tracking is not None:
         try:
             import trackio
@@ -502,11 +503,37 @@ def train_objectact(args=None) -> dict:
                     **_numeric_metrics(metrics),
                     "elapsed_s": float(elapsed),
                 })
+            if (
+                tracker is not None
+                and tracking is not None
+                and bool(tracking["static"])
+                and elapsed - last_static_sync_elapsed >= 60.0
+            ):
+                # Public static Spaces are free but read-only.  Keep the
+                # training loop local and push a snapshot asynchronously so a
+                # slow HF upload cannot pause MPS optimization.
+                tracker.sync(
+                    project=str(tracking["project"]),
+                    space_id=str(tracking["space_id"]),
+                    force=True,
+                    run_in_background=True,
+                    sdk="static",
+                )
+                last_static_sync_elapsed = float(elapsed)
             if stop.requested or elapsed >= max_seconds:
                 break
     finally:
         if tracker is not None:
             tracker.finish()
+            if tracking is not None and bool(tracking["static"]):
+                # The final snapshot is synchronous so the summary is not
+                # reported before its public dashboard has the last metrics.
+                tracker.sync(
+                    project=str(tracking["project"]),
+                    space_id=str(tracking["space_id"]),
+                    force=True,
+                    sdk="static",
+                )
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)
     elapsed = elapsed_before + time.monotonic() - started
