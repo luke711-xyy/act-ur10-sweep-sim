@@ -269,16 +269,22 @@ class ObjectActDataset:
         record, frame = self.index[index]
         sidecar = self._sidecar(record)
         with Image.open(self.root / record["overhead"][frame]) as image:
-            overhead = np.asarray(image.convert("RGB"), dtype=np.uint8)
+            overhead = np.array(image.convert("RGB"), dtype=np.uint8, copy=True)
         with Image.open(self.root / record["wrist"][frame]) as image:
-            wrist = np.asarray(image.convert("RGB"), dtype=np.uint8)
+            wrist = np.array(image.convert("RGB"), dtype=np.uint8, copy=True)
         with np.load(self.root / record["arrays"], mmap_mode="r") as arrays:
-            robot_state = np.asarray(arrays["robot_state"][frame], dtype=np.float32)
-            actions = np.asarray(
-                arrays["action"][frame:frame + self.chunk_size], dtype=np.float32
+            robot_state = np.array(
+                arrays["robot_state"][frame], dtype=np.float32, copy=True
             )
-            valid = np.asarray(
-                arrays["action_valid"][frame:frame + self.chunk_size], dtype=bool
+            actions = np.array(
+                arrays["action"][frame:frame + self.chunk_size],
+                dtype=np.float32,
+                copy=True,
+            )
+            valid = np.array(
+                arrays["action_valid"][frame:frame + self.chunk_size],
+                dtype=bool,
+                copy=True,
             )
         if actions.shape[0] == 0:
             raise ValueError("v5 sample cannot start without an action")
@@ -287,26 +293,28 @@ class ObjectActDataset:
             actions = np.concatenate((actions, np.repeat(actions[-1:], pad, axis=0)))
             valid = np.concatenate((valid, np.zeros(pad, dtype=bool)))
         sample = {
-            "observation.images.overhead": np.transpose(overhead, (2, 0, 1)),
-            "observation.images.wrist": np.transpose(wrist, (2, 0, 1)),
+            "observation.images.overhead": np.transpose(overhead, (2, 0, 1)).copy(),
+            "observation.images.wrist": np.transpose(wrist, (2, 0, 1)).copy(),
             "observation.robot_state": robot_state,
-            "observation.task_state": np.asarray(sidecar["task_state"][frame], dtype=np.float32),
-            "observation.object_tokens": np.asarray(
-                sidecar["object_tokens"][frame], dtype=np.float32
+            "observation.task_state": np.array(
+                sidecar["task_state"][frame], dtype=np.float32, copy=True
             ),
-            "observation.object_valid": np.asarray(
-                sidecar["object_valid"][frame], dtype=bool
+            "observation.object_tokens": np.array(
+                sidecar["object_tokens"][frame], dtype=np.float32, copy=True
             ),
-            "observation.instance_bev": np.asarray(
-                sidecar["instance_bev"][frame], dtype=bool
+            "observation.object_valid": np.array(
+                sidecar["object_valid"][frame], dtype=bool, copy=True
+            ),
+            "observation.instance_bev": np.array(
+                sidecar["instance_bev"][frame], dtype=bool, copy=True
             ),
             "observation.bev": build_bev_from_sidecar(
-                object_tokens=np.asarray(sidecar["object_tokens"][frame], dtype=np.float32),
-                object_valid=np.asarray(sidecar["object_valid"][frame], dtype=bool),
-                instance_bev=np.asarray(sidecar["instance_bev"][frame], dtype=bool),
+                object_tokens=sidecar["object_tokens"][frame],
+                object_valid=sidecar["object_valid"][frame],
+                instance_bev=sidecar["instance_bev"][frame],
                 robot_state=robot_state,
                 selection_target=(
-                    np.asarray(sidecar["selection_target"][frame], dtype=bool)
+                    sidecar["selection_target"][frame]
                     if "selection_target" in sidecar else None
                 ),
                 tray_bounds=self.tray_bounds,
@@ -316,8 +324,8 @@ class ObjectActDataset:
             "action_is_pad": ~valid,
         }
         if "selection_target" in sidecar:
-            sample["selection_target"] = np.asarray(
-                sidecar["selection_target"][frame], dtype=bool
+            sample["selection_target"] = np.array(
+                sidecar["selection_target"][frame], dtype=bool, copy=True
             )
         return sample
 

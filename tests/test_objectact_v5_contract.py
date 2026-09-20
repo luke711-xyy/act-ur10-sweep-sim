@@ -137,6 +137,9 @@ def test_objectact_dataset_reads_v5_manifest_and_sidecar(tmp_path):
     assert sample["observation.instance_bev"].shape == (6, 128, 160)
     assert sample["observation.bev"].shape == (6, 128, 160)
     assert sample["action"].shape == (25, 4)
+    for value in sample.values():
+        if isinstance(value, np.ndarray):
+            assert value.flags.writeable
 
 
 def test_validate_v5_manifest_enforces_exact_per_target_counts():
