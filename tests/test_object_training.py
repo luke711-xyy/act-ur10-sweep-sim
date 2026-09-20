@@ -73,6 +73,7 @@ def test_objectact_checkpoint_has_schema5_contract_and_prunes_only_non_milestone
     )
 
     model = torch.nn.Linear(2, 2)
+    model.selection_step = 123
     optimizer = torch.optim.AdamW(model.parameters())
     preprocessor = ObjectACTPreprocessor({
         key: {"mean": np.zeros(1), "std": np.ones(1)}
@@ -89,6 +90,7 @@ def test_objectact_checkpoint_has_schema5_contract_and_prunes_only_non_milestone
     payload = load_objectact_checkpoint(checkpoint)
     assert payload["schema_version"] == 5
     assert payload["action_dim"] == 4
+    assert payload["selection_step"] == 123
     for step in (5000, 7500, 10000, 12500):
         save_objectact_checkpoint(
             model, optimizer, preprocessor, tmp_path, step=step,

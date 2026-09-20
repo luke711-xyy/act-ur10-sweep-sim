@@ -75,7 +75,15 @@ and audit because feeding it to the policy would not represent the intended
 real-scene deployment boundary. Push-Wiper-style binary topology is provided
 by the learned RGB objectness head; raw-pixel binarization is not used.
 
-Pending: copy the verified detector into the formal ignored run directory,
-generate the v5 expert manifest, pass the six-episode gate, and start the
-formal 80,000-step ObjectACT run. The detector gate is complete; no v5 policy
-dataset or formal ObjectACT checkpoint has been produced in this branch yet.
+Task 5D: complete (resumable v5 batch generator, exact 8-paired plus
+12-independent layout plan, lightweight failure logging, MPS detector path,
+formal manifest validator, and runtime rejection of RGB masks with no table
+intersection or outside the fixed BEV; independent/shared-layout IK exceptions
+are recorded and skipped; formal manifest has 120/120 successful records,
+48 paired records, 72 independent records, and frozen 60/120 validation/test
+layout manifests; all RGB images, array bundles, and perception sidecars are
+present and finite).
+
+Pending: pass the six-episode gate and start the formal 80,000-step ObjectACT
+run. The detector gate and formal v5 policy dataset are complete; no formal
+ObjectACT checkpoint has been produced in this branch yet.

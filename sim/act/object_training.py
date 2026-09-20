@@ -192,6 +192,10 @@ def save_objectact_checkpoint(
     torch.save(
         {
             "step": int(step),
+            # The selector has a separate teacher-forcing schedule which is
+            # intentionally not a torch parameter.  Persist its cursor so a
+            # resumed run does not silently restart teacher forcing.
+            "selection_step": int(getattr(model, "selection_step", step)),
             "optimizer": _cpu_state(optimizer.state_dict()),
             "schema_version": 5,
             "robot_state_dim": 36,
@@ -353,6 +357,9 @@ def train_objectact(args=None) -> dict:
         policy.load_state_dict(torch.load(Path(args.resume) / "model.pt", map_location=device, weights_only=True))
         optimizer.load_state_dict(state["optimizer"])
         start_step = int(state["step"])
+        # Checkpoints written before this field existed are interpreted as if
+        # the schedule had advanced with the global training step.
+        policy.selection_step = int(state.get("selection_step", start_step))
         elapsed_before = float(state.get("elapsed_seconds", 0.0))
         normalizer_path = Path(args.resume) / "normalizer.json"
         if normalizer_path.exists():
