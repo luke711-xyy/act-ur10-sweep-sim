@@ -147,7 +147,26 @@ def run_objectact_episode(
             if pending is not None and pending.done():
                 try:
                     values = pending.result()
-                    if not scheduler.accept(issued_at, values, env.time):
+                    first_preview_alignment = (
+                        preview
+                        and not scheduler.has_active_action(env.time)
+                        and float(env.time) > issued_at + scheduler.budget + 1e-9
+                    )
+                    if first_preview_alignment:
+                        measured_reference = np.array(
+                            [*env.tcp(), float(env.ee.tcp_yaw())], dtype=np.float32
+                        )
+                        accepted = scheduler.accept_preview_aligned(
+                            issued_at,
+                            values,
+                            env.time,
+                            current_reference=measured_reference,
+                        )
+                        if accepted:
+                            last_action = measured_reference.copy()
+                    else:
+                        accepted = scheduler.accept(issued_at, values, env.time)
+                    if not accepted:
                         failure = (
                             "ObjectACT inference missed 200 ms deadline"
                             if not preview

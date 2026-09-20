@@ -243,14 +243,32 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                 # MuJoCo can advance much faster than wall time.  If preview
                 # kept stepping while a slow first MPS forward was pending,
                 # the whole one-second chunk could expire before it returned.
-                # Freeze simulated time at the deadline, then align the late
-                # result to the corresponding action index.
+                # Freeze simulated time at the deadline. The late-result path
+                # below restarts the chunk at the current command reference.
                 while not pending.done():
                     time.sleep(0.001)
             if pending is not None and pending.done():
                 try:
                     values = pending.result()
-                    accepted = scheduler.accept(issued_at, values, env.time)
+                    first_preview_alignment = (
+                        preview
+                        and not scheduler.has_active_action(env.time)
+                        and float(env.time) > issued_at + scheduler.budget + 1e-9
+                    )
+                    if first_preview_alignment:
+                        measured_reference = np.array(
+                            [*env.tcp(), float(env.ee.tcp_yaw())], dtype=np.float32
+                        )
+                        accepted = scheduler.accept_preview_aligned(
+                            issued_at,
+                            values,
+                            env.time,
+                            current_reference=measured_reference,
+                        )
+                        if accepted:
+                            last_action = measured_reference.copy()
+                    else:
+                        accepted = scheduler.accept(issued_at, values, env.time)
                     if not accepted:
                         failure = ("ACT inference missed 200 ms deadline"
                                    if not preview else

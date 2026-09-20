@@ -10,7 +10,7 @@ from sim.act.policy import (
     build_act_processors,
     validate_act_policy_contract,
 )
-from sim.act.realtime import ActionChunkScheduler
+from sim.act.realtime import ActionChunkScheduler, rebase_action_chunk_to_reference
 from sim.config import load_config
 
 
@@ -194,3 +194,33 @@ def test_scheduler_accepts_late_chunk_at_the_current_action_index():
     # absolute target remains on the policy's command-reference frame and the
     # scheduler selects the point whose timestamp is current (index 6 here).
     np.testing.assert_allclose(action[0], values[6, 0], atol=1e-6)
+
+
+def test_preview_late_chunk_restarts_at_the_current_command_reference():
+    actions = np.zeros((25, 4), dtype=np.float32)
+    actions[:, 0] = np.arange(25, dtype=np.float32) * 0.01
+    aligned = rebase_action_chunk_to_reference(
+        actions,
+        current_reference=np.array([0.20, -0.03, 0.01, 0.25], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        aligned[0], [0.20, -0.03, 0.01, 0.25], atol=1e-6
+    )
+    np.testing.assert_allclose(aligned[1, 0], 0.21, atol=1e-6)
+
+    cfg = load_config(overrides=[
+        "act.device=cpu", "act.temporal_ensemble_coeff=0.01",
+    ])
+    scheduler = ActionChunkScheduler(cfg, allow_late=True)
+    scheduler.reset(0.0)
+    assert not scheduler.has_active_action(0.35)
+    assert scheduler.accept_preview_aligned(
+        0.0,
+        actions,
+        0.35,
+        current_reference=np.array([0.20, -0.03, 0.01, 0.25], dtype=np.float32),
+    )
+    action = scheduler.action_for(0.35)
+    assert action is not None
+    np.testing.assert_allclose(action, aligned[0], atol=1e-6)
+    assert scheduler.has_active_action(0.35)

@@ -50,15 +50,21 @@ class TemporalChunkEnsembler:
                 continue
             index = int(np.floor(age / action_period + 1e-6))
             if 0 <= index < len(chunk.actions):
-                # Newer predictions have a shorter horizon index and receive
-                # slightly higher weight, while old chunks still damp jumps.
-                weight = float(np.exp(-self.coeff * index))
-                candidates.append((weight, chunk.actions[index]))
+                # LeRobot's ACT ensembler weights the oldest prediction for a
+                # shared execution instant most strongly, then applies
+                # exp(-coeff * rank) as newer chunks are added.  ``index`` is
+                # the age inside this chunk, not that ensemble rank; using it
+                # here would reverse the official weighting semantics whenever
+                # sparse 5 Hz queries overlap.
+                candidates.append((chunk.issued_at, chunk.actions[index]))
         self.chunks = active
         if not candidates:
             return None
-        weights = np.asarray([item[0] for item in candidates], dtype=np.float64)
+        candidates.sort(key=lambda item: float(item[0]))
         values = np.asarray([item[1] for item in candidates], dtype=np.float64)
+        weights = np.exp(
+            -self.coeff * np.arange(len(candidates), dtype=np.float64)
+        )
         weights /= max(float(weights.sum()), 1e-12)
         result = np.sum(values * weights[:, None], axis=0).astype(np.float32)
         if values.shape[1] >= 4:
@@ -69,6 +75,41 @@ class TemporalChunkEnsembler:
             )
             result[3] = float(yaw)
         return result
+
+
+def rebase_action_chunk_to_reference(
+    actions: np.ndarray,
+    *,
+    current_reference: np.ndarray,
+) -> np.ndarray:
+    """Rebase a preview chunk to the current command-reference origin.
+
+    ObjectACT predicts action deltas and the runtime integrates them into
+    absolute targets in the policy command-reference frame. When preview
+    mode lets a query finish late, restart the chunk at its first predicted
+    point instead of replaying a stale temporal prefix. This deliberately
+    does not reinterpret the target using measured TCP error.
+    """
+    values = np.asarray(actions, dtype=np.float32)
+    current = np.asarray(current_reference, dtype=np.float32).reshape(-1)
+    if values.ndim != 2 or values.shape[0] < 1 or values.shape[1] < 3:
+        raise ValueError("actions must have shape (chunk, at least 3)")
+    if current.shape[0] != values.shape[1] or current.shape[0] < 3:
+        raise ValueError("current_reference must match the action dimension")
+    anchor = values[0]
+    offset = current - anchor
+    aligned = values.copy()
+    aligned[:, :3] += offset[:3]
+    if aligned.shape[1] >= 4:
+        offset_yaw = np.arctan2(
+            np.sin(float(current[3] - anchor[3])),
+            np.cos(float(current[3] - anchor[3])),
+        )
+        aligned[:, 3] = np.arctan2(
+            np.sin(aligned[:, 3] + offset_yaw),
+            np.cos(aligned[:, 3] + offset_yaw),
+        )
+    return aligned
 
 
 class ActionChunkScheduler:
@@ -104,6 +145,16 @@ class ActionChunkScheduler:
     def mark_query(self, now: float) -> None:
         self.next_query = float(now) + self.query_period
 
+    def has_active_action(self, now: float) -> bool:
+        """Return whether a previously accepted chunk can still execute."""
+        current = float(now)
+        if self.temporal_ensemble is not None:
+            return any(
+                current < chunk.valid_until
+                for chunk in self.temporal_ensemble.chunks
+            )
+        return self.chunk is not None and current < self.chunk.valid_until
+
     def accept(self, issued_at: float, actions, now: float) -> bool:
         """Accept a result, optionally retaining late results for preview."""
         values = np.asarray(actions, dtype=np.float32)
@@ -136,6 +187,40 @@ class ActionChunkScheduler:
             self.temporal_ensemble.add(accepted)
         else:
             self.chunk = accepted
+        return True
+
+    def accept_preview_aligned(
+        self,
+        issued_at: float,
+        actions,
+        now: float,
+        *,
+        current_reference: np.ndarray,
+    ) -> bool:
+        """Accept a late preview chunk with a fresh command/time origin."""
+        values = np.asarray(actions, dtype=np.float32)
+        if values.ndim != 2 or values.shape[0] < self.execute_steps:
+            raise ValueError("ACT action chunk must be (chunk, action_dim) and contain execute_steps")
+        if float(now) <= float(issued_at) + self.budget + 1e-9:
+            return self.accept(issued_at, values, now)
+        values = rebase_action_chunk_to_reference(
+            values, current_reference=current_reference
+        )
+        if self.temporal_ensemble is not None:
+            # A rebased chunk is on a new coordinate/time anchor. Old chunks
+            # would otherwise be blended in a different command frame.
+            self.temporal_ensemble.reset()
+        accepted = ScheduledChunk(
+            issued_at=float(now),
+            valid_from=float(now),
+            valid_until=float(now) + values.shape[0] * self.action_period,
+            actions=values,
+        )
+        if self.temporal_ensemble is not None:
+            self.temporal_ensemble.add(accepted)
+        else:
+            self.chunk = accepted
+        self.late_results += 1
         return True
 
     def action_for(self, now: float) -> Optional[np.ndarray]:
