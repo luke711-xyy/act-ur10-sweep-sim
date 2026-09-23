@@ -326,6 +326,7 @@ def _add_component(world: ET.Element, index: int, item: dict,
     mass_share = float(item["mass"]) / max(1, len(spec.geoms))
     mu = float(item["friction"])
     for gi, geom in enumerate(spec.geoms):
+        proxy_collision = spec.name in ("screw", "bolt")
         attrs = {
             "name": f"{name}_g{gi}",
             "class": "component",
@@ -344,6 +345,8 @@ def _add_component(world: ET.Element, index: int, item: dict,
             # retaining the nut/bolt silhouette in the cameras.
             attrs.update({"mass": "0", "contype": "0", "conaffinity": "0"})
             ET.SubElement(body, "geom", attrs)
+            if proxy_collision:
+                continue
             vertices = np.asarray(spec.meshes[geom.mesh], dtype=float)
             radius = float(np.max(np.linalg.norm(vertices[:, :2], axis=1)))
             proxy = {
@@ -360,4 +363,50 @@ def _add_component(world: ET.Element, index: int, item: dict,
             continue
         else:
             attrs["size"] = _fmt(geom.size)
+            if proxy_collision:
+                attrs.update({"mass": "0", "contype": "0", "conaffinity": "0"})
         ET.SubElement(body, "geom", attrs)
+
+        # A visually thin washer is numerically fragile when the brush bottom
+        # is coplanar with the table: its 1.8 mm collision height lets a brush
+        # corner create a large rolling impulse instead of a stable pusher
+        # contact.  Keep the rendered washer unchanged, but use a small
+        # invisible, slightly taller collision proxy.  The local Z offset
+        # aligns both proxy and visual bottoms, so the resting pose remains on
+        # the table rather than floating above it.
+        if spec.name == "washer" and geom.type == "cylinder":
+            visual = body[-1]
+            visual.set("mass", "0")
+            visual.set("contype", "0")
+            visual.set("conaffinity", "0")
+            visual_half = float(geom.size[1])
+            proxy_half = max(0.0025, visual_half)
+            proxy = {
+                "name": f"{name}_g{gi}_collision",
+                "type": "cylinder",
+                "size": _fmt((float(geom.size[0]), proxy_half)),
+                "pos": _fmt((float(geom.pos[0]), float(geom.pos[1]),
+                              proxy_half - visual_half + float(geom.pos[2]))),
+                "mass": f"{mass_share:.6g}",
+                "friction": _fmt((mu, 0.008, 0.0004)),
+                "rgba": _fmt((0.0, 0.0, 0.0, 0.0)),
+            }
+            ET.SubElement(body, "geom", proxy)
+
+    # Side-laid screw/bolt appearance is retained in the cameras, while one
+    # compact upright proxy supplies a stable pusher footprint.  A single
+    # proxy avoids the competing contacts between a shaft and a head that can
+    # make a small free body roll out from under the brush.
+    if spec.name in ("screw", "bolt"):
+        proxy_half = max(float(spec.half_height), 0.0035)
+        proxy_radius = max(0.010, min(float(spec.nominal_radius), 0.016))
+        proxy = {
+            "name": f"{name}_sweep_collision",
+            "type": "cylinder",
+            "size": _fmt((proxy_radius, proxy_half)),
+            "pos": _fmt((0.0, 0.0, proxy_half - float(spec.half_height))),
+            "mass": f"{float(item['mass']):.6g}",
+            "friction": _fmt((mu, 0.008, 0.0004)),
+            "rgba": _fmt((0.0, 0.0, 0.0, 0.0)),
+        }
+        ET.SubElement(body, "geom", proxy)

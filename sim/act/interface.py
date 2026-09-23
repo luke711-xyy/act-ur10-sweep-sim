@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from .dataset import normalize_feature
+
 
 @dataclass(frozen=True)
 class ACTObservationSpec:
@@ -35,7 +37,7 @@ class ACTObservationBuilder:
     truth by design.
     """
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, stats: dict | None = None):
         size = tuple(int(v) for v in cfg.act.image_size)
         self.spec = ACTObservationSpec(
             image_size=(size[0], size[1]),
@@ -45,6 +47,7 @@ class ACTObservationBuilder:
             execute_steps=int(cfg.act.execute_steps),
         )
         self._previous = None
+        self.stats = stats
 
     def reset(self) -> None:
         self._previous = None
@@ -58,20 +61,28 @@ class ACTObservationBuilder:
         current = np.concatenate((joints, tcp, yaw, force, counts))
         previous = current if self._previous is None else self._previous
         self._previous = current.copy()
-        return np.concatenate((current, previous)).astype(np.float32)
+        return normalize_feature(np.concatenate((current, previous)), self.stats, "state")
 
-    def observe(self, env) -> dict[str, Any]:
-        size = self.spec.image_size
-        overhead = _resize_rgb(env.render_rgb("overhead_cam", size=size), size)
-        wrist = _resize_rgb(env.render_wrist_rgb(size=size), size)
-        return {
-            "observation.images.overhead": np.transpose(overhead, (2, 0, 1)).astype(np.float32) / 255.0,
-            "observation.images.wrist": np.transpose(wrist, (2, 0, 1)).astype(np.float32) / 255.0,
+    def observe(self, env, include_images: bool = True) -> dict[str, Any]:
+        observation = {
             "observation.state": self._state(env),
-            "observation.environment_state": np.array(
-                [len(env.layout), int(env.collected_mask().sum())], dtype=np.float32),
+            "observation.environment_state": normalize_feature(
+                np.array([len(env.layout), int(env.collected_mask().sum())], dtype=np.float32),
+                self.stats, "environment_state"
+            ),
             "t": float(env.time),
         }
+        if include_images:
+            size = self.spec.image_size
+            overhead = _resize_rgb(env.render_rgb("overhead_cam", size=size), size)
+            wrist = _resize_rgb(env.render_wrist_rgb(size=size), size)
+            observation.update({
+                "observation.images.overhead":
+                    np.transpose(overhead, (2, 0, 1)).astype(np.float32) / 255.0,
+                "observation.images.wrist":
+                    np.transpose(wrist, (2, 0, 1)).astype(np.float32) / 255.0,
+            })
+        return observation
 
     @staticmethod
     def torch_batch(observation: dict[str, Any], device: str):

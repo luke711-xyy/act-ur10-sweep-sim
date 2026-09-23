@@ -65,9 +65,11 @@ def sample_layout(cfg, rng: np.random.Generator) -> List[dict]:
                 scale = spread * (1.0 + attempt / 400.0)
                 offset = rng.normal(0.0, scale, size=2)
                 radius = float(comp_cfg.cluster.get("max_radius", 0.12))
+                y_radius = float(comp_cfg.cluster.get("max_y_radius", radius))
                 norm = float(np.linalg.norm(offset))
                 if norm > radius:
                     offset = offset / norm * radius
+                offset[1] = float(np.clip(offset[1], -y_radius, y_radius))
                 x, y = float(centre[0] + offset[0]), float(centre[1] + offset[1])
                 if not (spawn.x_min <= x <= spawn.x_max and spawn.y_min <= y <= spawn.y_max):
                     continue
@@ -107,11 +109,12 @@ def _sample_cluster(cfg, rng: np.random.Generator):
     cluster = comp_cfg.cluster
     spawn = comp_cfg.spawn
     pad = float(cluster.get("max_radius", 0.12))
+    y_pad = float(cluster.get("max_y_radius", pad))
     centre = np.array([
         float(rng.uniform(max(cluster.center_x.min, float(spawn.x_min) + pad * 0.5),
                           min(cluster.center_x.max, float(spawn.x_max) - pad * 0.5))),
-        float(rng.uniform(max(cluster.center_y.min, float(spawn.y_min) + pad * 0.5),
-                          min(cluster.center_y.max, float(spawn.y_max) - pad * 0.5))),
+        float(rng.uniform(max(cluster.center_y.min, float(spawn.y_min) + y_pad * 0.5),
+                          min(cluster.center_y.max, float(spawn.y_max) - y_pad * 0.5))),
     ])
     spread = float(rng.uniform(cluster.spread_std.min, cluster.spread_std.max))
     return centre, spread

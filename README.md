@@ -16,7 +16,7 @@ The first version focuses on five things:
 2. hybrid force/position control,
 3. conventional (non-learned) visual and trajectory planning,
 4. reproducible experiments over component count and distribution,
-5. automatic demonstrations, LeRobot 0.6.1 ACT training, and asynchronous inference.
+5. automatic demonstrations, LeRobot 0.6.1 ACT training, and preview/strict-real-time inference.
 
 No Isaac Sim, no MoveIt. Python MuJoCo + NumPy + Matplotlib (SciPy for image labelling).
 
@@ -65,9 +65,20 @@ python -m sim.export_dataset --planner visual_greedy --episodes 200
 # 6. default UR10 + ACT vertical slice
 uv pip install -e '.[act,web]'
 python -m sim.act.collect_dataset --split train --episodes 300
+# diagnostic failures use the same loose-cluster sampler but stay out of train
+python -m sim.act.collect_dataset --split failures --failures-only \
+    --episodes 60 --out runs/v4_failure_data_loose
 python -m sim.act.train --config configs/default.yaml
 python -m sim.act.evaluate --config configs/default.yaml --model runs/act_model
+# strict deadline mode is for real-time timing tests; preview mode pauses MuJoCo during ACT queries
+python -m sim.act.evaluate --config configs/default.yaml --model runs/act_model --strict-realtime
 python -m sim.web.run --config configs/default.yaml
+
+# 7. residual RL post-training (the V4 ACT checkpoint stays frozen)
+python -m sim.act.train_residual --config configs/default.yaml \
+    --base-model runs/act_model --episodes 200
+python -m sim.act.evaluate_residual --config configs/default.yaml \
+    --base-model runs/act_model --residual runs/residual_rl/residual_latest.pt
 
 # tests
 pytest -q                     # or: python tests/run_tests.py
@@ -76,13 +87,50 @@ pytest -q                     # or: python tests/run_tests.py
 Every run writes a timestamped directory under `runs/` containing the exact
 configuration used, metrics, phase events, the dense control trace and the plots.
 
+### V4 residual RL
+
+The `feat/v4-residual-rl` branch starts from the early V4 ACT implementation.  It
+does not import the later object detector, BEV token, target-selection or strict
+schema work.  `sim.act.train_residual` loads a trained V4 ACT checkpoint as a
+frozen base policy, runs it in MuJoCo, and trains a small bounded residual actor
+with TD3 (twin critics, smoothed target actions, and delayed actor updates) and
+exact-count rewards.  Its action is a direct additive correction to the current
+ACT target, not an accumulated offset.  Before contact it can correct XY/Z/yaw;
+after contact, residual Z is masked and the admittance loop owns Z.  Checkpoints
+are written under `runs/residual_rl/` and contain only the residual actor,
+critics, and optimizer state.  The V4 ACT checkpoint is never overwritten.
+
+The residual observation is explicitly:
+
+```text
+[V4 state(26), full ACT action chunk(20x4), fused V4 ACT encoder token(512), contact_latched(1)]
+```
+
+The 512D token is captured from the frozen V4 ACT transformer encoder during
+the normal ACT query; it exposes the same two-camera visual context to the
+residual critic/actor without adding a detector, object labels, or a second
+image encoder. It remains fixed while the corresponding four 20 Hz actions
+from that 5 Hz ACT query are executed.
+
+Residual outputs are bounded pose corrections in metres/radians. Each correction
+is applied only to that ACT target, then the existing speed limiter constrains
+the executable target. Exploration noise and TD3 target noise are scaled in
+normalized residual-action units. The default discount is time-scaled for 20 Hz
+actions, so long approach/sweep trajectories do not discount terminal task
+outcomes as if each 50 ms action were a full one-second step.
+
+The default target count is the number of components, matching the early V4
+task.  Set `residual_rl.target_count` only when an exact-N experiment is
+intended.  Over-collection is a negative outcome; `count >= target` is not
+treated as success.
+
 ### Useful flags
 
 | Flag | Effect |
 |---|---|
 | `--set KEY.PATH=VALUE` | override any config entry, e.g. `--set controller.desired_force=5` |
 | `--geometry {hex_nut,cylinder,screw,bolt,washer,mixed}` | component geometry family |
-| `--spawn-mode {uniform,cluster}` | scattered parts (planner comparison) or one loose cluster (main task) |
+| `--spawn-mode {uniform,cluster}` | scattered parts (planner comparison) or one looser, separated cluster (main task) |
 | `--perception {ground_truth,vision}` | perception backend |
 | `--jobs N` (experiments) | parallel worker processes |
 | `--seed`, `--seed-base` | reproducibility |

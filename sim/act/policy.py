@@ -48,6 +48,15 @@ def build_act_policy(cfg, pretrained_path=None):
         push_to_hub=False,
         pretrained_path=pretrained_path,
     )
-    policy = ACTPolicy(act_cfg)
+    if pretrained_path:
+        # ``pretrained_path`` on ACTConfig is metadata only.  Constructing
+        # ACTPolicy(act_cfg) does not load model.safetensors, so inference
+        # would silently run a fresh random policy.  Use LeRobot's loader for
+        # both normal evaluation and ACT continuation training.
+        policy = ACTPolicy.from_pretrained(
+            pretrained_path, config=act_cfg, local_files_only=True
+        )
+    else:
+        policy = ACTPolicy(act_cfg)
     policy.to(device)
     return policy, act_cfg

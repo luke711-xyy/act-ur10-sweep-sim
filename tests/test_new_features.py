@@ -107,7 +107,9 @@ def test_cluster_mode_is_tighter_than_uniform(cfg):
             out.append(np.linalg.norm(xy - xy.mean(axis=0), axis=1).max())
         return float(np.mean(out))
 
-    assert spread("cluster") < 0.5 * spread("uniform")
+    # Clustered task layouts remain visibly tighter than full-table scatter,
+    # while allowing enough room between parts for clearer ACT observations.
+    assert spread("cluster") < 0.68 * spread("uniform")
 
 
 def test_cluster_mode_is_reproducible_and_randomises_the_centre(cfg):

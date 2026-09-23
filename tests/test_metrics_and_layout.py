@@ -112,6 +112,29 @@ def test_layout_respects_minimum_separation(cfg):
     assert d.min() >= float(cfg.components.min_separation) - 1e-9
 
 
+def test_six_part_clusters_are_more_spread_than_previous_v4_distribution(cfg):
+    previous = cfg.copy()
+    previous.set_path("components.cluster.spread_std.min", 0.085)
+    previous.set_path("components.cluster.spread_std.max", 0.120)
+    previous.set_path("components.cluster.max_radius", 0.200)
+    previous.set_path("components.cluster.max_y_radius", 0.120)
+    previous.set_path("components.min_separation", 0.080)
+    cfg.set_path("components.count", 6)
+    previous.set_path("components.count", 6)
+
+    def mean_nearest_distance(layout_cfg):
+        distances = []
+        for seed in range(64):
+            layout = sample_layout(layout_cfg, np.random.default_rng(seed))
+            xy = np.array([[item["x"], item["y"]] for item in layout])
+            pairwise = np.linalg.norm(xy[:, None, :] - xy[None, :, :], axis=-1)
+            np.fill_diagonal(pairwise, np.inf)
+            distances.extend(pairwise.min(axis=1))
+        return float(np.mean(distances))
+
+    assert mean_nearest_distance(cfg) > mean_nearest_distance(previous) + 0.005
+
+
 def test_layout_randomises_mass_friction_and_orientation(cfg):
     cfg.set_path("components.count", 10)
     layout = sample_layout(cfg, np.random.default_rng(2))

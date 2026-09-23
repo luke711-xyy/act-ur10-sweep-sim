@@ -39,13 +39,25 @@ class ActionChunkScheduler:
     def mark_query(self, now: float) -> None:
         self.next_query = float(now) + self.query_period
 
-    def accept(self, issued_at: float, actions, now: float) -> bool:
-        """Accept a result only if it arrived before its 200 ms deadline."""
+    def accept(self, issued_at: float, actions, now: float,
+               *, allow_late: bool = False) -> bool:
+        """Accept an action chunk under real-time or simulation-preview timing.
+
+        Strict real-time mode keeps the fixed query deadline.  Preview mode
+        may accept a late chunk, but timestamps it at ``now`` and selects the
+        matching point within the chunk so it is never replayed from a stale
+        simulation pose.
+        """
         values = np.asarray(actions, dtype=np.float32)
         if values.ndim != 2 or values.shape[0] < self.execute_steps:
             raise ValueError("ACT action chunk must be (chunk, action_dim) and contain execute_steps")
-        valid_from = float(issued_at) + self.budget
-        if float(now) > valid_from + 1e-9:
+        age = max(0.0, float(now) - float(issued_at))
+        if allow_late and age >= values.shape[0] * self.action_period:
+            self.timeouts += 1
+            return False
+        valid_from = (float(now) if allow_late
+                      else float(issued_at) + self.budget)
+        if not allow_late and float(now) > valid_from + 1e-9:
             self.timeouts += 1
             return False
         self.chunk = ScheduledChunk(

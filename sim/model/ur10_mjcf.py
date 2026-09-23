@@ -70,7 +70,11 @@ def add_ur10_arm(world: ET.Element, cfg) -> None:
                 gravcomp=1.0 if bool(ee.gravity_compensation) else 0.0)
     _sub(tool, "inertial", pos=(0.0, 0.0, -0.01), mass=float(ee.brush_mass),
          diaginertia=(0.001, 0.001, 0.0004))
-    brush_size = (float(ee.brush_width) / 2.0, float(ee.brush_depth) / 2.0,
+    # The task sweeps along -X.  The brush's broad face must therefore span Y
+    # while its thin dimension points along X; the early V4 implementation had
+    # these two dimensions reversed, so the pusher contacted only a narrow
+    # 2.4-cm strip and could not carry the sampled parts into the tray.
+    brush_size = (float(ee.brush_depth) / 2.0, float(ee.brush_width) / 2.0,
                   float(ee.brush_height) / 2.0)
     _sub(tool, "geom", name="brush_head", type="box", size=brush_size,
          pos=(0.0, 0.0, -brush_size[2]), material="mat_brush",

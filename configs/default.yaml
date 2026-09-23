@@ -79,7 +79,7 @@ workspace:
 controller:
   desired_force: 1.0         # fixed positive normal force target [N]
   max_force: 5.0
-  safe_max_force: 5.0         # stop threshold for the simulated wrist sensor [N]
+  safe_max_force: 20.0        # user-approved safety ceiling for the simulated wrist sensor [N]
   contact_threshold: 0.20
   release_threshold: 0.05
   force_ramp_rate: 15.0      # N/s, used for ramp-up and ramp-down
@@ -93,9 +93,12 @@ controller:
   delta_z_limit: 0.006       # |delta_z| saturation [m]
   delta_z_rate_limit: 0.05   # |d(delta_z)/dt| saturation [m/s]
   search_velocity: 0.02      # downward probing speed [m/s]
-  sweep_speed: 0.12          # XY sweeping speed [m/s]
+  # Small parts need a contact-stable command interval; 0.05 m/s is still a
+  # continuous sweep but avoids tunnelling through a part between 20 Hz targets.
+  sweep_speed: 0.05          # XY sweeping speed [m/s]
   travel_speed: 0.35         # XY speed for lifted transfer motions [m/s]
   z_speed: 0.03              # vertical speed for approach / retract [m/s]
+  yaw_speed: 0.7853981634    # 45 deg/s absolute-yaw target limit [rad/s]
   control_delay_steps: 0     # artificial actuation delay, in control periods
   force_noise_std: 0.0       # additive Gaussian noise on the measured force
   force_sensor: contact      # contact | wrist_ft
@@ -116,10 +119,14 @@ components:
   spawn_mode: cluster
   cluster:                   # only used when spawn_mode == cluster
     center_x: {min: 0.02, max: 0.34}
-    center_y: {min: -0.16, max: 0.16}
-    spread_std: {min: 0.030, max: 0.060}
-    max_radius: 0.11
-  min_separation: 0.035
+    center_y: {min: -0.06, max: 0.06}
+    # Keep a single task group, while separating neighbouring parts enough
+    # to make their footprints and intended contacts visually distinct.
+    spread_std: {min: 0.100, max: 0.140}
+    max_radius: 0.230
+    max_y_radius: 0.140
+  # Centre-to-centre clearance, independent of the sampled geometry footprint.
+  min_separation: 0.090
   randomize_orientation: true
   target_clearance: 0.05
 
@@ -216,6 +223,7 @@ act:
   camera_hz: 20.0
   query_hz: 5.0
   action_hz: 20.0
+  simulation_preview: true  # pause MuJoCo during ACT queries; strict timing remains an explicit evaluation mode
   chunk_size: 20
   execute_steps: 4
   horizon_seconds: 1.0
@@ -230,6 +238,41 @@ act:
   dataset_dir: runs/act_dataset
   model_dir: runs/act_model
   realtime_budget_seconds: 0.2
+
+# Residual RL is deliberately separate from the original ACT configuration.
+# The V4 actor is loaded from act.model_dir and remains frozen in the first
+# experiment; this section only describes the corrective policy and critic.
+residual_rl:
+  enabled: true
+  observation_dim: 619      # V4 state(26) + 20x4 plan + ACT encoder token(512) + latch(1)
+  visual_context_dim: 512
+  action_dim: 4
+  hidden_dims: [256, 256]
+  residual_limit: [0.08, 0.08, 0.06, 0.50]  # direct additive target correction: m, m, m, rad
+  # 20 Hz steps; discount is in policy-step units and preserves long-horizon reward.
+  gamma: 0.9995
+  tau: 0.005
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  policy_delay: 2
+  target_policy_noise: 0.2
+  target_noise_clip: 0.5
+  batch_size: 128
+  replay_capacity: 100000
+  warmup_transitions: 512
+  updates_per_transition: 1
+  residual_prior_weight: 0.10
+  exploration_std: 0.25    # fraction of each residual dimension's bound
+  reward_collection_progress: 2.0
+  reward_object_progress: 10.0  # shaped reward per metre of aggregate object-to-tray progress
+  reward_part_contact: 0.01     # per 50 ms action, only for all-components V4 training
+  reward_contact_start: 1.5
+  reward_contact_hold: 0.002
+  reward_contact_loss: 1.0
+  reward_descent_progress: 5.0
+  target_count: null       # null = all parts, matching the early V4 task
+  checkpoint_every_episodes: 5
+  out_dir: runs/residual_rl
 
 web:
   host: 127.0.0.1
