@@ -13,28 +13,41 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..act.variants import ORDINARY_POLICY, normalize_policy_variant
+
 
 def build_train_argv(project_root, config, dataset, out, steps=None,
-                     preview_training=False, resume=None):
+                     preview_training=False, resume=None,
+                     policy_variant=ORDINARY_POLICY,
+                     trackio_project=None):
+    policy_variant = normalize_policy_variant(policy_variant)
     argv = [sys.executable, "-m", "sim.act.train", "--config", str(config),
             "--dataset", str(dataset), "--out", str(out)]
     if steps is not None:
         argv.extend(["--steps", str(int(steps))])
     if preview_training:
         argv.append("--preview-training")
+    if policy_variant != ORDINARY_POLICY:
+        argv.extend(["--policy-variant", str(policy_variant)])
+    if trackio_project:
+        argv.extend(["--trackio-project", str(trackio_project)])
     if resume:
         argv.extend(["--resume", str(resume)])
     return argv
 
 
 def build_inference_argv(project_root, config, seed, model=None, target_count=None,
-                         replay_root="runs/workbench_previews", preview=False):
+                         replay_root="runs/workbench_previews", preview=False,
+                         policy_variant=ORDINARY_POLICY):
+    policy_variant = normalize_policy_variant(policy_variant)
     argv = [sys.executable, "-m", "sim.act.evaluate", "--config", str(config),
             "--seed", str(int(seed))]
     if model:
         argv.extend(["--model", str(model)])
     if target_count is not None:
         argv.extend(["--target-count", str(int(target_count))])
+    if policy_variant != ORDINARY_POLICY:
+        argv.extend(["--policy-variant", str(policy_variant)])
     if preview:
         argv.append("--preview")
     argv.extend(["--record-replay", "--replay-root", str(replay_root)])

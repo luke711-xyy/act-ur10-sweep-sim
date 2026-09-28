@@ -31,7 +31,8 @@ def _episode_id(root: Path, target_count: int, seed: int) -> str:
 
 
 def save_inference_replay(cfg, seed: int, result, root: str | Path,
-                          model: str | None = None) -> str | None:
+                          model: str | None = None,
+                          policy_variant: str = "ordinary") -> str | None:
     """Replay the recorded commands and save three cameras plus telemetry.
 
     The inference process itself does not render frames, so its 5 Hz/25 Hz
@@ -150,6 +151,7 @@ def save_inference_replay(cfg, seed: int, result, root: str | Path,
         "generation_outcome": "inference",
         "inference_replay": True,
         "model": str(model or ""),
+        "policy_variant": str(policy_variant),
         "scheduler_queries": int(getattr(result, "scheduler_queries", 0)),
         "scheduler_timeouts": int(getattr(result, "scheduler_timeouts", 0)),
         "scheduler_late_results": int(getattr(result, "scheduler_late_results", 0)),

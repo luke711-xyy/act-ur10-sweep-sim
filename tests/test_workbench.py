@@ -136,6 +136,19 @@ def test_job_commands_are_typed_and_use_project_modules(tmp_path):
                                          preview=True)
     assert "--preview" in preview_infer
 
+    token_train = build_train_argv(
+        tmp_path, "cfg.yaml", "dataset", "goal-token-out", 100000,
+        preview_training=True, policy_variant="goal_token",
+        trackio_project="act-ur10-sweep-goal-token-v1",
+    )
+    assert token_train[token_train.index("--policy-variant") + 1] == "goal_token"
+    assert token_train[token_train.index("--trackio-project") + 1] == "act-ur10-sweep-goal-token-v1"
+    token_infer = build_inference_argv(
+        tmp_path, "cfg.yaml", 3, "goal-token-model", 4,
+        preview=True, policy_variant="goal_token",
+    )
+    assert token_infer[token_infer.index("--policy-variant") + 1] == "goal_token"
+
 
 def test_evaluate_cli_accepts_exact_target_count():
     args = build_arg_parser().parse_args([
@@ -144,6 +157,13 @@ def test_evaluate_cli_accepts_exact_target_count():
     ])
     assert args.seed == 9
     assert args.target_count == 4
+
+
+def test_evaluate_cli_accepts_goal_token_policy_variant():
+    args = build_arg_parser().parse_args([
+        "--policy-variant", "goal_token", "--target-count", "4",
+    ])
+    assert args.policy_variant == "goal_token"
 
 
 def test_evaluate_cli_accepts_preview_mode():
@@ -169,6 +189,38 @@ def test_inference_route_passes_target_count_to_job(tmp_path):
     assert "--target-count" in calls[0][1]
     assert calls[0][1][calls[0][1].index("--target-count") + 1] == "4"
     assert "--preview" in calls[0][1]
+
+
+def test_inference_route_passes_goal_token_policy_variant():
+    app = create_app(load_config(overrides=["sim.real_time=false"]))
+    calls = []
+    app.state.jobs.start = lambda kind, argv: calls.append((kind, argv)) or {
+        "kind": kind, "argv": argv
+    }
+    route = next(route for route in app.routes
+                 if getattr(route, "path", None) == "/api/jobs/inference")
+    route.endpoint({"model": "goal-token-model", "seed": 7,
+                    "target_count": 4, "policy_variant": "goal_token"})
+    assert "--policy-variant" in calls[0][1]
+    assert calls[0][1][calls[0][1].index("--policy-variant") + 1] == "goal_token"
+
+
+def test_training_route_uses_goal_token_variant_and_preview_manifest():
+    app = create_app(load_config(overrides=["sim.real_time=false"]))
+    calls = []
+    app.state.jobs.start = lambda kind, argv: calls.append((kind, argv)) or {
+        "kind": kind, "argv": argv
+    }
+    route = next(route for route in app.routes
+                 if getattr(route, "path", None) == "/api/jobs/train")
+    route.endpoint({"dataset": "runs/act_dataset_curve_v10",
+                    "out": "runs/act_model_goal_token_v1",
+                    "steps": 100000, "policy_variant": "goal_token"})
+    argv = calls[0][1]
+    assert "--preview-training" in argv
+    assert argv[argv.index("--policy-variant") + 1] == "goal_token"
+    assert argv[argv.index("--trackio-project") + 1] == "act-ur10-sweep-goal-token-v1"
+    assert argv[argv.index("--steps") + 1] == "100000"
 
 
 def test_job_registry_captures_a_local_job_and_rejects_duplicate_kind(tmp_path):
@@ -306,6 +358,10 @@ def test_workbench_html_has_five_operational_areas():
         assert label in html
     assert ('id="inferModel" '
             'value="runs/act_model_curve_v10/checkpoints/step_100000"') in html
+    assert 'id="trainVariant"' in html
+    assert 'id="inferVariant"' in html
+    assert 'value="runs/act_model_goal_token_v1"' in html
+    assert 'value="runs/act_dataset_curve_v10"' in html
     for element_id in ("episodeTargetFilter", "episodeStatusFilter", "previewOutcome",
                        "previewCount", "previewFailureMode", "inferTarget",
                        "inferRandomize"):

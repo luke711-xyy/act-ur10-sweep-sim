@@ -12,6 +12,7 @@ from typing import Iterable
 import numpy as np
 
 from .interface import ACT_SCHEMA_VERSION, ACT_STATE_DIM
+from .variants import GOAL_TOKEN_POLICY, normalize_policy_variant
 
 
 def normalize_feature(values: np.ndarray, stats: dict, feature: str) -> np.ndarray:
@@ -205,9 +206,11 @@ class ActDataset:
     def __init__(self, root: str, chunk_size: int = 25,
                  include_failures: bool = False,
                  image_stat_samples: int = 1000,
-                 split: str = "train"):
+                 split: str = "train",
+                 policy_variant: str = "ordinary"):
         self.root = Path(root)
         self.chunk_size = int(chunk_size)
+        self.policy_variant = normalize_policy_variant(policy_variant)
         self.image_stat_samples = max(1, int(image_stat_samples))
         self._stats = None
         manifest_records = [
@@ -229,6 +232,17 @@ class ActDataset:
             and str(record.get("split", "")) == str(split)
             and (include_failures or bool(record.get("success", False)))
         ]
+        if self.policy_variant == GOAL_TOKEN_POLICY:
+            invalid_targets = sorted({
+                int(record.get("target_count", 0))
+                for record in self.records
+                if not 1 <= int(record.get("target_count", 0)) <= 6
+            })
+            if invalid_targets:
+                raise ValueError(
+                    "goal-token ACT records require target_count in [1, 6]; "
+                    f"invalid values: {invalid_targets}"
+                )
         self.index = []
         for rec in self.records:
             with np.load(self.root / rec["arrays"], mmap_mode="r") as arrays:
@@ -373,13 +387,16 @@ class ActDataset:
             return self._stats
         if not self.index:
             raise ValueError("ACT dataset has no valid behavior-cloning frames")
-        vectors = {"observation.state": [], "observation.environment_state": [], "action": []}
+        vectors = {"observation.state": [], "action": []}
+        if self.policy_variant != GOAL_TOKEN_POLICY:
+            vectors["observation.environment_state"] = []
         for _, record, frame_id in self.index:
             with np.load(self.root / record["arrays"], mmap_mode="r") as arrays:
                 vectors["observation.state"].append(np.asarray(arrays["state"][frame_id], dtype=np.float32))
-                vectors["observation.environment_state"].append(
-                    np.asarray(arrays["environment_state"][frame_id], dtype=np.float32)
-                )
+                if self.policy_variant != GOAL_TOKEN_POLICY:
+                    vectors["observation.environment_state"].append(
+                        np.asarray(arrays["environment_state"][frame_id], dtype=np.float32)
+                    )
                 vectors["action"].append(np.asarray(arrays["action"][frame_id], dtype=np.float32))
         self._stats = {
             key: self._vector_stats(np.stack(values, axis=0))
@@ -406,9 +423,11 @@ class ActDataset:
             wrist = np.asarray(wrist_image.convert("RGB"), dtype=np.uint8)
         with np.load(self.root / rec["arrays"]) as arrays:
             state = np.asarray(arrays["state"][i], dtype=np.float32)
-            environment_state = np.asarray(
-                arrays["environment_state"][i], dtype=np.float32
-            )
+            environment_state = None
+            if self.policy_variant != GOAL_TOKEN_POLICY:
+                environment_state = np.asarray(
+                    arrays["environment_state"][i], dtype=np.float32
+                )
             actions = np.asarray(arrays["action"][i:i + self.chunk_size], dtype=np.float32)
             valid = (np.asarray(arrays["action_valid"][i:i + self.chunk_size], dtype=bool)
                      if "action_valid" in arrays.files else np.ones(len(actions), dtype=bool))
@@ -416,14 +435,21 @@ class ActDataset:
         if pad > 0:
             actions = np.concatenate((actions, np.repeat(actions[-1:], pad, axis=0)), axis=0)
             valid = np.concatenate((valid, np.zeros(pad, dtype=bool)))
-        return {
+        sample = {
             # Keep uint8 at the dataset boundary, matching LeRobot's dataset
             # contract.  The official training loop converts camera values to
             # [0, 1] before the policy preprocessor applies dataset stats.
             "observation.images.overhead": np.transpose(overhead, (2, 0, 1)),
             "observation.images.wrist": np.transpose(wrist, (2, 0, 1)),
             "observation.state": state,
-            "observation.environment_state": environment_state,
             "action": actions,
             "action_is_pad": ~valid,
         }
+        if self.policy_variant == GOAL_TOKEN_POLICY:
+            sample["observation.task_id"] = np.asarray(
+                int(rec["target_count"]) - 1, dtype=np.int64
+            )
+        else:
+            assert environment_state is not None
+            sample["observation.environment_state"] = environment_state
+        return sample

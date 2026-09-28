@@ -20,7 +20,9 @@ class ACTObservationSpec:
     action_dim: int = 4
     # joints(6) + tcp xyz(3) + sin/cos(yaw)(2) + wrench(6) +
     # contact_latched(1), for current and 200 ms-previous samples: 18 * 2.
-    # Task counts are supplied once as observation.environment_state.
+    # Policy variants choose either observation.environment_state (ordinary)
+    # or a categorical observation.task_id (goal-token); neither is folded
+    # into this proprioceptive vector.
     state_dim: int = ACT_STATE_DIM
     history_lag_seconds: float = 0.2
     chunk_size: int = 25
@@ -62,8 +64,9 @@ class ACTObservationBuilder:
 
     Object positions are intentionally absent.  Robot state is 18-D per
     sample; current and 200 ms-old samples form ``observation.state`` (36-D).
-    Physical total, target count and fully-collected count are sent once in the
-    separate 3-D ``observation.environment_state`` feature.
+    Physical total, target count and fully-collected count are available as a
+    separate telemetry feature. Ordinary ACT uses that 3-D environment feature;
+    goal-token ACT instead receives only the selected categorical task ID.
     """
 
     def __init__(self, cfg):
@@ -164,15 +167,23 @@ class ACTObservationBuilder:
         return observation
 
     @staticmethod
-    def torch_batch(observation: dict[str, Any], device: str | None = None):
+    def torch_batch(observation: dict[str, Any], device: str | None = None,
+                    *, policy_variant: str = "ordinary",
+                    target_count: int | None = None):
         import torch
+        from .variants import GOAL_TOKEN_POLICY, normalize_policy_variant
 
+        variant = normalize_policy_variant(policy_variant)
         batch = {}
         for key, value in observation.items():
             # Timestamp and the convenience scalar are executor metadata.
             # contact_latched is already encoded in the 36-D current/history
             # state and must not become an undeclared extra LeRobot feature.
             if key in {"t", "contact_latched"}:
+                continue
+            if variant == GOAL_TOKEN_POLICY and key == "observation.environment_state":
+                # Total and collected counts stay in simulator telemetry, but
+                # the task-token policy receives only the selected goal class.
                 continue
             # Leave batching, device placement and normalization to the
             # official LeRobot ACT preprocessor.  This method now only turns
@@ -181,4 +192,15 @@ class ACTObservationBuilder:
             if tensor.is_floating_point():
                 tensor = tensor.to(dtype=torch.float32)
             batch[key] = tensor
+        if variant == GOAL_TOKEN_POLICY:
+            if target_count is None:
+                raise ValueError(
+                    "target_count is required to build a goal-token ACT batch"
+                )
+            target_count = int(target_count)
+            if not 1 <= target_count <= 6:
+                raise ValueError("goal-token target_count must be between 1 and 6")
+            batch["observation.task_id"] = torch.tensor(
+                [target_count - 1], dtype=torch.long
+            )
         return batch

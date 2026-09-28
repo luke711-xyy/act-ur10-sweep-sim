@@ -348,7 +348,9 @@ def test_training_reader_and_act_rollout_work_when_astar_entrypoints_raise(
     monkeypatch.setattr(evaluate, "SweepEnv", FakeSweepEnv)
     monkeypatch.setattr(
         evaluate, "build_act_policy",
-        lambda cfg, pretrained_path=None: (FakePolicy(), FakePolicyConfig()),
+        lambda cfg, pretrained_path=None, policy_variant="ordinary": (
+            FakePolicy(), FakePolicyConfig()
+        ),
     )
     monkeypatch.setattr(
         evaluate, "build_act_processors",

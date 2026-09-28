@@ -6,6 +6,7 @@ import argparse
 import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +24,12 @@ from .rollout import (
     _force_loop,
     collection_goal_status,
     collection_step_status,
+)
+from .variants import (
+    GOAL_TOKEN_POLICY,
+    ORDINARY_POLICY,
+    SUPPORTED_POLICY_VARIANTS,
+    normalize_policy_variant,
 )
 
 
@@ -105,7 +112,8 @@ def _contact_reference_substep(start: np.ndarray, target: np.ndarray,
     return values[[0, 1, 3]]
 
 
-def _inference_dataset_stats(cfg, resolved_model_path: str | None):
+def _inference_dataset_stats(cfg, resolved_model_path: str | None,
+                             policy_variant: str = ORDINARY_POLICY):
     """Return fallback dataset stats only when no checkpoint has saved stats.
 
     A LeRobot ACT checkpoint carries the image/state normalization processors
@@ -119,7 +127,8 @@ def _inference_dataset_stats(cfg, resolved_model_path: str | None):
     if not (dataset_root / "manifest.jsonl").exists():
         return None
     return ActDataset(
-        str(dataset_root), chunk_size=int(cfg.act.chunk_size)
+        str(dataset_root), chunk_size=int(cfg.act.chunk_size),
+        policy_variant=policy_variant,
     ).stats
 
 
@@ -135,8 +144,45 @@ def _contact_z_command(cfg, admittance, z_nominal: float,
     return max(float(cfg.workspace.z_search_min), z + relief)
 
 
+@dataclass
+class ACTPolicyRuntime:
+    """Loaded policy and matching LeRobot processors, reusable across episodes."""
+
+    policy: object
+    policy_cfg: object
+    preprocessor: object
+    postprocessor: object
+    policy_variant: str
+
+
+def load_act_runtime(cfg, model_path: str | None = None,
+                     policy_variant: str = ORDINARY_POLICY) -> ACTPolicyRuntime:
+    policy_variant = normalize_policy_variant(policy_variant)
+    resolved_model_path = _resolve_model_path(model_path)
+    policy, policy_cfg = build_act_policy(
+        cfg, pretrained_path=resolved_model_path, policy_variant=policy_variant
+    )
+    dataset_stats = _inference_dataset_stats(
+        cfg, resolved_model_path, policy_variant=policy_variant
+    )
+    preprocessor, postprocessor = build_act_processors(
+        policy_cfg, dataset_stats=dataset_stats,
+        pretrained_path=resolved_model_path,
+    )
+    policy.eval()
+    return ACTPolicyRuntime(
+        policy=policy,
+        policy_cfg=policy_cfg,
+        preprocessor=preprocessor,
+        postprocessor=postprocessor,
+        policy_variant=policy_variant,
+    )
+
+
 def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
-                    preview: bool = False) -> ActRolloutResult:
+                    preview: bool = False,
+                    policy_variant: str = ORDINARY_POLICY,
+                    runtime: ACTPolicyRuntime | None = None) -> ActRolloutResult:
     """Run one causal, full-episode ACT policy from the fixed reset pose.
 
     No geometric planner, object position, target identity, or supervisor
@@ -158,12 +204,20 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
     target_count = int(np.clip(
         int(cfg.get_path("task.target_count", total)), 1, total
     ))
-    resolved_model_path = _resolve_model_path(model_path)
-    policy, policy_cfg = build_act_policy(cfg, pretrained_path=resolved_model_path)
-    dataset_stats = _inference_dataset_stats(cfg, resolved_model_path)
-    preprocessor, postprocessor = build_act_processors(
-        policy_cfg, dataset_stats=dataset_stats, pretrained_path=resolved_model_path
+    policy_variant = normalize_policy_variant(policy_variant)
+    runtime = runtime or load_act_runtime(
+        cfg, model_path=model_path, policy_variant=policy_variant
     )
+    if runtime.policy_variant != policy_variant:
+        env.close()
+        raise ValueError(
+            "loaded ACT runtime variant mismatch: "
+            f"runtime={runtime.policy_variant}, requested={policy_variant}"
+        )
+    policy = runtime.policy
+    policy_cfg = runtime.policy_cfg
+    preprocessor = runtime.preprocessor
+    postprocessor = runtime.postprocessor
     policy.eval()
     if hasattr(policy, "reset"):
         policy.reset()
@@ -201,7 +255,10 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
     def predict(observation, start_reference):
         import torch
 
-        batch = builder.torch_batch(observation)
+        batch = builder.torch_batch(
+            observation, policy_variant=policy_variant,
+            target_count=target_count if policy_variant == GOAL_TOKEN_POLICY else None,
+        )
         batch = preprocessor(batch)
         with torch.no_grad():
             normalized = policy.predict_action_chunk(batch)
@@ -427,6 +484,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--policy-variant", choices=SUPPORTED_POLICY_VARIANTS,
+        default=ORDINARY_POLICY,
+        help="must match the checkpoint architecture",
+    )
     parser.add_argument("--target-count", type=int, default=None,
                         help="exact number of the six components to collect")
     parser.add_argument("--record-replay", action="store_true",
@@ -448,7 +510,8 @@ def main(argv=None) -> int:
     if args.target_count is not None:
         cfg.set_path("task.target_count", args.target_count)
     result = run_act_episode(cfg, seed=args.seed, model_path=args.model,
-                             preview=args.preview)
+                             preview=args.preview,
+                             policy_variant=args.policy_variant)
     replay_episode_id = None
     replay_error = ""
     if args.record_replay:
@@ -456,7 +519,8 @@ def main(argv=None) -> int:
             from .replay import save_inference_replay
 
             replay_episode_id = save_inference_replay(
-                cfg, args.seed, result, args.replay_root, model=args.model
+                cfg, args.seed, result, args.replay_root, model=args.model,
+                policy_variant=args.policy_variant,
             )
         except Exception as exc:  # keep the physical result visible if replay fails
             replay_error = f"{type(exc).__name__}: {exc}"
@@ -470,6 +534,7 @@ def main(argv=None) -> int:
                       "peak_force": result.peak_force,
                       "termination_reason": result.termination_reason,
                       "preview": bool(args.preview),
+                      "policy_variant": args.policy_variant,
                       "replay_episode_id": replay_episode_id,
                       "replay_error": replay_error}, ensure_ascii=False))
     return 0 if result.success else 1

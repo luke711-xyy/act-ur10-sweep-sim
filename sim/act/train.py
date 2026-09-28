@@ -21,6 +21,11 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 import numpy as np
 
 from .interface import ACT_SCHEMA_VERSION, ACT_STATE_DIM
+from .variants import (
+    ORDINARY_POLICY,
+    SUPPORTED_POLICY_VARIANTS,
+    normalize_policy_variant,
+)
 
 
 class TrainingStopRequest:
@@ -48,6 +53,11 @@ def build_arg_parser():
     parser.add_argument("--config", default=None)
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--out", default=None)
+    parser.add_argument(
+        "--policy-variant", choices=SUPPORTED_POLICY_VARIANTS,
+        default=ORDINARY_POLICY,
+        help="ordinary ACT or ACT with a categorical goal-count task token",
+    )
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument(
         "--batch-size",
@@ -319,13 +329,17 @@ def _prune_checkpoints(out_root: Path, keep_checkpoints: int) -> None:
 def save_checkpoint(policy, preprocessor, postprocessor, optimizer, out_root: Path,
                     step: int, dataset_root: str, device: str,
                     keep_checkpoints: int = 3,
-                    elapsed_seconds: float = 0.0) -> Path:
+                    elapsed_seconds: float = 0.0,
+                    policy_variant: str = ORDINARY_POLICY) -> Path:
     """Save model, processors, optimizer and progress in one resumable directory."""
     import torch
 
     checkpoint_root = _checkpoint_dir(out_root, step)
     checkpoint_root.mkdir(parents=True, exist_ok=True)
     policy.save_pretrained(checkpoint_root)
+    from .policy import write_policy_variant_metadata
+
+    write_policy_variant_metadata(checkpoint_root, policy_variant)
     preprocessor.save_pretrained(checkpoint_root, config_filename="policy_preprocessor.json")
     postprocessor.save_pretrained(checkpoint_root, config_filename="policy_postprocessor.json")
     torch.save({
@@ -337,6 +351,7 @@ def save_checkpoint(policy, preprocessor, postprocessor, optimizer, out_root: Pa
         "dataset": str(dataset_root),
         "device": str(device),
         "schema_version": ACT_SCHEMA_VERSION,
+        "policy_variant": normalize_policy_variant(policy_variant),
         "state_dim": ACT_STATE_DIM,
         "action_dim": 4,
         "elapsed_seconds": float(elapsed_seconds),
@@ -351,6 +366,7 @@ def save_checkpoint(policy, preprocessor, postprocessor, optimizer, out_root: Pa
 def main(argv=None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    policy_variant = normalize_policy_variant(args.policy_variant)
     from torch.utils.data import DataLoader, WeightedRandomSampler
     import torch
 
@@ -376,6 +392,7 @@ def main(argv=None) -> int:
         dataset_root,
         chunk_size=int(cfg.act.chunk_size),
         image_stat_samples=int(cfg.act.get("image_stat_samples", 100)),
+        policy_variant=policy_variant,
     )
     if len(dataset) == 0:
         raise ValueError("ACT training dataset has no valid behavior-cloning frames")
@@ -392,7 +409,9 @@ def main(argv=None) -> int:
     )
     loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler,
                         num_workers=0, drop_last=True)
-    policy, policy_cfg = build_act_policy(cfg, pretrained_path=args.resume)
+    policy, policy_cfg = build_act_policy(
+        cfg, pretrained_path=args.resume, policy_variant=policy_variant
+    )
     preprocessor, postprocessor = build_act_processors(policy_cfg, dataset_stats)
     policy.train()
     optimizer = torch.optim.AdamW(
@@ -443,6 +462,14 @@ def main(argv=None) -> int:
             raise ValueError(
                 f"resume checkpoint is not compatible with schema v{ACT_SCHEMA_VERSION}: "
                 f"found {checkpoint_contract}, required {required_contract}"
+            )
+        saved_variant = normalize_policy_variant(
+            resume_state.get("policy_variant", ORDINARY_POLICY)
+        )
+        if saved_variant != policy_variant:
+            raise ValueError(
+                "resume checkpoint policy variant mismatch: "
+                f"checkpoint={saved_variant}, requested={policy_variant}"
             )
         optimizer.load_state_dict(resume_state["optimizer"])
         for state in optimizer.state.values():
@@ -499,6 +526,7 @@ def main(argv=None) -> int:
                 policy_cfg.input_features["observation.state"].shape[0]
             ),
             "schema_version": ACT_SCHEMA_VERSION,
+            "policy_variant": policy_variant,
             "device": str(policy_cfg.device),
         }
         tracker, tracking = initialize_tracker(
@@ -554,6 +582,7 @@ def main(argv=None) -> int:
                     policy, preprocessor, postprocessor, optimizer, out_root,
                     completed_steps, dataset_root, str(policy_cfg.device),
                     keep_checkpoints, elapsed_seconds=elapsed_seconds,
+                    policy_variant=policy_variant,
                 )
                 print(json.dumps({
                     "checkpoint_step": completed_steps,
@@ -613,6 +642,7 @@ def main(argv=None) -> int:
                     keep_checkpoints, elapsed_seconds=(
                         elapsed_before_resume + time.monotonic() - started
                     ),
+                    policy_variant=policy_variant,
                 )
                 print(json.dumps({
                     "checkpoint_step": completed_steps,
@@ -624,6 +654,9 @@ def main(argv=None) -> int:
         for stop_signal, handler in previous_handlers.items():
             signal.signal(stop_signal, handler)
     policy.save_pretrained(out_root)
+    from .policy import write_policy_variant_metadata
+
+    write_policy_variant_metadata(out_root, policy_variant)
     preprocessor.save_pretrained(out_root, config_filename="policy_preprocessor.json")
     postprocessor.save_pretrained(out_root, config_filename="policy_postprocessor.json")
     (out_root / "dataset_stats.json").write_text(
@@ -632,6 +665,7 @@ def main(argv=None) -> int:
     (out_root / "training_summary.json").write_text(
         json.dumps({
             "steps": completed_steps,
+            "policy_variant": policy_variant,
             "interrupted": bool(stop_request.requested),
             "checkpoint_every_steps": checkpoint_every,
             "checkpoint_start_step": checkpoint_start,
