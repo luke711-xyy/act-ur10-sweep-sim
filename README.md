@@ -167,14 +167,16 @@ fully inside the tray and no part's XY footprint only partially overlaps the
 tray. Planner-selected identities are not part of the success label or ACT
 input. Recovery phases are not appended to expert demonstrations.
 
-### Schema-v4 ACT/control contract
+### Schema-v5 ACT/control contract
 
 ACT starts at the same fixed UR10 reset pose for every goal. A* is imported
 only by expert generation; training and learned inference never request an
 expert staging point, target index, or object pose. The policy observes the two
-320×320 RGB views, environment counts, and a 42-value state consisting of the
-current and previous 21-value robot/contact records. It predicts fixed-table
-frame `[Δx, Δy, Δz, Δyaw]` chunks at 5 Hz; references execute at 25 Hz with
+320×320 RGB views, a 36-value state consisting of current and exactly 200 ms
+prior 18-value robot/contact records, and a separate three-value task state
+`[initial_count, target_count, fully_collected_count]`. The robot state no
+longer duplicates task counts. It predicts fixed-table frame
+`[Δx, Δy, Δz, Δyaw]` chunks at 5 Hz; references execute at 25 Hz with
 100 Hz substep interpolation, speed limiting, IK residual validation, and
 non-brush robot collision checks.
 
@@ -185,14 +187,16 @@ label is zero. The workbench plots policy Z, applied Z, ownership, force, and
 the first measured contact position. Stability/unload frames remain viewable
 but are masked from behavior cloning.
 
-The rebuilt training set is schema v4 and contains exactly 120 successful
-experts: eight paired layouts × six goals (48) plus twelve independent layouts
-per goal (72). Training allocates 35% of samples to approach/descent and 65%
-to contact-build/sweep, uses ImageNet ResNet-18, runs for at most 80,000 steps
-or 24 cumulative hours across resumes, saves every 2,500 steps, and keeps the
-newest three checkpoints.
-Trackio recreates the private `Luke711/act-ur10-sweep-tracking` Space when
-training actually starts.
+The rebuilt training set is schema v5 and contains exactly 120 successful
+experts, 20 for each exact target count. Every record uses its own randomized
+six-part layout; the group centre remains concentrated, while the parts are
+slightly more dispersed than in the preview batch. The six reviewed previews
+remain separate. Training allocates 35% of samples to approach/descent and 65%
+to contact-build/sweep, uses ImageNet ResNet-18, and runs for up to 100,000
+steps or 24 cumulative hours across resumes. It saves at 50,000 steps and then
+every 10,000 steps, retaining the newest six checkpoints. Trackio metrics are
+logged locally and published to the existing public static
+`Luke711/act-ur10-sweep-tracking` Space every 60 seconds.
 
 If the full candidate search cannot find a route, the expert does not execute
 a guessed target-centre fallback. It records a short bounded contact probe and

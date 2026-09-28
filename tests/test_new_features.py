@@ -108,7 +108,7 @@ def test_cluster_mode_is_tighter_than_uniform(cfg):
             out.append(np.linalg.norm(xy - xy.mean(axis=0), axis=1).max())
         return float(np.mean(out))
 
-    assert spread("cluster") < 0.5 * spread("uniform")
+    assert spread("cluster") < 0.6 * spread("uniform")
 
 
 def test_cluster_mode_is_reproducible_and_randomises_the_centre(cfg):
@@ -132,25 +132,55 @@ def test_cluster_mode_randomises_but_concentrates_group_centres(cfg):
         centres.append(xy.mean(axis=0))
     centres = np.asarray(centres)
 
-    # The centre remains random, but is concentrated around the canonical
-    # work area rather than spanning most of the spawn box.
-    assert np.std(centres[:, 0]) < 0.065
-    assert np.std(centres[:, 1]) < 0.060
-    assert np.mean(centres[:, 0]) == pytest.approx(0.20, abs=0.030)
+    # The centre is more varied than the old narrow distribution and shifted
+    # toward the tray, which lies in the negative-X direction.
+    assert 0.035 < np.std(centres[:, 0]) < 0.075
+    assert 0.040 < np.std(centres[:, 1]) < 0.075
+    assert np.mean(centres[:, 0]) == pytest.approx(0.14, abs=0.030)
     assert np.mean(centres[:, 1]) == pytest.approx(0.0, abs=0.025)
-    assert np.std(centres[:, 0]) > 0.010
-    assert np.std(centres[:, 1]) > 0.010
 
 
-def test_cluster_mode_slightly_spreads_components_within_the_group(cfg):
+def test_cluster_mode_roughly_doubles_mean_component_spacing(cfg):
     cfg.set_path("components.spawn_mode", "cluster")
-    pair_means = []
+    old_cfg = load_config(overrides=[
+        "components.spawn_mode=cluster",
+        "components.cluster.spread_std.min=0.025",
+        "components.cluster.spread_std.max=0.045",
+        "components.cluster.max_radius=0.085",
+        "components.cluster.lateral_spread_ratio=1.0",
+        "components.cluster.max_lateral_radius=0.085",
+        "components.min_separation=0.035",
+    ])
+
+    def mean_pair_spacing(layout_cfg):
+        pair_means = []
+        for seed in range(128):
+            xy = np.array([[item["x"], item["y"]]
+                           for item in sample_layout(
+                               layout_cfg, np.random.default_rng(seed))])
+            distances = np.linalg.norm(
+                xy[:, None, :] - xy[None, :, :], axis=2)
+            pair_means.append(float(
+                distances[np.triu_indices(len(xy), 1)].mean()))
+        return float(np.mean(pair_means))
+
+    old_spacing = mean_pair_spacing(old_cfg)
+    new_spacing = mean_pair_spacing(cfg)
+    assert 1.75 <= new_spacing / old_spacing <= 2.30
+
+
+def test_cluster_mode_includes_layouts_wider_than_one_brush_pass(cfg):
+    """Random six-part layouts must sometimes require lateral route planning."""
+    cfg.set_path("components.spawn_mode", "cluster")
+    cfg.set_path("components.count", 6)
+    brush_width = float(cfg.end_effector.brush_width)
+    lateral_spans = []
     for seed in range(128):
         xy = np.array([[item["x"], item["y"]]
                        for item in sample_layout(cfg, np.random.default_rng(seed))])
-        distances = np.linalg.norm(xy[:, None, :] - xy[None, :, :], axis=2)
-        pair_means.append(float(distances[np.triu_indices(len(xy), 1)].mean()))
-    assert np.mean(pair_means) > 0.075
+        lateral_spans.append(float(np.ptp(xy[:, 1])))
+
+    assert float(np.quantile(lateral_spans, 0.75)) > brush_width
 
 
 def test_unknown_spawn_mode_is_rejected(cfg):

@@ -10,7 +10,7 @@ import numpy as np
 from ..controllers.hybrid import Command
 from ..environments.sweep_env import SweepEnv
 from .dataset import ActDatasetWriter
-from .interface import ACTObservationBuilder
+from .interface import ACTObservationBuilder, ACT_SCHEMA_VERSION
 from .rollout import policy_action_delta
 
 
@@ -133,7 +133,7 @@ def save_inference_replay(cfg, seed: int, result, root: str | Path,
         return None
     episode_id = _episode_id(root, target_count, int(seed))
     metadata = {
-        "schema_version": 4,
+        "schema_version": ACT_SCHEMA_VERSION,
         "episode_kind": "inference",
         "split": "inference",
         "seed": int(seed),

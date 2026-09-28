@@ -63,11 +63,29 @@ def sample_layout(cfg, rng: np.random.Generator) -> List[dict]:
             if mode == "cluster":
                 # widen the spread slowly if the cluster is too tight to fit them all
                 scale = spread * (1.0 + attempt / 400.0)
-                offset = rng.normal(0.0, scale, size=2)
-                radius = float(comp_cfg.cluster.get("max_radius", 0.12))
-                norm = float(np.linalg.norm(offset))
-                if norm > radius:
-                    offset = offset / norm * radius
+                cluster = comp_cfg.cluster
+                radius = float(cluster.get("max_radius", 0.12))
+                # Keep the production task inside a bounded cluster while
+                # allowing full lateral scatter.  The configured ellipse is
+                # not narrowed to the brush footprint: the expert planner
+                # must be able to produce multi-turn paths when needed.
+                sweep_oriented = count <= 6
+                lateral_ratio = (float(cluster.get(
+                    "lateral_spread_ratio", 1.0)) if sweep_oriented else 1.0)
+                lateral_radius = (float(cluster.get(
+                    "max_lateral_radius", radius * lateral_ratio))
+                    if sweep_oriented else radius)
+                if radius <= 0.0 or lateral_ratio <= 0.0 or lateral_radius <= 0.0:
+                    raise ValueError(
+                        "cluster max_radius, lateral_spread_ratio, and "
+                        "max_lateral_radius must be positive"
+                    )
+                offset = rng.normal(
+                    0.0, [scale, scale * lateral_ratio], size=2)
+                norm = float(np.hypot(offset[0] / radius,
+                                      offset[1] / lateral_radius))
+                if norm > 1.0:
+                    offset = offset / norm
                 x, y = float(centre[0] + offset[0]), float(centre[1] + offset[1])
                 if not (spawn.x_min <= x <= spawn.x_max and spawn.y_min <= y <= spawn.y_max):
                     continue

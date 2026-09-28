@@ -68,7 +68,9 @@ end_effector:
   joint_kd: 12.0
   ik_damping: 0.01
   ik_iterations: 60
-  ik_max_joint_step: 0.04     # target slew limit per task-space command [rad]
+  # Permit enough joint-target slew for the arm to track curved brush-yaw
+  # references; 0.04 rad made the physical tool lag A* turns and side-push parts.
+  ik_max_joint_step: 0.08     # per 100 Hz control update [rad]
   ik_position_tolerance: 0.005  # reject an unreachable Cartesian target [m]
   ik_orientation_tolerance: 0.02 # fixed roll/pitch/yaw residual [rad]
   # Level-brush IK seed for the longer gripper/handle stack at [0.42, 0, 0.10].
@@ -168,19 +170,24 @@ components:
   # intended continuous-sweep scene.
   exact_partial_spawn_mode: cluster
   cluster:                   # only used when spawn_mode == cluster
-    # The group centre is random per seed, but drawn from a bounded normal
-    # distribution around the canonical work area.  This preserves layout
-    # diversity without making ACT learn a large, unnecessary translation.
-    center_mean: [0.20, 0.00]
-    center_std: [0.035, 0.025]
-    center_bounds: {x_min: 0.10, x_max: 0.28, y_min: -0.10, y_max: 0.10}
+    # Randomize the group centre more broadly, while shifting it 6 cm toward
+    # the tray (negative X) relative to the previous [0.20, 0.00] mean.
+    center_mean: [0.14, 0.00]
+    center_std: [0.055, 0.045]
+    center_bounds: {x_min: 0.015, x_max: 0.265, y_min: -0.16, y_max: 0.16}
     # Legacy broad bounds are retained for older override files.  New runs
     # use center_mean/center_std/center_bounds above.
     center_x: {min: 0.02, max: 0.34}
     center_y: {min: -0.16, max: 0.16}
-    spread_std: {min: 0.025, max: 0.045}
-    max_radius: 0.085
-  min_separation: 0.035
+    # Keep roughly 2x the previous mean pair spacing while sampling a genuine
+    # two-dimensional cloud.  In particular, do not clamp Y to one brush pass:
+    # the expert coverage planner must route laterally when the random layout
+    # needs it.
+    spread_std: {min: 0.065, max: 0.085}
+    max_radius: 0.16
+    lateral_spread_ratio: 1.0
+    max_lateral_radius: 0.16
+  min_separation: 0.070
   randomize_orientation: true
   target_clearance: 0.05
 
@@ -233,6 +240,17 @@ planner:
   expert_clearance_score_weight: 0.20
   expert_candidate_limit: 12  # shortlist for optional MuJoCo-in-the-loop validation
   expert_capture_exit_margin: 0.02  # [m] clear selected parts before changing lanes
+  expert_corner_radius: 0.025  # [m] smooth contact turns; yaw limit slows XY by curvature
+  expert_curve_order_limit: 4  # winding orders physically vetted per target subset
+  expert_curve_grid_resolution: 0.02  # [m] global capture-coverage A* lattice
+  expert_curve_max_expansions: 480000  # broader dispersed layouts need more A* coverage states
+  expert_curve_turn_penalties: [0.012, 0.025, 0.045]
+  expert_tray_entry_lane_fractions: [0.0, -0.5, 0.5, -0.85, 0.85]
+  expert_curve_diversity_penalty: 0.030  # [m] steer later A* variants away from prior object-field corridors
+  expert_curve_heuristic_weight: 1.12  # mildly weighted A*; MuJoCo vets the candidates
+  expert_capture_forward_cos: 0.0  # allow lateral contact; contacted parts may not be pushed away from tray
+  expert_curve_capture_margin: 0.055  # reject geometrical edge grazes; require centred contact
+  expert_curve_turn_clearance: 0.025  # keep fillets away from objects before a trayward pass
   # Search both the brush heading and several offsets inside the common
   # capture corridor.  The latter matters when the corridor midpoint grazes
   # a distractor even though one side of the same corridor is safe.
@@ -242,9 +260,8 @@ planner:
   expert_tray_push_depth: 0.09    # [m] brush-centre depth inside the tray after crossing
   stall_virtual_tray_offset: 0.14  # [m] lateral offset of the virtual tray used for stall failures
   transfer:
-    # Motion planning for the CONTACT-FREE transfer legs only. The sweeping
-    # stroke is always a straight Cartesian segment -- see sim/planners/rrt.py
-    # for why a sampling planner must not touch it.
+    # Motion planning for the CONTACT-FREE transfer legs only. Expert contact
+    # strokes use coverage A* and may curve, turn, or briefly backtrack.
     mode: direct             # direct | rrt
     step_size: 0.05          # RRT extension length [m]
     goal_bias: 0.15
@@ -322,27 +339,30 @@ act:
   # n_action_steps=1 policy ensembler, which is incompatible with this cadence.
   temporal_ensemble_coeff: 0.01
   state_history: true
+  state_history_seconds: 0.2
   observation_keys: [observation.images.overhead, observation.images.wrist,
                      observation.state, observation.environment_state]
   # Full-episode fixed-frame consecutive [dx, dy, dz, dyaw].  ACT owns all
   # four axes before contact; after the force latch its dz output is logged but
   # ignored while the 1 N admittance loop owns physical Z.
   action_dim: 4
-  state_dim: 42
+  state_dim: 36
   device: mps
   batch_size: 4
   image_stat_samples: 100
-  max_steps: 80000
-  checkpoint_every_steps: 2500
-  keep_checkpoints: 3
+  max_steps: 100000
+  checkpoint_start_step: 50000
+  checkpoint_every_steps: 10000
+  keep_checkpoints: 6
   train_hours: 24
-  dataset_dir: runs/act_dataset
-  model_dir: runs/act_model
+  dataset_dir: runs/act_dataset_curve_v8
+  model_dir: runs/act_model_curve_v8
   realtime_budget_seconds: 0.2
   approach_sample_fraction: 0.35
   tracking_project: act-ur10-sweep-full-episode-v1
   tracking_space: Luke711/act-ur10-sweep-tracking
   tracking_private: true
+  tracking_sync_interval_seconds: 60
 
 task:
   total_count: 6
@@ -357,7 +377,7 @@ web:
 
 episode:
   max_time: 45.0
-  max_frames: 500         # hard cap at the 25 Hz task/data-frame level
+  max_frames: 1200        # 48 s at 25 Hz; allows physically rate-limited curved expert sweeps
   max_contact_path: 3.0
   contact_build_time: 1.0   # supervisor hold before ACT receives XY+yaw control
   stable_time: 1.0  # expert-data confirmation hold; inference uses its own timers below

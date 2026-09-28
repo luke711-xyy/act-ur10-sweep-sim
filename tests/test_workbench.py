@@ -19,7 +19,7 @@ def _episode(root, episode_id="episode_0000"):
         "overhead": image,
         "wrist": image + 1,
         "inspection": image + 2,
-        "state": np.zeros(42, dtype=np.float32),
+        "state": np.zeros(36, dtype=np.float32),
         "environment_state": np.zeros(3, dtype=np.float32),
         "phase": "sweep",
     }]
@@ -304,6 +304,8 @@ def test_workbench_html_has_five_operational_areas():
     for label in ("Simulation", "Demonstrations", "Training", "Inference", "Parameters",
                   "inspection-only", "Play", "Frame inspector", "Signal group"):
         assert label in html
+    assert ('id="inferModel" '
+            'value="runs/act_model_curve_v10/checkpoints/step_100000"') in html
     for element_id in ("episodeTargetFilter", "episodeStatusFilter", "previewOutcome",
                        "previewCount", "previewFailureMode", "inferTarget",
                        "inferRandomize"):
@@ -457,7 +459,7 @@ def test_wrong_count_clones_use_distinct_success_sources(tmp_path):
             "overhead": image + index,
             "wrist": image + index,
             "inspection": image + index,
-            "state": np.full(42, index, dtype=np.float32),
+            "state": np.full(36, index, dtype=np.float32),
             "environment_state": np.array([6.0, 2.0, 0.0], dtype=np.float32),
             "phase": "sweep",
         }
@@ -473,6 +475,10 @@ def test_wrong_count_clones_use_distinct_success_sources(tmp_path):
                            preview_root=preview_root)
     first = state._clone_success_as_wrong_count(
         seed=10, target_count=1, failure_mode="wrong_count_over", source_slot=0)
+    with np.load(preview_root / first["episode_id"] / "arrays.npz") as arrays:
+        assert arrays["state"].shape == (1, 36)
+        np.testing.assert_array_equal(arrays["state"], np.zeros((1, 36)))
+        np.testing.assert_array_equal(arrays["environment_state"][:, 1], [1.0])
     second = state._clone_success_as_wrong_count(
         seed=11, target_count=1, failure_mode="wrong_count_over", source_slot=1)
 
@@ -552,7 +558,7 @@ def test_workbench_persists_and_reads_preview_fz_trace(tmp_path, monkeypatch):
         "overhead": image,
         "wrist": image,
         "inspection": image,
-        "state": np.zeros(42, dtype=np.float32),
+        "state": np.zeros(36, dtype=np.float32),
         "environment_state": np.zeros(3, dtype=np.float32),
         "t": 0.0,
         "normal_force": 0.75,
@@ -601,7 +607,7 @@ def test_partial_preview_keeps_the_concentrated_six_part_layout(tmp_path, monkey
         observations=[{
             "overhead": np.zeros((4, 4, 3), dtype=np.uint8),
             "wrist": np.zeros((4, 4, 3), dtype=np.uint8),
-                "state": np.zeros(42, dtype=np.float32),
+                "state": np.zeros(36, dtype=np.float32),
                 "environment_state": np.zeros(3, dtype=np.float32),
                 "phase": "sweep",
         }],

@@ -69,6 +69,14 @@ class EndEffectorInterface:
         """Contact normal force in the *pressing-positive* convention [N]."""
         raise NotImplementedError
 
+    def normal_force_observation(self) -> float:
+        """Read force for telemetry without advancing stateful filters.
+
+        Implementations with pure measurements may use ``normal_force``;
+        filtered sensors should override this to return their cached sample.
+        """
+        return float(self.normal_force())
+
     def joint_state(self) -> np.ndarray:
         raise NotImplementedError
 

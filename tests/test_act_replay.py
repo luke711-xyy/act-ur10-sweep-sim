@@ -44,7 +44,7 @@ def test_inference_command_trace_is_saved_as_a_three_camera_episode(tmp_path):
     metadata = state.episode_metadata(episode_id)
     assert metadata["inference_replay"] is True
     assert metadata["episode_kind"] == "inference"
-    assert metadata["schema_version"] == 4
+    assert metadata["schema_version"] == 5
     assert metadata["target_count"] == 2
     assert "target_indices" not in metadata
     assert "unexpected_collected" not in metadata

@@ -359,7 +359,10 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             wrench = np.asarray(env.wrench(), dtype=np.float32).reshape(6)
             tcp = np.asarray(env.tcp(), dtype=np.float32).reshape(3)
             joints = np.asarray(env.ee.joint_state(), dtype=np.float32).reshape(6)
-            sampled_force = float(env.normal_force())
+            # The UR10 force channel has a stateful low-pass filter.  Reading
+            # telemetry must not advance that filter, or recording an episode
+            # changes the physical control loop relative to the screening pass.
+            sampled_force = float(env.normal_force_observation())
             peak_force = max(peak_force, sampled_force)
             observations.append({
                 "overhead": np.clip(np.transpose(obs["observation.images.overhead"], (1, 2, 0)) * 255,
@@ -738,9 +741,14 @@ def _expert_execution_path(cfg, plan: ExpertPlan,
     # explicit phases prevents the contact search from sliding past the parts
     # before the force loop has latched.
     hz = float(cfg.act.action_hz)
-    first_yaw = 0.0
+    first_yaw = float(plan.yaw_offset)
     yaw_rate = float(cfg.get_path("controller.yaw_speed_limit", np.deg2rad(45.0)))
     accel = float(cfg.get_path("planner.accel", 0.8))
+    # Global coverage-A* waypoints are already selectively filleted and
+    # capture-validated.  A second uniform pass here can cut the critical
+    # corner that touches one of the targets, so follow that curve verbatim.
+    curve_radius = (0.0 if plan.strategy == "coverage_astar" else
+                    float(cfg.get_path("planner.expert_corner_radius", 0.025)))
     # The airborne transfer is supervisor-owned and should use the travel
     # limit, not the deliberately slower contact sweep speed.  Reusing the
     # sweep speed made the approach dominate short demonstrations and left
@@ -748,7 +756,8 @@ def _expert_execution_path(cfg, plan: ExpertPlan,
     approach = sample_polyline(points[:2], hz,
                                float(cfg.controller.get("travel_speed",
                                                          cfg.controller.sweep_speed)),
-                               yaw=first_yaw, yaw_rate=yaw_rate, accel=accel)
+                               yaw=first_yaw, yaw_rate=yaw_rate, accel=accel,
+                               curve_radius=curve_radius)
     approach[:, 2] = float(cfg.end_effector.z_home)
     n_descent = max(1, int(np.ceil(
         (float(cfg.end_effector.z_home) - float(cfg.workspace.z_search_start)) /
@@ -764,16 +773,19 @@ def _expert_execution_path(cfg, plan: ExpertPlan,
         # mouth and taught ACT an artificial stop-and-go pattern.
         sweep_prefix = sample_polyline(
             points[1:-1], hz, float(cfg.controller.sweep_speed),
-            yaw_rate=yaw_rate, initial_yaw=first_yaw, accel=accel)
+            yaw_rate=yaw_rate, initial_yaw=first_yaw, accel=accel,
+            curve_radius=curve_radius)
         final_push = sample_polyline(
             points[-2:], hz,
             float(cfg.controller.get("tray_entry_speed", cfg.controller.sweep_speed)),
-            yaw_rate=yaw_rate, initial_yaw=float(sweep_prefix[-1, 3]), accel=accel)
+            yaw_rate=yaw_rate, initial_yaw=float(sweep_prefix[-1, 3]), accel=accel,
+            curve_radius=curve_radius)
         sweep = np.concatenate((sweep_prefix, final_push), axis=0)
     else:
         sweep = sample_polyline(
             points[1:], hz, float(cfg.controller.sweep_speed),
-            yaw_rate=yaw_rate, initial_yaw=first_yaw, accel=accel)
+            yaw_rate=yaw_rate, initial_yaw=first_yaw, accel=accel,
+            curve_radius=curve_radius)
     if failure_mode == "stall_outside_tray" and len(plan.target_indices):
         # The plan was generated against a virtual, laterally shifted tray in
         # ``run_expert_episode``.  Preserve that complete A* route here; the
@@ -914,11 +926,29 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
                 score=plan.score,
                 turn_count=plan.turn_count,
                 strategy=plan.strategy,
+                yaw_offset=plan.yaw_offset,
             )
         # Failure candidates are physically screened without rendering.  The
         # accepted candidate is replayed once with the full synchronized
         # observations before it is persisted by the workbench.
-        result = execute(plan, attempt, collect_observations if not failure_mode else False)
+        try:
+            result = execute(plan, attempt, False)
+        except RuntimeError as exc:
+            # A candidate can pass the 2-D planner yet contain a Cartesian
+            # waypoint outside the UR10's orientation-constrained workspace.
+            # That is a candidate/layout rejection, not a broken collection
+            # process: discard this fresh-environment attempt and try the next
+            # geometrically ranked candidate.
+            if "UR10 IK target is unreachable" not in str(exc):
+                raise
+            result = ActRolloutResult(
+                success=False,
+                failure_reason=f"candidate rejected by IK: {exc}",
+                total=len(probe.layout),
+                target_count=requested_target_count,
+                    target_indices=[int(value) for value in plan.target_indices],
+            )
+            result = _annotate_expert_result(result, plan, attempt)
         matched = (not failure_mode and result.success)
         matched = matched or (
             failure_mode == "wrong_count_over"
@@ -932,9 +962,19 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
         matched = matched or (
             failure_mode == "misroute" and len(result.trace) >= 100)
         if matched:
-            if failure_mode and collect_observations:
+            if collect_observations:
                 result = execute(plan, attempt, True)
-            return result
+                matched = ((not failure_mode and result.success)
+                           or (failure_mode == "wrong_count_over"
+                               and result.collected == requested_target_count + 1)
+                           or (failure_mode == "wrong_count_under"
+                               and result.collected == max(0, requested_target_count - 1))
+                           or (failure_mode == "stall_outside_tray"
+                               and stall_failure_sidewall_ok(result, cfg))
+                           or (failure_mode == "misroute"
+                               and len(result.trace) >= 100))
+            if matched:
+                return result
         # Keep the closest exact-count attempt as the diagnostic return if all
         # candidates fail, while still preferring no unexpected parts.
         key = (int(result.unexpected_collected > 0),

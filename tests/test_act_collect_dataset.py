@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import numpy as np
 
@@ -19,6 +21,16 @@ def test_preview_batch_plan_has_one_episode_for_each_exact_target_count():
         (1, 7300), (2, 7300), (3, 7300),
         (4, 7300), (5, 7300), (6, 7300),
     ]
+
+
+def test_training_episode_plan_starts_with_goal_six_and_keeps_balanced_slots():
+    plan = collect_dataset.training_episode_plan(
+        seed_base=610000, episodes_per_target=2)
+
+    assert [item.target_count for item in plan[:3]] == [6, 6, 5]
+    assert {count: sum(item.target_count == count for item in plan)
+            for count in range(1, 7)} == {count: 2 for count in range(1, 7)}
+    assert len({item.seed for item in plan}) == len(plan)
 
 
 def test_preview_batch_cli_delegates_exactly_one_preview_per_target(tmp_path, monkeypatch):
@@ -67,7 +79,7 @@ def test_act_training_dataset_excludes_failed_episodes_by_default(tmp_path):
     observation = {
         "overhead": image,
         "wrist": image,
-        "state": np.zeros(42, dtype=np.float32),
+        "state": np.zeros(36, dtype=np.float32),
         "environment_state": np.array([6, 1, 0], dtype=np.float32),
         "policy_mask": True,
         "phase": "sweep",
@@ -90,3 +102,128 @@ def test_act_training_dataset_excludes_failed_episodes_by_default(tmp_path):
     assert [record["episode_id"] for record in training.records] == ["success"]
     assert len(training) == 1
     assert len(audit) == 2
+
+
+def test_approved_generator_retries_if_expert_rollout_rejects_seed(
+    tmp_path, monkeypatch, capsys,
+):
+    spec = collect_dataset.EpisodeSpec(
+        "train", 1, 410000, "train_n1_layout_000", "independent")
+    captures = []
+
+    def capture(_cfg, _writer, _root, _spec, _requested_seed, _attempt):
+        captures.append(_spec.seed)
+        if len(captures) == 1:
+            raise RuntimeError("screened layout changed during capture: test rejection")
+        return {"episode_id": "expert_goal_1_0001", "success": True}
+
+    monkeypatch.setattr(
+        collect_dataset, "training_episode_plan",
+        lambda _seed, _episodes_per_target=20: [spec],
+    )
+    monkeypatch.setattr(collect_dataset, "_capture_training_episode", capture)
+    monkeypatch.setattr(
+        collect_dataset, "validate_training_manifest",
+        lambda _root, episodes_per_target=20: {"total": 1},
+    )
+    monkeypatch.setattr(
+        collect_dataset, "write_split_manifests", lambda _root: {})
+
+    summary = collect_dataset.generate_approved_training_dataset(
+        object(), tmp_path, seed_base=410000, max_attempts=3,
+        episodes_per_target=1,
+    )
+
+    assert captures == [410000, 410001]
+    assert summary["generated"] == 1
+    failure = (tmp_path / "generation_failures.jsonl").read_text(
+        encoding="utf-8")
+    assert '"stage": "rollout"' in failure
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [event["event"] for event in events] == [
+        "expert_attempt_started", "expert_attempt_failed",
+        "expert_attempt_started", "expert_episode_saved",
+    ]
+    assert [event["seed"] for event in events
+            if event["event"] == "expert_attempt_started"] == [410000, 410001]
+
+
+def test_approved_generator_resume_skips_previously_failed_seeds(
+    tmp_path, monkeypatch, capsys,
+):
+    spec = collect_dataset.EpisodeSpec(
+        "train", 6, 940000, "train_n6_layout_000", "independent")
+    (tmp_path / "generation_failures.jsonl").write_text(
+        json.dumps({
+            "layout_id": spec.layout_id,
+            "target_count": 6,
+            "seed": 940000,
+            "stage": "rollout",
+            "reason": "previous target-six rollout failed",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    captures = []
+
+    def capture(_cfg, _writer, _root, attempted, _requested_seed, _attempt):
+        captures.append(attempted.seed)
+        return {"episode_id": "expert_goal_6_0001", "success": True}
+
+    monkeypatch.setattr(
+        collect_dataset, "training_episode_plan",
+        lambda _seed, _episodes_per_target=20: [spec],
+    )
+    monkeypatch.setattr(collect_dataset, "_capture_training_episode", capture)
+    monkeypatch.setattr(
+        collect_dataset, "validate_training_manifest",
+        lambda _root, episodes_per_target=20: {"total": 1},
+    )
+    monkeypatch.setattr(
+        collect_dataset, "write_split_manifests", lambda _root: {})
+
+    summary = collect_dataset.generate_approved_training_dataset(
+        object(), tmp_path, seed_base=940000, max_attempts=3,
+        episodes_per_target=1,
+    )
+
+    assert captures == [940001]
+    assert summary["generated"] == 1
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [event["event"] for event in events] == ["expert_attempt_started",
+                                                    "expert_episode_saved"]
+    assert events[0]["target_count"] == 6
+    assert events[0]["attempt"] == 2
+    assert events[0]["seed"] == 940001
+
+
+def test_approved_plan_cli_passes_custom_episodes_per_target(tmp_path, monkeypatch):
+    calls = {}
+
+    def generate(_cfg, root, seed_base, max_attempts, episodes_per_target):
+        calls.update({
+            "root": root,
+            "seed_base": seed_base,
+            "max_attempts": max_attempts,
+            "episodes_per_target": episodes_per_target,
+        })
+        return {"total": 90}
+
+    monkeypatch.setattr(collect_dataset, "save_config", lambda *_args: None)
+    monkeypatch.setattr(
+        collect_dataset, "generate_approved_training_dataset", generate)
+
+    result = collect_dataset.main([
+        "--approved-plan",
+        "--episodes-per-target", "15",
+        "--max-attempts-per-episode", "64",
+        "--seed-base", "910000",
+        "--out", str(tmp_path),
+    ])
+
+    assert result == 0
+    assert calls == {
+        "root": tmp_path,
+        "seed_base": 910000,
+        "max_attempts": 64,
+        "episodes_per_target": 15,
+    }

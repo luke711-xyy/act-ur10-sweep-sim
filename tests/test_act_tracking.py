@@ -81,6 +81,75 @@ def test_public_static_tracking_mode_is_explicit():
     }
 
 
+def test_hub_init_failure_falls_back_to_local_trackio(capsys):
+    class FakeTrackio:
+        def __init__(self):
+            self.calls = []
+
+        def init(self, **kwargs):
+            self.calls.append(kwargs)
+            if "space_id" in kwargs:
+                raise RuntimeError("Hub returned 402")
+
+    tracker = FakeTrackio()
+    settings = train.tracking_settings(
+        "act-ur10-sweep", "Luke711/act-ur10-sweep-tracking", False
+    )
+    result, active_tracking = train.initialize_tracker(
+        tracker, settings, {"max_steps": 100000}
+    )
+
+    assert result is tracker
+    assert active_tracking is None
+    assert tracker.calls[0]["private"] is False
+    assert "space_id" in tracker.calls[0]
+    assert "space_id" not in tracker.calls[1]
+    assert tracker.calls[1]["config"] == {"max_steps": 100000}
+    output = capsys.readouterr().out
+    assert '"event": "trackio_remote_init_failed"' in output
+    assert '"event": "trackio_local_fallback"' in output
+
+
+def test_tracker_failure_does_not_abort_training_setup(capsys):
+    class BrokenTrackio:
+        def init(self, **kwargs):
+            raise RuntimeError("local database unavailable")
+
+    settings = train.tracking_settings(
+        "act-ur10-sweep", "Luke711/act-ur10-sweep-tracking", False
+    )
+    result, active_tracking = train.initialize_tracker(
+        BrokenTrackio(), settings, {"max_steps": 100000}
+    )
+    assert result is None
+    assert active_tracking is None
+    assert '"event": "trackio_local_init_failed"' in capsys.readouterr().out
+
+
+def test_static_tracking_sync_targets_the_public_static_space():
+    class FakeTrackio:
+        def __init__(self):
+            self.calls = []
+
+        def sync(self, **kwargs):
+            self.calls.append(kwargs)
+            return kwargs["space_id"]
+
+    tracker = FakeTrackio()
+    settings = train.tracking_settings(
+        "act-ur10-sweep-full-episode-v1",
+        "Luke711/act-ur10-sweep-tracking",
+        static=True,
+    )
+
+    assert train.sync_static_tracking(tracker, settings)
+    assert tracker.calls == [{
+        "project": "act-ur10-sweep-full-episode-v1",
+        "space_id": "Luke711/act-ur10-sweep-tracking",
+        "sdk": "static",
+    }]
+
+
 def test_resumable_checkpoint_persists_cumulative_training_time(tmp_path):
     torch = pytest.importorskip("torch")
 
@@ -104,23 +173,29 @@ def test_resumable_checkpoint_persists_cumulative_training_time(tmp_path):
         checkpoint / "training_state.pt", map_location="cpu", weights_only=False
     )
     assert state["step"] == 2500
+    assert state["schema_version"] == 5
+    assert state["state_dim"] == 36
     assert state["elapsed_seconds"] == pytest.approx(1234.5)
 
 
 def test_small_sample_training_gate_requires_approved_same_layout(tmp_path):
     records = [{
         "episode_id": f"preview_goal_{target}_0001",
-        "schema_version": 4,
+        "schema_version": 5,
         "action_dim": 4,
-        "state_dim": 42,
+        "state_dim": 36,
         "frame_count": 300,
         "episode_kind": "expert",
         "split": "train",
         "success": True,
         "target_count": target,
-        "layout_id": "paired_000",
-        "seed": 4101,
+        "max_frames": 800,
+        "layout_id": f"train_layout_{target:03d}",
+        "layout_kind": "independent",
+        "layout_fingerprint": f"fp_{target:03d}",
+        "seed": 4100 + target,
     } for target in range(1, 7)]
+    records[-1]["frame_count"] = 529
     (tmp_path / "manifest.jsonl").write_text(
         "".join(json.dumps(record) + "\n" for record in records),
         encoding="utf-8",
@@ -129,10 +204,10 @@ def test_small_sample_training_gate_requires_approved_same_layout(tmp_path):
     summary = train.validate_small_sample_gate_manifest(tmp_path)
 
     assert summary["total"] == 6
-    records[-1]["seed"] = 9999
+    records[-1]["seed"] = records[0]["seed"]
     (tmp_path / "manifest.jsonl").write_text(
         "".join(json.dumps(record) + "\n" for record in records),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="same-seed layout"):
+    with pytest.raises(ValueError, match="independent unique layouts"):
         train.validate_small_sample_gate_manifest(tmp_path)

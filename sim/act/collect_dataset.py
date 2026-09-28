@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import uuid
@@ -14,6 +15,7 @@ import numpy as np
 from ..config import load_config, save_config
 from ..model.geometries import GEOMETRY_NAMES
 from .dataset import ActDatasetWriter
+from .interface import ACT_SCHEMA_VERSION, ACT_STATE_DIM
 from .naming import next_demo_name
 from .rollout import run_expert_episode
 
@@ -69,37 +71,33 @@ def preview_batch_plan(seed_base: int) -> list[EpisodeSpec]:
     ) for target_count in range(1, 7)]
 
 
-def training_episode_plan(seed_base: int = 4100) -> list[EpisodeSpec]:
-    """Build the approved 120-demo composition without sampling MuJoCo.
+def training_episode_plan(seed_base: int = 410000,
+                          episodes_per_target: int = 20) -> list[EpisodeSpec]:
+    """Build independent randomized layouts with an equal count per goal.
 
-    Eight paired layouts each appear with all six exact target counts (48
-    slots).  The remaining twelve layouts per target are independent (72
-    slots).  The first paired layout is intentionally identical to
-    :func:`preview_batch_plan`, so an approved pilot can be promoted without
-    being regenerated.
+    Each training episode gets its own layout seed and ID.  Retry windows are
+    spaced apart so a failed candidate for one episode cannot collide with a
+    later episode's proposed seed.  The six user-reviewed previews are kept
+    outside this training plan.
     """
     seed_base = int(seed_base)
-    if seed_base < 0:
-        raise ValueError("training seed base must be non-negative")
+    episodes_per_target = int(episodes_per_target)
+    if seed_base < 0 or episodes_per_target < 1:
+        raise ValueError(
+            "training seed base must be non-negative and episodes per target positive"
+        )
     plan: list[EpisodeSpec] = []
-    for paired_index in range(8):
-        # Reserve a local retry window for each paired layout while keeping
-        # paired_000 anchored at the user-reviewed preview seed base.
-        seed = seed_base + paired_index * 1_000
-        layout_id = f"paired_{paired_index:03d}"
-        for target_count in range(1, 7):
+    slot_index = 0
+    # Start with the hardest all-six capture goal so planner regressions surface
+    # before spending generation time on easier partial-count layouts.
+    for target_count in range(6, 0, -1):
+        for layout_index in range(episodes_per_target):
+            seed = seed_base + slot_index * 256
             plan.append(EpisodeSpec(
                 split="train", target_count=target_count, seed=seed,
-                layout_id=layout_id, layout_kind="paired"))
-    independent_base = seed_base + 10_000
-    for target_count in range(1, 7):
-        for independent_index in range(12):
-            seed = (independent_base + (target_count - 1) * 7_000
-                    + independent_index * 100)
-            plan.append(EpisodeSpec(
-                split="train", target_count=target_count, seed=seed,
-                layout_id=f"independent_n{target_count}_{independent_index:03d}",
+                layout_id=f"train_n{target_count}_layout_{layout_index:03d}",
                 layout_kind="independent"))
+            slot_index += 1
     return plan
 
 
@@ -122,22 +120,32 @@ def evaluation_layout_plan(split: str, seed_base: int,
     ) for target_count in range(1, 7) for index in range(layouts_per_target)]
 
 
-def validate_training_manifest(root: str | Path) -> dict:
-    """Raise unless ``root`` is exactly the approved 120-record train set."""
+def validate_training_manifest(root: str | Path,
+                               episodes_per_target: int = 20) -> dict:
+    """Require a balanced set of successful schema-v5 experts."""
     root = Path(root)
+    episodes_per_target = int(episodes_per_target)
+    if episodes_per_target < 1:
+        raise ValueError("episodes_per_target must be positive")
+    expected_total = 6 * episodes_per_target
     path = root / "manifest.jsonl"
     records = [json.loads(line) for line in path.read_text(
         encoding="utf-8").splitlines() if line.strip()]
     invalid = [record.get("episode_id", "<missing>") for record in records if not (
-        int(record.get("schema_version", 0)) == 4
+        int(record.get("schema_version", 0)) == ACT_SCHEMA_VERSION
         and int(record.get("action_dim", 0)) == 4
-        and int(record.get("state_dim", 0)) == 42
+        and int(record.get("state_dim", 0)) == ACT_STATE_DIM
         and str(record.get("episode_kind", "")) == "expert"
         and str(record.get("split", "")) == "train"
         and bool(record.get("success", False))
         and 1 <= int(record.get("target_count", 0)) <= 6
-        and 1 <= int(record.get("frame_count", 0)) <= 500
+        and 1 <= int(record.get("frame_count", 0))
+        <= int(record.get("max_frames", 500))
         and "target_indices" not in record
+        and str(record.get("layout_kind", "")) == "independent"
+        and bool(str(record.get("layout_id", "")))
+        and int(record.get("seed", -1)) >= 0
+        and bool(record.get("layout_fingerprint"))
     )]
     per_target = {
         str(target_count): sum(
@@ -150,51 +158,37 @@ def validate_training_manifest(root: str | Path) -> dict:
         (str(record.get("layout_id", "")), int(record.get("target_count", 0)))
         for record in records
     ]
-    paired = [
-        record for record in records
-        if str(record.get("layout_kind", "")) == "paired"
-    ]
     independent = [
         record for record in records
         if str(record.get("layout_kind", "")) == "independent"
     ]
-    paired_ids = sorted({str(record.get("layout_id", "")) for record in paired})
-    paired_ok = len(paired) == 48 and len(paired_ids) == 8
-    for layout_id in paired_ids:
-        group = [record for record in paired
-                 if str(record.get("layout_id", "")) == layout_id]
-        paired_ok = paired_ok and {
-            int(record.get("target_count", 0)) for record in group
-        } == set(range(1, 7))
-        paired_ok = paired_ok and len({
-            int(record.get("seed", -1)) for record in group
-        }) == 1
-    independent_ok = len(independent) == 72
-    for target_count in range(1, 7):
-        group = [record for record in independent
-                 if int(record.get("target_count", 0)) == target_count]
-        independent_ok = independent_ok and len(group) == 12
-        independent_ok = independent_ok and len({
-            str(record.get("layout_id", "")) for record in group
-        }) == 12
+    layout_ids = [str(record.get("layout_id", "")) for record in independent]
+    seeds = [int(record.get("seed", -1)) for record in independent]
+    fingerprints = [str(record.get("layout_fingerprint", ""))
+                    for record in independent]
     if invalid:
         raise ValueError(f"training manifest contains incompatible records: {invalid}")
-    if len(records) != 120 or any(value != 20 for value in per_target.values()):
+    if (len(records) != expected_total
+            or any(value != episodes_per_target for value in per_target.values())):
         raise ValueError(
-            f"training manifest must contain 120 records and 20 per target; "
+            f"training manifest must contain {expected_total} records and "
+            f"{episodes_per_target} per target; "
             f"found total={len(records)}, per_target={per_target}"
         )
-    if len(set(slots)) != len(slots) or not paired_ok or not independent_ok:
+    if (len(independent) != expected_total
+            or len(set(slots)) != expected_total
+            or len(set(layout_ids)) != expected_total
+            or len(set(seeds)) != expected_total
+            or len(set(fingerprints)) != expected_total):
         raise ValueError(
-            "training manifest composition must be 8 paired layouts x 6 goals "
-            "plus 12 independent layouts per goal"
+            f"training manifest must contain {expected_total} mutually unique "
+            "independent layouts"
         )
     return {
         "total": len(records),
         "per_target": per_target,
-        "paired_records": len(paired),
-        "paired_layouts": len(paired_ids),
         "independent_records": len(independent),
+        "unique_layouts": len(set(fingerprints)),
     }
 
 
@@ -219,7 +213,7 @@ def _append_failure_log(root: Path, payload: dict) -> None:
 
 def validate_preview_training_manifest(root: str | Path,
                                        per_target: int = 15) -> dict:
-    """Validate a promoted 6-by-N successful preview training set."""
+    """Validate a balanced successful training set with independent layouts."""
     root = Path(root)
     per_target = int(per_target)
     if per_target < 1:
@@ -227,15 +221,22 @@ def validate_preview_training_manifest(root: str | Path,
     records = _read_manifest(root)
     invalid = [record.get("episode_id", "<missing>") for record in records
                if not (
-                   int(record.get("schema_version", 0)) == 4
+                   int(record.get("schema_version", 0)) == ACT_SCHEMA_VERSION
                    and int(record.get("action_dim", 0)) == 4
-                   and int(record.get("state_dim", 0)) == 42
+                   and int(record.get("state_dim", 0)) == ACT_STATE_DIM
                    and str(record.get("episode_kind", "")) == "expert"
                    and str(record.get("split", "")) == "train"
                    and bool(record.get("success", False))
+                   and int(record.get("count", 0)) == 6
+                   and int(record.get("total_count", 0)) == 6
                    and 1 <= int(record.get("target_count", 0)) <= 6
-                   and 1 <= int(record.get("frame_count", 0)) <= 500
+                   and 1 <= int(record.get("frame_count", 0))
+                   <= int(record.get("max_frames", 500))
                    and "target_indices" not in record
+                   and str(record.get("layout_kind", "")) == "independent"
+                   and bool(str(record.get("layout_id", "")))
+                   and int(record.get("seed", -1)) >= 0
+                   and bool(record.get("layout_fingerprint"))
                )]
     per_target_counts = {
         str(target): sum(int(record.get("target_count", 0)) == target
@@ -243,15 +244,27 @@ def validate_preview_training_manifest(root: str | Path,
         for target in range(1, 7)
     }
     expected_total = 6 * per_target
-    if invalid or len(records) != expected_total or any(
-            value != per_target for value in per_target_counts.values()):
+    layout_ids = [str(record.get("layout_id", "")) for record in records]
+    seeds = [int(record.get("seed", -1)) for record in records]
+    fingerprints = [str(record.get("layout_fingerprint", ""))
+                    for record in records]
+    unique_layouts = (
+        len(set(layout_ids)) == expected_total
+        and len(set(seeds)) == expected_total
+        and len(set(fingerprints)) == expected_total
+    )
+    if (invalid or len(records) != expected_total or not unique_layouts
+            or any(value != per_target
+                   for value in per_target_counts.values())):
         raise ValueError(
             f"preview training manifest must contain {expected_total} successful "
-            f"records and {per_target} per target; invalid={invalid}, "
+            f"records and {per_target} per target on unique independent layouts; "
+            f"invalid={invalid}, unique_layouts={unique_layouts}, "
             f"per_target={per_target_counts}"
         )
     return {"total": len(records), "per_target": per_target_counts,
-            "source": "promoted_success_previews"}
+            "unique_layouts": expected_total,
+            "source": "successful_independent_experts"}
 
 
 def promote_success_preview_set(preview_root: str | Path,
@@ -427,7 +440,7 @@ def promote_preview_batch(preview_root: str | Path,
     records = [
         record for record in _read_manifest(preview_root)
         if bool(record.get("success", False))
-        and int(record.get("schema_version", 0)) == 4
+        and int(record.get("schema_version", 0)) == ACT_SCHEMA_VERSION
         and str(record.get("episode_kind", "")) == "expert_preview"
         and str(record.get("layout_id", "")) == str(layout_id)
     ]
@@ -471,8 +484,8 @@ def promote_preview_batch(preview_root: str | Path,
 
 
 def write_split_manifests(root: str | Path,
-                          validation_seed: int = 60_000,
-                          test_seed: int = 90_000) -> dict:
+                          validation_seed: int = 1_000_000,
+                          test_seed: int = 2_000_000) -> dict:
     """Write the frozen, disjoint validation/test layout assignments."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -494,6 +507,12 @@ def write_split_manifests(root: str | Path,
 def _expert_metadata(spec: EpisodeSpec, result, requested_seed: int,
                      generation_attempt: int, cfg) -> dict:
     planner_score = float(getattr(result, "planner_score", float("inf")))
+    initial_pose = np.asarray(
+        result.observations[0]["object_pose"], dtype="<f4"
+    )
+    layout_fingerprint = hashlib.sha256(
+        np.ascontiguousarray(initial_pose).tobytes()
+    ).hexdigest()
     return {
         "episode_kind": "expert",
         "split": "train",
@@ -502,12 +521,14 @@ def _expert_metadata(spec: EpisodeSpec, result, requested_seed: int,
         "generation_attempt": int(generation_attempt),
         "layout_id": str(spec.layout_id),
         "layout_kind": str(spec.layout_kind),
+        "layout_fingerprint": layout_fingerprint,
         "count": 6,
         "total_count": 6,
         "target_count": int(spec.target_count),
         "collected": int(result.collected),
         "geometry": "mixed",
         "fps": float(cfg.act.action_hz),
+        "max_frames": int(cfg.episode.get("max_frames", 500)),
         "planner": "astar_one_pass",
         "planner_status": str(result.planner_status),
         "planner_failure_reason": str(result.planner_failure_reason),
@@ -536,7 +557,12 @@ def _capture_training_episode(cfg, writer: ActDatasetWriter,
     )
     if not result.success:
         raise RuntimeError(
-            f"screened layout changed during capture: {result.failure_reason}"
+            f"expert rollout failed: {result.failure_reason}; "
+            f"collected={result.collected}/{result.target_count}; "
+            f"planner={result.planner_status}/{result.planner_strategy}; "
+            f"turns={result.planner_turn_count}; "
+            f"candidate={result.planner_attempts}; "
+            f"frames={result.sampled_frames}"
         )
     episode_id = next_demo_name([root], spec.target_count)
     metadata = _expert_metadata(
@@ -577,85 +603,125 @@ def _screen_single_layout(cfg, target_count: int, requested_seed: int,
 
 
 def generate_approved_training_dataset(cfg, root: str | Path,
-                                       seed_base: int = 4100,
-                                       max_attempts: int = 64) -> dict:
-    """Complete the approved 120-record dataset after preview promotion.
+                                       seed_base: int = 410000,
+                                       max_attempts: int = 64,
+                                       episodes_per_target: int = 20) -> dict:
+    """Generate a balanced set of successful demonstrations on unique layouts.
 
-    ``paired_000`` must already be the approved six-record preview batch.
-    Every rejected attempt is kept only in ``generation_failures.jsonl``.
-    The function is restartable: already completed layout/target slots are
-    skipped after strict schema/provenance checks.
+    The accepted six-record pilot remains in the preview directory and is not
+    promoted. Rejected candidates are recorded only as lightweight failure
+    reasons. Completed v5 slots are skipped on restart.
     """
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     existing = _read_manifest(root)
+    incompatible = [record.get("episode_id", "<missing>") for record in existing
+                    if int(record.get("schema_version", 0)) != ACT_SCHEMA_VERSION
+                    or int(record.get("state_dim", 0)) != ACT_STATE_DIM
+                    or str(record.get("episode_kind", "")) != "expert"
+                    or str(record.get("split", "")) != "train"
+                    or str(record.get("layout_kind", "")) != "independent"
+                    or not str(record.get("layout_fingerprint", ""))]
+    if incompatible:
+        raise ValueError(
+            "formal dataset root contains preview/legacy records; use a fresh "
+            f"training directory instead: {incompatible[:5]}"
+        )
+    if not 1 <= int(max_attempts) < 256:
+        raise ValueError("max_attempts must be between 1 and 255")
+    episodes_per_target = int(episodes_per_target)
+    if episodes_per_target < 1:
+        raise ValueError("episodes_per_target must be positive")
     slots = {
         (str(record.get("layout_id", "")), int(record.get("target_count", 0)))
         for record in existing
         if bool(record.get("success", False))
-        and int(record.get("schema_version", 0)) == 4
+        and int(record.get("schema_version", 0)) == ACT_SCHEMA_VERSION
         and str(record.get("episode_kind", "")) == "expert"
         and str(record.get("split", "")) == "train"
     }
-    required_preview = {("paired_000", target) for target in range(1, 7)}
-    if not required_preview.issubset(slots):
-        raise ValueError(
-            "paired_000 approved preview batch must be promoted before full generation"
-        )
+    failure_path = root / "generation_failures.jsonl"
+    failed_seeds: dict[tuple[str, int], set[int]] = {}
+    if failure_path.is_file():
+        for line in failure_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            failure = json.loads(line)
+            slot = (str(failure.get("layout_id", "")),
+                    int(failure.get("target_count", 0)))
+            failed_seeds.setdefault(slot, set()).add(int(failure["seed"]))
     writer = ActDatasetWriter(str(root))
     generated = []
-
-    # Complete paired layouts 1..7 atomically at the seed-selection level.
-    for paired_index in range(1, 8):
-        layout_id = f"paired_{paired_index:03d}"
-        missing = [
-            target for target in range(1, 7)
-            if (layout_id, target) not in slots
-        ]
-        if not missing:
-            continue
-        if len(missing) != 6:
-            raise ValueError(
-                f"partial paired layout {layout_id} found; remove it before resume"
-            )
-        requested_seed = int(seed_base) + paired_index * 1_000
-        accepted_seed, attempt = find_shared_layout_seed(
-            cfg, requested_seed, max_attempts,
-            failure_root=root, layout_id=layout_id,
-        )
-        for target_count in range(1, 7):
-            spec = EpisodeSpec(
-                split="train", target_count=target_count,
-                seed=accepted_seed, layout_id=layout_id,
-                layout_kind="paired",
-            )
-            generated.append(_capture_training_episode(
-                cfg, writer, root, spec, requested_seed, attempt
-            ))
-            slots.add((layout_id, target_count))
-
-    # Add twelve seed-independent layouts for each target cardinality.
-    for planned in training_episode_plan(seed_base):
-        if planned.layout_kind != "independent":
-            continue
+    completed = len(slots)
+    for planned in training_episode_plan(seed_base, episodes_per_target):
         slot = (planned.layout_id, planned.target_count)
         if slot in slots:
             continue
-        accepted_seed, attempt = _screen_single_layout(
-            cfg, planned.target_count, planned.seed, max_attempts,
-            root, planned.layout_id,
-        )
-        spec = EpisodeSpec(
-            split="train", target_count=planned.target_count,
-            seed=accepted_seed, layout_id=planned.layout_id,
-            layout_kind="independent",
-        )
-        generated.append(_capture_training_episode(
-            cfg, writer, root, spec, planned.seed, attempt
-        ))
+        episode = None
+        accepted_seed = int(planned.seed)
+        for attempted_seeds in range(1, int(max_attempts) + 1):
+            accepted_seed = int(planned.seed) + attempted_seeds - 1
+            if accepted_seed in failed_seeds.get(slot, set()):
+                continue
+            spec = EpisodeSpec(
+                split="train", target_count=planned.target_count,
+                seed=accepted_seed, layout_id=planned.layout_id,
+                layout_kind="independent",
+            )
+            print(json.dumps({
+                "event": "expert_attempt_started",
+                "completed": completed,
+                "total": 6 * episodes_per_target,
+                "target_count": int(planned.target_count),
+                "layout_id": str(planned.layout_id),
+                "attempt": attempted_seeds,
+                "seed": int(accepted_seed),
+            }, ensure_ascii=False), flush=True)
+            try:
+                episode = _capture_training_episode(
+                    cfg, writer, root, spec, planned.seed, attempted_seeds
+                )
+            except RuntimeError as exc:
+                failure = {
+                    "layout_id": str(planned.layout_id),
+                    "layout_kind": "independent",
+                    "target_count": int(planned.target_count),
+                    "requested_seed": int(planned.seed),
+                    "seed": int(accepted_seed),
+                    "generation_attempt": int(attempted_seeds),
+                    "stage": "rollout",
+                    "reason": str(exc),
+                }
+                _append_failure_log(root, failure)
+                print(json.dumps({
+                    "event": "expert_attempt_failed",
+                    "completed": completed,
+                    **failure,
+                }, ensure_ascii=False), flush=True)
+                continue
+            generated.append(episode)
+            break
+        if episode is None:
+            raise RuntimeError(
+                f"could not record layout {planned.layout_id} for target "
+                f"{planned.target_count} after {max_attempts} seeds"
+            )
         slots.add(slot)
+        completed += 1
+        print(json.dumps({
+            "event": "expert_episode_saved",
+            "completed": completed,
+            "total": 6 * episodes_per_target,
+            "target_count": int(planned.target_count),
+            "layout_id": str(planned.layout_id),
+            "seed": int(accepted_seed),
+        }), flush=True)
 
-    validation = validate_training_manifest(root)
+    validation = validate_training_manifest(
+        root, episodes_per_target=episodes_per_target
+    )
+    if episodes_per_target == 15:
+        validate_preview_training_manifest(root, per_target=15)
     split_manifests = write_split_manifests(root)
     return {
         **validation,
@@ -674,7 +740,7 @@ def main(argv=None) -> int:
         help="MuJoCo/layout retries before retaining a failure (default: 6)",
     )
     parser.add_argument("--split", choices=["pilot", "train", "val", "test"], default="train")
-    parser.add_argument("--seed-base", type=int, default=10000)
+    parser.add_argument("--seed-base", type=int, default=410000)
     parser.add_argument(
         "--episode-plan", default=None,
         help="comma-separated target_count:seed pairs; overrides --episodes/--seed-base",
@@ -684,12 +750,16 @@ def main(argv=None) -> int:
         "--promote-preview",
         default=None,
         metavar="PREVIEW_DIR",
-        help="promote the approved paired_000 six-preview batch into an empty train set",
+        help="legacy utility to copy a preview set; cannot be combined with --approved-plan",
     )
     parser.add_argument(
         "--approved-plan",
         action="store_true",
-        help="complete the approved 120-record composition after preview promotion",
+        help="generate successful experts on unique randomized layouts",
+    )
+    parser.add_argument(
+        "--episodes-per-target", type=int, default=None,
+        help="successful independent training layouts per target with --approved-plan (default: 20)",
     )
     parser.add_argument(
         "--write-split-manifests-only",
@@ -700,6 +770,13 @@ def main(argv=None) -> int:
                         default="balanced")
     parser.add_argument("--set", action="append", default=[])
     args = parser.parse_args(argv)
+    if args.approved_plan and args.promote_preview is not None:
+        parser.error("an approved randomized training plan cannot promote pilot previews")
+    if args.episodes_per_target is not None:
+        if not args.approved_plan:
+            parser.error("--episodes-per-target requires --approved-plan")
+        if args.episodes_per_target < 1:
+            parser.error("--episodes-per-target must be positive")
     if args.max_attempts_per_episode < 1:
         parser.error("--max-attempts-per-episode must be positive")
     cfg = load_config(args.config, overrides=args.set)
@@ -724,6 +801,10 @@ def main(argv=None) -> int:
         output = generate_approved_training_dataset(
             cfg, root_path, seed_base=int(args.seed_base),
             max_attempts=int(args.max_attempts_per_episode),
+            episodes_per_target=(
+                20 if args.episodes_per_target is None
+                else int(args.episodes_per_target)
+            ),
         )
         print(json.dumps(output, ensure_ascii=False))
         return 0

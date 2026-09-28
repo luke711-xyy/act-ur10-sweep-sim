@@ -204,6 +204,10 @@ class UR10CB3EndEffector(CartesianEndEffector):
         self._normal_force_filtered += alpha * (total - self._normal_force_filtered)
         return float(self._normal_force_filtered)
 
+    def normal_force_observation(self) -> float:
+        """Return the controller's latest filtered sample without updating it."""
+        return float(self._normal_force_filtered)
+
     def joint_state(self) -> np.ndarray:
         return np.array([self.data.qpos[self.qpos_adr[n]] for n in self.JOINT_NAMES], dtype=float)
 

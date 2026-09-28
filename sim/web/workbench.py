@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from ..act.dataset import ActDatasetWriter
+from ..act.interface import ACT_SCHEMA_VERSION
 from ..act.rollout import run_expert_episode, stall_failure_sidewall_ok
 from ..act.naming import next_demo_name
 
@@ -408,10 +409,8 @@ class WorkbenchState:
         arrays = np.load(arrays_path, allow_pickle=False)
         payload = {key: np.asarray(arrays[key]) for key in arrays.files}
         payload["environment_state"][:, 1] = float(target_count)
-        # observation.state is [current(20), previous(20)], and the target
-        # count is the middle element of each 3-value count triplet.
-        payload["state"][:, 18] = float(target_count)
-        payload["state"][:, 39] = float(target_count)
+        # Goal counts live only in environment_state; robot state and visual
+        # observations remain the physical trace of the source rollout.
         np.savez_compressed(arrays_path, **payload)
 
         def replace_path(value):
@@ -526,7 +525,7 @@ class WorkbenchState:
             [self.dataset_root, self.preview_root], int(local_cfg.task.target_count))
         planner_score = float(getattr(result, "planner_score", float("inf")))
         metadata = {
-            "schema_version": 4,
+            "schema_version": ACT_SCHEMA_VERSION,
             "episode_kind": "expert_preview",
             "split": "pilot",
             "layout_id": str(layout_id or ""),

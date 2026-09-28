@@ -11,6 +11,33 @@ from typing import Iterable
 
 import numpy as np
 
+from .interface import ACT_SCHEMA_VERSION, ACT_STATE_DIM
+
+
+def normalize_feature(values: np.ndarray, stats: dict, feature: str) -> np.ndarray:
+    """Apply the MEAN_STD transform used by LeRobot to one feature array.
+
+    Training and inference use LeRobot's serialized pre/post-processors; this
+    small NumPy helper is for diagnostics and contract tests at the raw-data
+    boundary.
+    """
+    if feature not in stats:
+        raise KeyError(f"normalization statistics are missing feature {feature!r}")
+    values = np.asarray(values, dtype=np.float32)
+    mean = np.asarray(stats[feature]["mean"], dtype=np.float32)
+    std = np.asarray(stats[feature]["std"], dtype=np.float32)
+    return ((values - mean) / np.maximum(std, 1e-8)).astype(np.float32)
+
+
+def unnormalize_action(values: np.ndarray, stats: dict) -> np.ndarray:
+    """Map normalized ACT actions back to their physical data units."""
+    if "action" not in stats:
+        raise KeyError("normalization statistics are missing feature 'action'")
+    values = np.asarray(values, dtype=np.float32)
+    mean = np.asarray(stats["action"]["mean"], dtype=np.float32)
+    std = np.asarray(stats["action"]["std"], dtype=np.float32)
+    return (values * std + mean).astype(np.float32)
+
 
 class ActDatasetWriter:
     def __init__(self, root: str):
@@ -27,14 +54,16 @@ class ActDatasetWriter:
         action_values = np.asarray(actions, dtype=np.float32)
         if action_values.ndim != 2 or action_values.shape[1] != 4:
             raise ValueError(
-                f"schema v4 ACT actions must have shape (frames, 4), got {action_values.shape}"
+                f"schema v{ACT_SCHEMA_VERSION} ACT actions must have shape "
+                f"(frames, 4), got {action_values.shape}"
             )
         if not observations:
             raise ValueError("an ACT episode must contain at least one observation")
         state_values = np.stack([o["state"] for o in observations]).astype(np.float32)
-        if state_values.ndim != 2 or state_values.shape[1] != 42:
+        if state_values.ndim != 2 or state_values.shape[1] != ACT_STATE_DIM:
             raise ValueError(
-                f"schema v4 ACT state must have shape (frames, 42), got {state_values.shape}"
+                f"schema v{ACT_SCHEMA_VERSION} ACT state must have shape "
+                f"(frames, {ACT_STATE_DIM}), got {state_values.shape}"
             )
         episode_dir = self.root / episode_id
         if episode_dir.exists():
@@ -134,10 +163,10 @@ class ActDatasetWriter:
                                 z_owner=z_owner)
             metadata = {
                 **metadata,
-                "schema_version": 4,
+                "schema_version": ACT_SCHEMA_VERSION,
                 "frame_count": n_frames,
                 "action_dim": 4,
-                "state_dim": 42,
+                "state_dim": ACT_STATE_DIM,
                 "episode_kind": str(metadata.get("episode_kind", "unknown")),
             }
             record = {"episode_id": episode_id, "success": bool(success),
@@ -189,13 +218,13 @@ class ActDataset:
         ]
         # The training reader is deliberately strict.  Workbench previews and
         # inference replays may share the same on-disk format, but only
-        # successful schema-v4 expert records from the requested split are
+        # successful schema-v5 expert records from the requested split are
         # behavior-cloning inputs.
         self.records = [
             record for record in manifest_records
-            if int(record.get("schema_version", 0)) == 4
+            if int(record.get("schema_version", 0)) == ACT_SCHEMA_VERSION
             and int(record.get("action_dim", 0)) == 4
-            and int(record.get("state_dim", 0)) == 42
+            and int(record.get("state_dim", 0)) == ACT_STATE_DIM
             and str(record.get("episode_kind", "")) == "expert"
             and str(record.get("split", "")) == str(split)
             and (include_failures or bool(record.get("success", False)))
@@ -205,8 +234,12 @@ class ActDataset:
             with np.load(self.root / rec["arrays"], mmap_mode="r") as arrays:
                 if arrays["action"].ndim != 2 or arrays["action"].shape[1] != 4:
                     raise ValueError(f"{rec['episode_id']} does not contain 4-D ACT actions")
-                if arrays["state"].ndim != 2 or arrays["state"].shape[1] != 42:
-                    raise ValueError(f"{rec['episode_id']} does not contain 42-D ACT states")
+                if (arrays["state"].ndim != 2
+                        or arrays["state"].shape[1] != ACT_STATE_DIM):
+                    raise ValueError(
+                        f"{rec['episode_id']} does not contain "
+                        f"{ACT_STATE_DIM}-D ACT states"
+                    )
                 valid = (np.asarray(arrays["action_valid"], dtype=bool)
                          if "action_valid" in arrays.files
                          else np.ones(len(arrays["action"]), dtype=bool))

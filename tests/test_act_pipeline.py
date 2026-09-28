@@ -26,7 +26,7 @@ def _write_dataset(root):
         observations.append({
             "overhead": image,
             "wrist": image,
-            "state": np.full(42, state_value, dtype=np.float32),
+            "state": np.full(36, state_value, dtype=np.float32),
             "environment_state": np.array([6, 1, i], dtype=np.float32),
             "policy_mask": True,
             "phase": "approach" if i == 0 else "sweep",
@@ -76,7 +76,7 @@ def test_writer_removes_partial_episode_when_image_write_fails(tmp_path, monkeyp
         "overhead": image,
         "wrist": image,
         "inspection": image,
-        "state": np.zeros(42, dtype=np.float32),
+        "state": np.zeros(36, dtype=np.float32),
         "environment_state": np.zeros(3, dtype=np.float32),
     }
     original_save = Image.Image.save
@@ -115,7 +115,7 @@ def test_official_act_processors_normalize_and_unnormalize_same_action_contract(
     for key in ("observation.images.overhead", "observation.images.wrist"):
         batch[key] = batch[key].to(dtype=torch.float32) / 255.0
     processed = preprocessor(batch)
-    assert processed["observation.state"].shape == (2, 42)
+    assert processed["observation.state"].shape == (2, 36)
     assert processed["action"].shape == (2, 2, 4)
     assert float(processed["observation.images.overhead"].abs().max()) < 10.0
     assert float(processed["observation.images.wrist"].abs().max()) < 10.0
@@ -143,7 +143,7 @@ def test_training_output_and_inference_output_dimensions_match_config(tmp_path):
     _write_dataset(tmp_path)
     cfg = load_config(overrides=["act.device=cpu"])
     policy_cfg = build_act_config(cfg)
-    assert policy_cfg.input_features["observation.state"].shape == (42,)
+    assert policy_cfg.input_features["observation.state"].shape == (36,)
     assert policy_cfg.output_features["action"].shape == (4,)
     assert policy_cfg.chunk_size == cfg.act.chunk_size
     assert policy_cfg.n_action_steps == cfg.act.execute_steps
@@ -154,7 +154,7 @@ def test_policy_contract_rejects_retired_checkpoint_widths():
     policy_cfg = build_act_config(cfg)
     policy_cfg.input_features["observation.state"].shape = (40,)
 
-    with pytest.raises(ValueError, match="schema v4"):
+    with pytest.raises(ValueError, match="schema v5"):
         validate_act_policy_contract(policy_cfg, cfg)
 
 

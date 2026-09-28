@@ -8,6 +8,7 @@ import os
 import random
 import shutil
 import signal
+import threading
 import time
 from pathlib import Path
 
@@ -18,6 +19,8 @@ os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 
 import numpy as np
+
+from .interface import ACT_SCHEMA_VERSION, ACT_STATE_DIM
 
 
 class TrainingStopRequest:
@@ -57,6 +60,12 @@ def build_arg_parser():
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Enable MPS/CUDA float16 autocast (default follows act.use_amp)",
+    )
+    parser.add_argument(
+        "--checkpoint-start-step",
+        type=int,
+        default=None,
+        help="First completed optimizer step eligible for periodic saving",
     )
     parser.add_argument(
         "--checkpoint-every",
@@ -132,13 +141,14 @@ def validate_small_sample_gate_manifest(root: str | Path) -> dict:
     ]
     valid = [
         record for record in records
-        if int(record.get("schema_version", 0)) == 4
+        if int(record.get("schema_version", 0)) == ACT_SCHEMA_VERSION
         and int(record.get("action_dim", 0)) == 4
-        and int(record.get("state_dim", 0)) == 42
+        and int(record.get("state_dim", 0)) == ACT_STATE_DIM
         and str(record.get("episode_kind", "")) == "expert"
         and str(record.get("split", "")) == "train"
         and bool(record.get("success", False))
-        and 1 <= int(record.get("frame_count", 0)) <= 500
+        and 1 <= int(record.get("frame_count", 0))
+        <= int(record.get("max_frames", 500))
         and "target_indices" not in record
     ]
     counts = {
@@ -148,16 +158,19 @@ def validate_small_sample_gate_manifest(root: str | Path) -> dict:
     if len(records) != 6 or len(valid) != 6 or any(
             value != 1 for value in counts.values()):
         raise ValueError(
-            "small-sample gate requires exactly six schema-v4 successful "
+            "small-sample gate requires exactly six schema-v5 successful "
             f"experts, one per target; found total={len(records)}, counts={counts}"
         )
-    if ({str(record.get("layout_id", "")) for record in valid}
-            != {"paired_000"} or len({int(record.get("seed", -1))
-                                      for record in valid}) != 1):
+    if (any(str(record.get("layout_kind", "")) != "independent"
+            for record in valid)
+            or len({str(record.get("layout_id", "")) for record in valid}) != 6
+            or len({int(record.get("seed", -1)) for record in valid}) != 6
+            or len({str(record.get("layout_fingerprint", ""))
+                    for record in valid}) != 6):
         raise ValueError(
-            "small-sample gate requires the approved paired_000 same-seed layout"
+            "small-sample gate requires six independent unique layouts"
         )
-    return {"total": 6, "per_target": counts}
+    return {"total": 6, "per_target": counts, "unique_layouts": 6}
 
 
 def tracking_settings(project, space_id, private=True, static=False):
@@ -178,6 +191,67 @@ def tracking_settings(project, space_id, private=True, static=False):
         "private": bool(private),
         "static": False,
     }
+
+
+def initialize_tracker(tracker, tracking, config):
+    """Prefer the configured Hub dashboard, but keep a local run on Hub errors."""
+    if tracker is None or tracking is None:
+        return tracker, tracking
+    remote_kwargs = {"project": tracking["project"], "config": config}
+    if not tracking.get("static"):
+        remote_kwargs.update({
+            "space_id": tracking["space_id"],
+            "private": bool(tracking["private"]),
+        })
+    try:
+        tracker.init(**remote_kwargs)
+        return tracker, tracking
+    except Exception as exc:
+        print(json.dumps({
+            "event": "trackio_remote_init_failed",
+            "space_id": tracking.get("space_id", ""),
+            "error": f"{type(exc).__name__}: {exc}",
+        }), flush=True)
+    try:
+        # Trackio is local-first. Retry without Space arguments so an HF
+        # authorization, quota, or transient service error cannot abort ACT.
+        tracker.init(project=tracking["project"], config=config)
+    except Exception as exc:
+        print(json.dumps({
+            "event": "trackio_local_init_failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }), flush=True)
+        return None, None
+    print(json.dumps({
+        "event": "trackio_local_fallback",
+        "project": tracking["project"],
+    }), flush=True)
+    # Retain local metric logging but disable the remote/static sync thread.
+    return tracker, None
+
+
+def sync_static_tracking(tracker, tracking) -> bool:
+    """Publish the local Trackio project to its already-public static Space."""
+    if tracker is None or tracking is None or not tracking.get("static"):
+        return False
+    try:
+        synced_space = tracker.sync(
+            project=tracking["project"],
+            space_id=tracking["space_id"],
+            sdk="static",
+        )
+    except Exception as exc:
+        print(json.dumps({
+            "event": "trackio_static_sync_failed",
+            "space_id": tracking["space_id"],
+            "error": f"{type(exc).__name__}: {exc}",
+        }), flush=True)
+        return False
+    print(json.dumps({
+        "event": "trackio_static_sync_complete",
+        "space_id": str(synced_space),
+    }), flush=True)
+    return True
 
 
 def _numeric_metrics(metrics):
@@ -220,6 +294,16 @@ def _checkpoint_dir(out_root: Path, step: int) -> Path:
     return out_root / "checkpoints" / f"step_{int(step):06d}"
 
 
+def checkpoint_due(completed_steps: int, first_step: int,
+                   interval: int) -> bool:
+    """Return whether a periodic checkpoint is due at this completed step."""
+    completed_steps = int(completed_steps)
+    first_step = int(first_step)
+    interval = int(interval)
+    return (interval > 0 and first_step > 0 and completed_steps >= first_step
+            and (completed_steps - first_step) % interval == 0)
+
+
 def _prune_checkpoints(out_root: Path, keep_checkpoints: int) -> None:
     if keep_checkpoints <= 0:
         return
@@ -252,8 +336,8 @@ def save_checkpoint(policy, preprocessor, postprocessor, optimizer, out_root: Pa
         "python_rng_state": random.getstate(),
         "dataset": str(dataset_root),
         "device": str(device),
-        "schema_version": 4,
-        "state_dim": 42,
+        "schema_version": ACT_SCHEMA_VERSION,
+        "state_dim": ACT_STATE_DIM,
         "action_dim": 4,
         "elapsed_seconds": float(elapsed_seconds),
     }, checkpoint_root / "training_state.pt")
@@ -322,6 +406,10 @@ def main(argv=None) -> int:
         cfg.act.get("use_amp", False) if args.amp is None else args.amp
     ) and device_type in {"mps", "cuda"}
     scaler = torch.amp.GradScaler(device_type, enabled=amp_enabled)
+    checkpoint_start = int(
+        cfg.act.get("checkpoint_start_step", 1)
+        if args.checkpoint_start_step is None else args.checkpoint_start_step
+    )
     checkpoint_every = int(
         cfg.act.get("checkpoint_every_steps", 500)
         if args.checkpoint_every is None else args.checkpoint_every
@@ -347,11 +435,13 @@ def main(argv=None) -> int:
             "action_dim": int(resume_state.get("action_dim", 0)),
         }
         required_contract = {
-            "schema_version": 4, "state_dim": 42, "action_dim": 4,
+            "schema_version": ACT_SCHEMA_VERSION,
+            "state_dim": ACT_STATE_DIM,
+            "action_dim": 4,
         }
         if checkpoint_contract != required_contract:
             raise ValueError(
-                "resume checkpoint is not compatible with schema v4: "
+                f"resume checkpoint is not compatible with schema v{ACT_SCHEMA_VERSION}: "
                 f"found {checkpoint_contract}, required {required_contract}"
             )
         optimizer.load_state_dict(resume_state["optimizer"])
@@ -378,6 +468,11 @@ def main(argv=None) -> int:
         static=args.trackio_static,
     )
     tracker = None
+    tracking_sync_thread = None
+    tracking_sync_interval = max(
+        0.0, float(cfg.act.get("tracking_sync_interval_seconds", 60.0))
+    )
+    next_tracking_sync = time.monotonic() + tracking_sync_interval
     if tracking is not None:
         try:
             import trackio
@@ -387,32 +482,27 @@ def main(argv=None) -> int:
                 "install the ACT extras first"
             ) from exc
         tracker = trackio
-        tracking_init = {key: value for key, value in tracking.items()
-                         if key not in {"space_id", "private", "static"}}
-        if not tracking["static"]:
-            tracking_init.update({
-                "space_id": tracking["space_id"],
-                "private": tracking["private"],
-            })
-        tracker.init(
-            **tracking_init,
-            config={
-                "dataset": str(dataset_root),
-                "dataset_valid_frames": int(len(dataset)),
-                "dataset_manifest": manifest_summary,
-                "batch_size": batch_size,
-                "max_steps": max_steps,
-                "checkpoint_every_steps": checkpoint_every,
-                "keep_checkpoints": keep_checkpoints,
-                "resume_step": start_step,
-                "chunk_size": int(policy_cfg.chunk_size),
-                "action_dim": int(policy_cfg.output_features["action"].shape[0]),
-                "state_dim": int(
-                    policy_cfg.input_features["observation.state"].shape[0]
-                ),
-                "schema_version": 4,
-                "device": str(policy_cfg.device),
-            },
+        tracking_config = {
+            "dataset": str(dataset_root),
+            "dataset_valid_frames": int(len(dataset)),
+            "dataset_manifest": manifest_summary,
+            "batch_size": batch_size,
+            "max_steps": max_steps,
+            "checkpoint_start_step": checkpoint_start,
+            "checkpoint_every_steps": checkpoint_every,
+            "keep_checkpoints": keep_checkpoints,
+            "tracking_sync_interval_seconds": tracking_sync_interval,
+            "resume_step": start_step,
+            "chunk_size": int(policy_cfg.chunk_size),
+            "action_dim": int(policy_cfg.output_features["action"].shape[0]),
+            "state_dim": int(
+                policy_cfg.input_features["observation.state"].shape[0]
+            ),
+            "schema_version": ACT_SCHEMA_VERSION,
+            "device": str(policy_cfg.device),
+        }
+        tracker, tracking = initialize_tracker(
+            tracker, tracking, tracking_config
         )
     iterator = iter(loader)
     started = time.monotonic()
@@ -459,7 +549,7 @@ def main(argv=None) -> int:
             elapsed_seconds = (
                 elapsed_before_resume + time.monotonic() - started
             )
-            if checkpoint_every > 0 and completed_steps % checkpoint_every == 0:
+            if checkpoint_due(completed_steps, checkpoint_start, checkpoint_every):
                 checkpoint_root = save_checkpoint(
                     policy, preprocessor, postprocessor, optimizer, out_root,
                     completed_steps, dataset_root, str(policy_cfg.device),
@@ -468,7 +558,7 @@ def main(argv=None) -> int:
                 print(json.dumps({
                     "checkpoint_step": completed_steps,
                     "checkpoint": str(checkpoint_root),
-                }))
+                }), flush=True)
             if step % 100 == 0:
                 record = {
                     "step": step,
@@ -484,13 +574,37 @@ def main(argv=None) -> int:
                         key: value for key, value in record.items()
                         if key != "device"
                     })
+            if (tracker is not None and tracking is not None
+                    and tracking["static"] and tracking_sync_interval > 0
+                    and time.monotonic() >= next_tracking_sync
+                    and (tracking_sync_thread is None
+                         or not tracking_sync_thread.is_alive())):
+                tracking_sync_thread = threading.Thread(
+                    target=sync_static_tracking,
+                    args=(tracker, tracking),
+                    name="trackio-static-sync",
+                    daemon=True,
+                )
+                tracking_sync_thread.start()
+                next_tracking_sync = time.monotonic() + tracking_sync_interval
             if stop_request.requested:
                 break
             if elapsed_seconds >= time_budget_seconds:
                 break
     finally:
+        if tracking_sync_thread is not None and tracking_sync_thread.is_alive():
+            tracking_sync_thread.join(timeout=120.0)
         if tracker is not None:
             tracker.finish()
+            if (tracking is not None and tracking["static"]
+                    and (tracking_sync_thread is None
+                         or not tracking_sync_thread.is_alive())):
+                sync_static_tracking(tracker, tracking)
+            elif tracking_sync_thread is not None and tracking_sync_thread.is_alive():
+                print(json.dumps({
+                    "event": "trackio_final_sync_skipped",
+                    "reason": "previous static sync is still running",
+                }), flush=True)
         if stop_request.requested and checkpoint_every > 0 and completed_steps > start_step:
             try:
                 checkpoint_root = save_checkpoint(
@@ -520,6 +634,7 @@ def main(argv=None) -> int:
             "steps": completed_steps,
             "interrupted": bool(stop_request.requested),
             "checkpoint_every_steps": checkpoint_every,
+            "checkpoint_start_step": checkpoint_start,
             "keep_checkpoints": keep_checkpoints,
             "dataset": str(dataset_root),
             "device": str(policy_cfg.device),
@@ -528,7 +643,7 @@ def main(argv=None) -> int:
             "state_dim": int(
                 policy_cfg.input_features["observation.state"].shape[0]
             ),
-            "schema_version": 4,
+            "schema_version": ACT_SCHEMA_VERSION,
             "elapsed_seconds": (
                 elapsed_before_resume + time.monotonic() - started
             ),

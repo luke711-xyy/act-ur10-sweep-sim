@@ -373,6 +373,9 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                 if pending_stop:
                     termination_reason = pending_stop
                     break
+            # Keep the same 25 Hz state-history cadence used by expert
+            # demonstrations even though ACT is queried only at 5 Hz.
+            builder.advance_state_history(env, contact_latched=contact)
             last_action = final_reference.astype(np.float32, copy=True)
             sampled_frames += 1
             if failure or termination_reason:

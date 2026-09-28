@@ -54,7 +54,7 @@ def build_act_config(cfg):
 
 
 def validate_act_policy_contract(policy_cfg, cfg) -> None:
-    """Reject checkpoints built for the retired 40D/3D interface."""
+    """Reject checkpoints built for an incompatible ACT state/action contract."""
     state_width = int(
         policy_cfg.input_features["observation.state"].shape[0]
     )
@@ -65,7 +65,7 @@ def validate_act_policy_contract(policy_cfg, cfg) -> None:
         raise ValueError(
             "ACT checkpoint/interface mismatch: "
             f"checkpoint state/action={state_width}/{action_width}, "
-            f"required={expected_state}/{expected_action} (schema v4)"
+            f"required={expected_state}/{expected_action} (schema v5)"
         )
 
 

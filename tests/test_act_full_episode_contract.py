@@ -56,7 +56,7 @@ class _FakeEnv:
         return np.zeros((size[1], size[0], 3), dtype=np.uint8)
 
 
-def _write_v4_episode(root, episode_id="expert_1", *, episode_kind="expert",
+def _write_v5_episode(root, episode_id="expert_1", *, episode_kind="expert",
                       success=True, target_count=1, phases=None,
                       split="train", layout_id=""):
     phases = phases or ["approach", "descent", "contact_build", "sweep"]
@@ -66,7 +66,7 @@ def _write_v4_episode(root, episode_id="expert_1", *, episode_kind="expert",
         observations.append({
             "overhead": image,
             "wrist": image,
-            "state": np.full(42, index, dtype=np.float32),
+            "state": np.full(36, index, dtype=np.float32),
             "environment_state": np.array([6, target_count, 0], dtype=np.float32),
             "phase": phase,
             "policy_mask": phase in {"approach", "descent", "contact_build", "sweep"},
@@ -87,10 +87,12 @@ def _write_v4_episode(root, episode_id="expert_1", *, episode_kind="expert",
             "episode_kind": episode_kind,
             "split": split,
             "target_count": target_count,
+            "count": 6,
             "total_count": 6,
             "layout_id": layout_id,
             "layout_kind": "paired" if layout_id.startswith("paired_") else "independent",
-            "seed": 4100,
+            "seed": 4100 if layout_id.startswith("paired_") else 4100 + target_count,
+            "layout_fingerprint": f"fp_{layout_id or episode_id}",
         },
     )
 
@@ -109,26 +111,31 @@ def test_full_episode_action_contract_accumulates_xyz_and_yaw():
     np.testing.assert_allclose(absolute[1], [0.39, -0.08, 0.04, 0.10])
 
 
-def test_observation_state_is_42d_and_keeps_current_and_previous_contact_latch():
+def test_observation_state_is_36d_and_keeps_current_and_200ms_contact_latch():
     cfg = load_config(overrides=["act.image_size=[8,8]"])
     builder = ACTObservationBuilder(cfg)
     env = _FakeEnv()
+    env.time = 0.0
 
     first = builder.observe(env, contact_latched=False)
+    for sample in range(1, 6):
+        env.time = sample * 0.04
+        builder.advance_state_history(env, contact_latched=False)
+    env.time = 0.20
     second = builder.observe(env, contact_latched=True)
 
     assert builder.spec.action_dim == 4
-    assert builder.spec.state_dim == 42
-    assert first["observation.state"].shape == (42,)
-    assert first["observation.state"][20] == 0.0
-    assert first["observation.state"][41] == 0.0
-    assert second["observation.state"][20] == 1.0
-    assert second["observation.state"][41] == 0.0
+    assert builder.spec.state_dim == 36
+    assert first["observation.state"].shape == (36,)
+    assert first["observation.state"][17] == 0.0
+    assert first["observation.state"][35] == 0.0
+    assert second["observation.state"][17] == 1.0
+    assert second["observation.state"][35] == 0.0
 
     batch = builder.torch_batch(second)
     assert "contact_latched" not in batch
     assert "t" not in batch
-    assert batch["observation.state"].shape == (42,)
+    assert batch["observation.state"].shape == (36,)
 
 
 def test_policy_substep_executes_z_before_contact_and_ignores_it_after_contact():
@@ -281,7 +288,7 @@ def test_training_reader_and_act_rollout_work_when_astar_entrypoints_raise(
         monkeypatch.setattr(expert, name, forbidden)
 
     dataset_root = tmp_path / "dataset"
-    _write_v4_episode(dataset_root)
+    _write_v5_episode(dataset_root)
     assert len(ActDataset(str(dataset_root), chunk_size=2)) > 0
 
     class FakePolicy:
@@ -376,22 +383,22 @@ def test_checkpoint_inference_does_not_rescan_training_images(tmp_path, monkeypa
     assert evaluate._inference_dataset_stats(cfg, "checkpoint") is None
 
 
-def test_schema_v4_training_reader_accepts_only_successful_4d_experts(tmp_path):
-    _write_v4_episode(tmp_path, "expert_success")
-    _write_v4_episode(tmp_path, "inference_success", episode_kind="inference")
-    _write_v4_episode(tmp_path, "expert_failure", success=False)
+def test_schema_v5_training_reader_accepts_only_successful_4d_experts(tmp_path):
+    _write_v5_episode(tmp_path, "expert_success")
+    _write_v5_episode(tmp_path, "inference_success", episode_kind="inference")
+    _write_v5_episode(tmp_path, "expert_failure", success=False)
 
     dataset = ActDataset(str(tmp_path), chunk_size=2)
 
     assert [record["episode_id"] for record in dataset.records] == ["expert_success"]
-    assert dataset.records[0]["schema_version"] == 4
+    assert dataset.records[0]["schema_version"] == 5
     assert dataset.records[0]["action_dim"] == 4
-    assert dataset[0]["observation.state"].shape == (42,)
+    assert dataset[0]["observation.state"].shape == (36,)
     assert dataset[0]["action"].shape == (2, 4)
 
 
 def test_phase_sampling_weights_allocate_35_percent_to_approach_and_descent(tmp_path):
-    _write_v4_episode(
+    _write_v5_episode(
         tmp_path,
         phases=["approach", "descent", "contact_build", "sweep", "sweep", "sweep"],
     )
@@ -408,19 +415,20 @@ def test_phase_sampling_weights_allocate_35_percent_to_approach_and_descent(tmp_
     assert phase_weights["contact_build"] + phase_weights["sweep"] == pytest.approx(0.65)
 
 
-def test_dataset_plans_have_exact_paired_independent_and_split_counts():
+def test_dataset_plans_have_120_independent_training_layouts_and_disjoint_splits():
     preview = preview_batch_plan(4100)
     train = training_episode_plan(4100)
-    validation = evaluation_layout_plan("val", 60000, layouts_per_target=10)
-    test = evaluation_layout_plan("test", 90000, layouts_per_target=20)
+    validation = evaluation_layout_plan("val", 1_000_000, layouts_per_target=10)
+    test = evaluation_layout_plan("test", 2_000_000, layouts_per_target=20)
 
     assert [(item.target_count, item.seed) for item in preview] == [
         (1, 4100), (2, 4100), (3, 4100),
         (4, 4100), (5, 4100), (6, 4100),
     ]
     assert len(train) == 120
-    assert sum(item.layout_kind == "paired" for item in train) == 48
-    assert sum(item.layout_kind == "independent" for item in train) == 72
+    assert all(item.layout_kind == "independent" for item in train)
+    assert len({item.layout_id for item in train}) == 120
+    assert len({item.seed for item in train}) == 120
     for target_count in range(1, 7):
         assert sum(item.target_count == target_count for item in train) == 20
     assert len(validation) == 60
@@ -435,16 +443,17 @@ def test_manifest_validator_requires_exactly_20_successful_experts_per_target(tm
     for index, spec in enumerate(training_episode_plan(4100)):
         records.append({
                 "episode_id": f"expert_{index:03d}",
-                "schema_version": 4,
+                "schema_version": 5,
                 "episode_kind": "expert",
                 "action_dim": 4,
-                "state_dim": 42,
+                "state_dim": 36,
                 "frame_count": 100,
                 "success": True,
                 "split": "train",
                 "target_count": spec.target_count,
                 "layout_id": spec.layout_id,
                 "layout_kind": spec.layout_kind,
+                "layout_fingerprint": f"fp_{index:03d}",
                 "seed": spec.seed,
             })
     manifest = tmp_path / "manifest.jsonl"
@@ -457,15 +466,15 @@ def test_manifest_validator_requires_exactly_20_successful_experts_per_target(tm
 
     assert summary["total"] == 120
     assert summary["per_target"] == {str(index): 20 for index in range(1, 7)}
-    assert summary["paired_records"] == 48
-    assert summary["independent_records"] == 72
+    assert summary["independent_records"] == 120
+    assert summary["unique_layouts"] == 120
 
 
 def test_approved_same_layout_previews_promote_losslessly_to_train_set(tmp_path):
     preview_root = tmp_path / "preview"
     train_root = tmp_path / "train"
     for target_count in range(1, 7):
-        _write_v4_episode(
+        _write_v5_episode(
             preview_root,
             f"preview_n{target_count}",
             episode_kind="expert_preview",
@@ -489,7 +498,7 @@ def test_all_successful_previews_can_be_promoted_to_a_pilot_train_set(tmp_path):
     preview_root = tmp_path / "preview"
     train_root = tmp_path / "train"
     for target_count in range(1, 7):
-        _write_v4_episode(
+        _write_v5_episode(
             preview_root,
             f"preview_goal_{target_count}_0001",
             episode_kind="expert_preview",
@@ -518,16 +527,17 @@ def test_training_manifest_rejects_planner_target_identity(tmp_path):
     for index, spec in enumerate(training_episode_plan(4100)):
         records.append({
             "episode_id": f"expert_{index:03d}",
-            "schema_version": 4,
+            "schema_version": 5,
             "episode_kind": "expert",
             "action_dim": 4,
-            "state_dim": 42,
+            "state_dim": 36,
             "frame_count": 100,
             "success": True,
             "split": "train",
             "target_count": spec.target_count,
             "layout_id": spec.layout_id,
             "layout_kind": spec.layout_kind,
+            "layout_fingerprint": f"fp_{index:03d}",
             "seed": spec.seed,
         })
     records[0]["target_indices"] = [0]

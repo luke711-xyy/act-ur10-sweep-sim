@@ -186,6 +186,9 @@ class SweepEnv:
     def normal_force(self) -> float:
         return float(self.ee.normal_force())
 
+    def normal_force_observation(self) -> float:
+        return float(self.ee.normal_force_observation())
+
     def wrench(self) -> np.ndarray:
         return self.ee.wrench()
 
