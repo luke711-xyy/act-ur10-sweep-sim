@@ -40,7 +40,10 @@ MENAGERIE_ROOT = Path(__file__).resolve().parent / "assets" / "universal_robots_
 MENAGERIE_XML = MENAGERIE_ROOT / "ur10e.xml"
 ROBOTIQ_ROOT = Path(__file__).resolve().parent / "assets" / "robotiq_2f85"
 ROBOTIQ_MESH_ROOT = ROBOTIQ_ROOT / "assets"
+RUDRA_UR10_ROOT = Path(__file__).resolve().parent / "assets" / "rudra_ur10_cb3"
+RUDRA_UR10_XML = RUDRA_UR10_ROOT / "ur10.xml"
 UR10_MODEL_TYPES = {"ur10_cb3", "ur10e", "ur10e_menagerie"}
+RUDRA_UR10_MODEL_TYPE = "ur10_cb3_rudra"
 
 
 # Official Robotiq 2F-85 meshes flattened at the model's fully closed pose.
@@ -100,11 +103,26 @@ def scene_assets() -> Dict[str, bytes]:
             for path in ROBOTIQ_MESH_ROOT.iterdir()
             if path.is_file() and path.suffix.lower() in suffixes
         })
+    rudra_mesh_root = RUDRA_UR10_ROOT / "meshes"
+    if rudra_mesh_root.is_dir():
+        assets.update({
+            f"assets/rudra_ur10_cb3/meshes/{path.name}": path.read_bytes()
+            for path in rudra_mesh_root.iterdir()
+            if path.is_file() and path.suffix.lower() in suffixes
+        })
     return assets
 
 
 def _uses_menagerie(cfg) -> bool:
     return str(cfg.end_effector.type) in UR10_MODEL_TYPES
+
+
+def _uses_rudra_ur10(cfg) -> bool:
+    return str(cfg.end_effector.type) == RUDRA_UR10_MODEL_TYPE
+
+
+def _uses_mesh_assets(cfg) -> bool:
+    return _uses_menagerie(cfg) or _uses_rudra_ur10(cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +201,7 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
     # The Menagerie meshes are declared with meshdir="assets".  The actual
     # bytes are supplied by ``scene_assets`` when the model is loaded.
     _sub(root, "compiler", angle="radian", autolimits="true",
-         meshdir="assets" if _uses_menagerie(cfg) else None)
+         meshdir="assets" if _uses_mesh_assets(cfg) else None)
     option = _sub(
         root,
         "option",
@@ -250,6 +268,8 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
          friction=(0.5, 0.01, 0.0002), solref=(0.004, 1.0), group=0)
     if _uses_menagerie(cfg):
         _add_menagerie_defaults_and_assets(root, default, asset)
+    elif _uses_rudra_ur10(cfg):
+        _add_rudra_ur10_defaults_and_assets(root, default, asset)
 
     # ---------------- worldbody ----------------
     world = _sub(root, "worldbody")
@@ -285,6 +305,8 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
     _add_target_tray(world, cfg, top_z)
     if _uses_menagerie(cfg):
         _add_menagerie_ur10e(world, cfg)
+    elif _uses_rudra_ur10(cfg):
+        _add_rudra_ur10(world, cfg)
     elif str(cfg.end_effector.type) == "ur10_cb3":
         # Kept as a compatibility path for old explicitly-selected configs.
         add_ur10_arm(world, cfg)
@@ -298,6 +320,8 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
     actuator = _sub(root, "actuator")
     if _uses_menagerie(cfg):
         _add_menagerie_actuators(actuator)
+    elif _uses_rudra_ur10(cfg):
+        _add_rudra_ur10_actuators(actuator, cfg)
     elif str(ee_cfg.type) == "ur10_cb3":
         # Kept as a compatibility path for old explicitly-selected configs.
         add_ur10_actuators(actuator, cfg)
@@ -313,6 +337,8 @@ def build_scene_xml(cfg, layout: List[dict]) -> str:
     # ---------------- sensors ----------------
     sensor = _sub(root, "sensor")
     if _uses_menagerie(cfg):
+        _add_ur10_sensors(sensor)
+    elif _uses_rudra_ur10(cfg):
         _add_ur10_sensors(sensor)
     elif str(ee_cfg.type) == "ur10_cb3":
         # Kept as a compatibility path for old explicitly-selected configs.
@@ -345,6 +371,10 @@ def _add_menagerie_defaults_and_assets(root: ET.Element, default: ET.Element,
         for child in source_asset:
             asset.append(deepcopy(child))
 
+    _add_robotiq_assets(asset)
+
+
+def _add_robotiq_assets(asset: ET.Element) -> None:
     _sub(asset, "material", name="robotiq_black", rgba=(0.149, 0.149, 0.149, 1.0))
     _sub(asset, "material", name="robotiq_gray", rgba=(0.4627, 0.4627, 0.4627, 1.0))
     _sub(asset, "material", name="robotiq_metal", rgba=(0.58, 0.58, 0.58, 1.0))
@@ -353,6 +383,30 @@ def _add_menagerie_defaults_and_assets(root: ET.Element, default: ET.Element,
                       "pad", "silicone_pad", "spring_link"):
         _sub(asset, "mesh", name=f"robotiq_{mesh_name}",
              file=f"robotiq_2f85/{mesh_name}.stl", scale=(0.001, 0.001, 0.001))
+
+
+def _rudra_ur10_root() -> ET.Element:
+    if not RUDRA_UR10_XML.is_file():
+        raise FileNotFoundError(f"vendored Rudra UR10 CB3 model is missing: {RUDRA_UR10_XML}")
+    return ET.parse(RUDRA_UR10_XML).getroot()
+
+
+def _add_rudra_ur10_defaults_and_assets(root: ET.Element, default: ET.Element,
+                                        asset: ET.Element) -> None:
+    """Merge the upstream CB3 visual MJCF and the task gripper declarations."""
+    source = _rudra_ur10_root()
+    source_default = source.find("default")
+    if source_default is not None:
+        for child in source_default:
+            default.append(deepcopy(child))
+    source_asset = source.find("asset")
+    if source_asset is not None:
+        for child in source_asset:
+            imported = deepcopy(child)
+            if imported.tag == "mesh" and imported.get("file"):
+                imported.set("file", f"rudra_ur10_cb3/meshes/{Path(imported.get('file')).name}")
+            asset.append(imported)
+    _add_robotiq_assets(asset)
 
 
 def _add_fixed_robotiq_2f85(tool: ET.Element, cfg) -> None:
@@ -493,12 +547,108 @@ def _add_menagerie_ur10e(world: ET.Element, cfg) -> None:
     world.append(base)
 
 
+def _add_rudra_ur10(world: ET.Element, cfg) -> None:
+    """Mount the upstream CB3 arm while retaining this project's tool/camera."""
+    source = _rudra_ur10_root()
+    base_source = source.find("./worldbody/body[@name='ur_base']")
+    if base_source is None:
+        raise ValueError("Rudra UR10 model has no ur_base body")
+    base = deepcopy(base_source)
+    base.set("name", "base")
+    base_pos = cfg.end_effector.get("base_pos", (0.70, 0.0, 0.04))
+    base.set("pos", _fmt(base_pos))
+
+    for old_name, new_name in (
+        ("ur_shoulder", "shoulder_link"),
+        ("ur_upper_arm", "upper_arm_link"),
+        ("ur_forearm", "forearm_link"),
+        ("ur_wrist_1", "wrist_1_link"),
+        ("ur_wrist_2", "wrist_2_link"),
+        ("ur_wrist_3", "wrist_3_link"),
+    ):
+        body = base.find(f".//body[@name='{old_name}']")
+        if body is None:
+            raise ValueError(f"Rudra UR10 model has no {old_name} body")
+        body.set("name", new_name)
+
+    # The upstream MJCF leaves its hinge joints unlimited, which makes their
+    # compiled jnt_range equal [0, 0].  The task-space IK clips against those
+    # ranges, so import the UR10 CB3 limits from the accompanying source YAML.
+    for index in range(6):
+        joint_name = f"joint_{index}"
+        joint = base.find(f".//joint[@name='{joint_name}']")
+        if joint is None:
+            raise ValueError(f"Rudra UR10 model has no {joint_name}")
+        limit = np.pi if index == 2 else 2.0 * np.pi
+        joint.set("limited", "true")
+        joint.set("range", _fmt((-limit, limit)))
+
+    flange = base.find(".//body[@name='flange_dh']")
+    wrist3 = base.find(".//body[@name='wrist_3_link']")
+    if flange is None or wrist3 is None:
+        raise ValueError("Rudra UR10 model has no wrist flange frame")
+    ee = cfg.end_effector
+    # ``flange_dh`` is already the upstream model's tool flange.  Do not
+    # reuse the Menagerie offset here: its wrist_3_link attachment site is
+    # 10 cm away from the wrist body, while Rudra's flange frame is explicit.
+    brush_mount_pos = tuple(float(v) for v in ee.get("rudra_brush_mount_pos", (0.0, 0.0, 0.0)))
+    tool = ET.Element("body", {"name": "tool", "pos": _fmt(brush_mount_pos),
+                                "quat": "-1 1 0 0"})
+    _sub(tool, "site", name="ft_site", pos=(0.0, 0.0, 0.0), size=(0.004,),
+         rgba=(1.0, 0.2, 0.2, 0.4))
+    _add_fixed_robotiq_2f85(tool, cfg)
+    flange.append(tool)
+
+    wrist_camera = ee.get("rudra_wrist_camera", ee.get("wrist_camera", {}))
+    _sub(wrist3, "camera", name="wrist_cam",
+         pos=wrist_camera.get("pos", (0.0, -0.05, 0.19)),
+         xyaxes=wrist_camera.get("xyaxes", (1.0, 0.0, 0.0,
+                                              0.0, 0.845489, -0.533993)),
+         fovy=float(wrist_camera.get("fovy_deg", 58.0)))
+    if bool(ee.get("gravity_compensation", True)):
+        for body in base.iter("body"):
+            body.set("gravcomp", "1")
+
+    base_z = float(base_pos[2])
+    table_z = float(cfg.table.top_z)
+    if base_z > table_z + 1e-6:
+        _add_robot_pedestal(world, base_pos, base_z, table_z)
+    world.append(base)
+
+
+def _add_robot_pedestal(world: ET.Element, base_pos, base_z: float, table_z: float) -> None:
+    mount = _sub(world, "body", name="robot_mount")
+    _sub(mount, "geom", name="robot_mount_pedestal", type="cylinder",
+         size=(0.13, (base_z - table_z) / 2.0),
+         pos=(float(base_pos[0]), float(base_pos[1]), (base_z + table_z) / 2.0),
+         material="mat_tip", friction=(0.6, 0.01, 0.0002), condim=4)
+
+
 def _add_menagerie_actuators(actuator: ET.Element) -> None:
     source = _menagerie_root()
     source_actuator = source.find("actuator")
     if source_actuator is not None:
         for child in source_actuator:
             actuator.append(deepcopy(child))
+
+
+def _add_rudra_ur10_actuators(actuator: ET.Element, cfg) -> None:
+    """Add UR10 position servos to the upstream model's six bare joints.
+
+    The upstream asset supplies only the arm bodies and joints.  Match the
+    position-servo gains and per-joint torque limits used by the existing
+    UR10 MuJoCo model so that Cartesian/admittance control retains its known
+    tracking behaviour with the replacement arm geometry.
+    """
+    ee = cfg.end_effector
+    kp = float(ee.get("joint_kp", 5000.0))
+    kv = float(ee.get("joint_kd", 500.0))
+    torque_limits = (330.0, 330.0, 150.0, 56.0, 56.0, 56.0)
+    for index, torque_limit in enumerate(torque_limits):
+        name = f"joint_{index}"
+        _sub(actuator, "position", name=f"{name}_act", joint=name,
+             kp=kp, kv=kv,
+             forcerange=(-torque_limit, torque_limit))
 
 
 def _add_ur10_sensors(sensor: ET.Element) -> None:

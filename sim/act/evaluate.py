@@ -15,7 +15,11 @@ from ..environments.sweep_env import SweepEnv
 from .interface import ACTObservationBuilder
 from .interface import action_deltas_to_absolute
 from .dataset import ActDataset
-from .policy import build_act_policy, build_act_processors
+from .policy import (
+    build_act_policy,
+    build_act_processors,
+    ordinary_target_count_only_from_config,
+)
 from .realtime import ActionChunkScheduler
 from .rollout import (
     ActRolloutResult,
@@ -119,7 +123,10 @@ def _inference_dataset_stats(cfg, resolved_model_path: str | None):
     if not (dataset_root / "manifest.jsonl").exists():
         return None
     return ActDataset(
-        str(dataset_root), chunk_size=int(cfg.act.chunk_size)
+        str(dataset_root), chunk_size=int(cfg.act.chunk_size),
+        ordinary_target_count_only=bool(
+            cfg.act.get("ordinary_target_count_only", False)
+        ),
     ).stats
 
 
@@ -201,7 +208,13 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
     def predict(observation, start_reference):
         import torch
 
-        batch = builder.torch_batch(observation)
+        batch = builder.torch_batch(
+            observation,
+            target_count=target_count,
+            ordinary_target_count_only=ordinary_target_count_only_from_config(
+                policy_cfg
+            ),
+        )
         batch = preprocessor(batch)
         with torch.no_grad():
             normalized = policy.predict_action_chunk(batch)

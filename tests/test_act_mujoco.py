@@ -8,7 +8,7 @@ from xml.etree import ElementTree as ET
 from sim.act.dataset import normalize_feature, unnormalize_action
 from sim.act.interface import ACTObservationBuilder
 from sim.act.realtime import ActionChunkScheduler
-from sim.config import load_config
+from sim.config import load_config as _load_config
 from sim.environments.sweep_env import SweepEnv
 from sim.environments.ur10_interface import UR10CB3EndEffector
 from sim.model.scene_builder import build_scene_xml, scene_assets
@@ -19,6 +19,11 @@ from sim.act.expert import (_grid_astar, _path_capture_mask, _path_turn_count,
                             ExpertPlan, expert_target_indices, expert_waypoints,
                             plan_expert_sweep, sample_polyline)
 from sim.act.rollout import _expert_execution_path, _force_loop
+
+
+def load_config(overrides=None):
+    """Keep this legacy UR10e contract suite pinned to its named model."""
+    return _load_config(overrides=["end_effector.type=ur10e", *(overrides or [])])
 
 
 def test_ur10e_scene_uses_menagerie_structure_and_custom_brush():
@@ -114,7 +119,9 @@ def test_wrist_camera_is_pitched_towards_tool_contact_region():
 
 
 def test_wrist_camera_rotates_about_the_vertical_installation_axis():
-    cfg = load_config()
+    # This is the original Menagerie mount contract. Rudra uses a separate
+    # camera offset to compensate for its 10 cm wrist-frame origin difference.
+    cfg = load_config(overrides=["end_effector.type=ur10e"])
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
     root = ET.fromstring(xml)
     camera = root.find(".//body[@name='wrist_3_link']/camera[@name='wrist_cam']")

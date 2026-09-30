@@ -62,8 +62,9 @@ class ACTObservationBuilder:
 
     Object positions are intentionally absent.  Robot state is 18-D per
     sample; current and 200 ms-old samples form ``observation.state`` (36-D).
-    Physical total, target count and fully-collected count are sent once in the
-    separate 3-D ``observation.environment_state`` feature.
+    Physical total, target count and fully-collected count are available in
+    simulator telemetry. Legacy ACT can receive all three; target-count-only
+    ACT receives just the selected goal as a one-value environment feature.
     """
 
     def __init__(self, cfg):
@@ -164,7 +165,9 @@ class ACTObservationBuilder:
         return observation
 
     @staticmethod
-    def torch_batch(observation: dict[str, Any], device: str | None = None):
+    def torch_batch(observation: dict[str, Any], device: str | None = None,
+                    *, target_count: int | None = None,
+                    ordinary_target_count_only: bool = False):
         import torch
 
         batch = {}
@@ -173,6 +176,20 @@ class ACTObservationBuilder:
             # contact_latched is already encoded in the 36-D current/history
             # state and must not become an undeclared extra LeRobot feature.
             if key in {"t", "contact_latched"}:
+                continue
+            if (key == "observation.environment_state"
+                    and ordinary_target_count_only):
+                if target_count is None:
+                    values = np.asarray(value).reshape(-1)
+                    if values.size < 2:
+                        raise ValueError(
+                            "target_count is required for target-count-only ACT input"
+                        )
+                    target_count = int(values[1])
+                target_count = int(target_count)
+                if not 1 <= target_count <= 6:
+                    raise ValueError("target_count must be between 1 and 6")
+                batch[key] = torch.tensor([target_count], dtype=torch.float32)
                 continue
             # Leave batching, device placement and normalization to the
             # official LeRobot ACT preprocessor.  This method now only turns

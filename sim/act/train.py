@@ -173,6 +173,16 @@ def validate_small_sample_gate_manifest(root: str | Path) -> dict:
     return {"total": 6, "per_target": counts, "unique_layouts": 6}
 
 
+def validate_configured_training_manifest(dataset_root, cfg) -> dict:
+    """Validate the balanced expert set size recorded with this run's config."""
+    from .collect_dataset import validate_training_manifest
+
+    episodes_per_target = int(cfg.act.get("training_episodes_per_target", 20))
+    return validate_training_manifest(
+        dataset_root, episodes_per_target=episodes_per_target
+    )
+
+
 def tracking_settings(project, space_id, private=True, static=False):
     if (project is None) != (space_id is None):
         raise ValueError("Trackio project and space must be provided together")
@@ -355,10 +365,7 @@ def main(argv=None) -> int:
     import torch
 
     from ..config import load_config
-    from .collect_dataset import (
-        validate_preview_training_manifest,
-        validate_training_manifest,
-    )
+    from .collect_dataset import validate_preview_training_manifest
     from .dataset import ActDataset
     from .policy import build_act_policy, build_act_processors
 
@@ -371,11 +378,14 @@ def main(argv=None) -> int:
     elif args.small_sample_gate:
         manifest_summary = validate_small_sample_gate_manifest(dataset_root)
     else:
-        manifest_summary = validate_training_manifest(dataset_root)
+        manifest_summary = validate_configured_training_manifest(dataset_root, cfg)
     dataset = ActDataset(
         dataset_root,
         chunk_size=int(cfg.act.chunk_size),
         image_stat_samples=int(cfg.act.get("image_stat_samples", 100)),
+        ordinary_target_count_only=bool(
+            cfg.act.get("ordinary_target_count_only", False)
+        ),
     )
     if len(dataset) == 0:
         raise ValueError("ACT training dataset has no valid behavior-cloning frames")

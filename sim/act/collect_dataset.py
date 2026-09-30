@@ -847,10 +847,31 @@ def main(argv=None) -> int:
             if result.success or args.all_episodes or generation_attempt >= max_attempts:
                 break
         if result.success or args.all_episodes:
-            episode_id = next_demo_name([Path(root), preview_root], target_count)
-            writer.add_episode(
-                episode_id, result.observations, result.actions,
-                result.success, {"split": args.split, "seed": accepted_seed,
+            if not result.observations and not result.success:
+                _append_failure_log(root_path, {
+                    "stage": "rollout",
+                    "split": args.split,
+                    "seed": accepted_seed,
+                    "requested_seed": seed,
+                    "generation_attempt": generation_attempt,
+                    "target_count": target_count,
+                    "total_count": 6,
+                    "geometry": geometry,
+                    "reason": str(
+                        result.failure_reason
+                        or result.planner_failure_reason
+                        or "failed rollout produced no observations"
+                    ),
+                    "planner_status": str(result.planner_status),
+                    "planner_failure_reason": str(result.planner_failure_reason),
+                    "planner_strategy": str(result.planner_strategy),
+                    "planner_attempts": int(result.planner_attempts),
+                })
+            else:
+                episode_id = next_demo_name([Path(root), preview_root], target_count)
+                writer.add_episode(
+                    episode_id, result.observations, result.actions,
+                    result.success, {"split": args.split, "seed": accepted_seed,
                                   "requested_seed": seed,
                                   "generation_attempt": generation_attempt,
                                   "episode_kind": "expert",
@@ -877,7 +898,7 @@ def main(argv=None) -> int:
                                   "generation_outcome": (
                                       "success" if result.success else "failed"),
                                   "failure_reason": result.failure_reason},
-            )
+                )
         print(json.dumps({"split": args.split, "index": i, "seed": accepted_seed,
                           "requested_seed": seed,
                           "generation_attempt": generation_attempt,

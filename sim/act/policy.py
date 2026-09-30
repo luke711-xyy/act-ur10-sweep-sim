@@ -31,7 +31,10 @@ def build_act_config(cfg):
         "observation.state": PolicyFeature(
             FeatureType.STATE, (int(cfg.act.state_dim),)
         ),
-        "observation.environment_state": PolicyFeature(FeatureType.ENV, (3,)),
+        "observation.environment_state": PolicyFeature(
+            FeatureType.ENV,
+            (1 if bool(cfg.act.get("ordinary_target_count_only", False)) else 3,),
+        ),
     }
     outputs = {"action": PolicyFeature(FeatureType.ACTION, (int(cfg.act.action_dim),))}
     device = str(cfg.act.get("device", "mps"))
@@ -69,20 +72,47 @@ def validate_act_policy_contract(policy_cfg, cfg) -> None:
         )
 
 
+def ordinary_target_count_only_from_config(policy_cfg) -> bool:
+    """Return whether an ordinary checkpoint expects only the raw goal count."""
+    feature = policy_cfg.input_features.get("observation.environment_state")
+    if feature is None:
+        raise ValueError(
+            "ordinary ACT checkpoint is missing observation.environment_state"
+        )
+    shape = tuple(feature.shape)
+    if shape not in {(1,), (3,)}:
+        raise ValueError(
+            "ordinary ACT environment input must have width 1 or 3, "
+            f"got {shape}"
+        )
+    return shape == (1,)
+
+
+def load_ordinary_act_config(checkpoint_path, cfg):
+    """Load a checkpoint's feature contract while selecting the runtime device."""
+    _, _, ACTConfig, _ = require_act_dependencies()
+    checkpoint_cfg = ACTConfig.from_pretrained(
+        checkpoint_path, local_files_only=True
+    )
+    checkpoint_cfg.device = build_act_config(cfg).device
+    ordinary_target_count_only_from_config(checkpoint_cfg)
+    validate_act_policy_contract(checkpoint_cfg, cfg)
+    return checkpoint_cfg
+
+
 def build_act_policy(cfg, pretrained_path=None):
     _, _, _, ACTPolicy = require_act_dependencies()
-    act_cfg = build_act_config(cfg)
     if pretrained_path:
         # Loading through LeRobot's official API restores the saved policy
         # config and safetensors weights instead of merely attaching a path to
         # a freshly initialised random network.
+        checkpoint_cfg = load_ordinary_act_config(pretrained_path, cfg)
         policy = ACTPolicy.from_pretrained(
-            pretrained_path,
-            config=act_cfg,
-            local_files_only=True,
+            pretrained_path, config=checkpoint_cfg, local_files_only=True
         )
         validate_act_policy_contract(policy.config, cfg)
         return policy, policy.config
+    act_cfg = build_act_config(cfg)
     policy = ACTPolicy(act_cfg)
     policy.to(act_cfg.device)
     validate_act_policy_contract(act_cfg, cfg)

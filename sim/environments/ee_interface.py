@@ -289,7 +289,7 @@ class UR10eEndEffector(EndEffectorInterface):  # pragma: no cover - compatibilit
 
 def build_end_effector(model, data, cfg) -> EndEffectorInterface:
     kind = str(cfg.end_effector.type)
-    if kind in ("ur10_cb3", "ur10e", "ur10e_menagerie"):
+    if kind in ("ur10_cb3", "ur10e", "ur10e_menagerie", "ur10_cb3_rudra"):
         from .ur10_interface import UR10CB3EndEffector
 
         return UR10CB3EndEffector(model, data, cfg)

@@ -24,6 +24,10 @@ class EpisodeNotFound(LookupError):
     """Requested episode does not exist in the selected local store."""
 
 
+class EpisodeReadOnly(PermissionError):
+    """A dataset episode is mounted for inspection but must not be deleted."""
+
+
 class FrameNotFound(IndexError):
     """Requested episode frame is outside the recorded range."""
 
@@ -89,9 +93,11 @@ def _image(root: Path, relative: str):
 class WorkbenchState:
     """Expose saved demonstrations and isolated expert previews."""
 
-    def __init__(self, cfg, dataset_root=None, preview_root=None):
+    def __init__(self, cfg, dataset_root=None, preview_root=None,
+                 dataset_read_only=False):
         self.cfg = cfg
         self.dataset_root = Path(dataset_root or cfg.act.dataset_dir)
+        self.dataset_read_only = bool(dataset_read_only)
         self.preview_root = Path(
             preview_root or Path(cfg.logging.out_dir) / "workbench_previews")
         # Episode refreshes run while the UI can delete a record or a preview
@@ -102,9 +108,22 @@ class WorkbenchState:
 
     def _records(self) -> list[tuple[Path, dict, bool]]:
         with self._io_lock:
-            records = [(self.dataset_root, rec, False)
-                       for rec in _read_manifest(self.dataset_root)]
+            dataset_records = _read_manifest(self.dataset_root)
             preview_records = _read_manifest(self.preview_root)
+            preview_ids = {str(rec.get("episode_id", ""))
+                           for rec in preview_records}
+            records = []
+            for rec in dataset_records:
+                storage_id = str(rec.get("episode_id", ""))
+                # A dataset episode and a saved preview can legitimately have
+                # the same generated name. Keep both addressable without
+                # changing either manifest or its frame paths.
+                public_id = (f"dataset:{storage_id}"
+                             if storage_id in preview_ids else storage_id)
+                exposed = dict(rec)
+                exposed["episode_id"] = public_id
+                exposed["_storage_episode_id"] = storage_id
+                records.append((self.dataset_root, exposed, False))
             self._preview_records = {
                 rec["episode_id"]: rec for rec in preview_records
             }
@@ -154,6 +173,8 @@ class WorkbenchState:
                     "duration": _frame_count(root, rec) / max(float(rec.get("fps", 25.0)), 1.0),
                     "failure_reason": rec.get("failure_reason", ""),
                     "preview": preview,
+                    "source": "preview" if preview else "dataset",
+                    "deletable": bool(preview or not self.dataset_read_only),
                 })
             return output
 
@@ -166,28 +187,39 @@ class WorkbenchState:
     def episode_metadata(self, episode_id: str) -> dict:
         with self._io_lock:
             root, rec, preview = self._find(episode_id)
-            return {**rec, "length": _frame_count(root, rec), "preview": preview}
+            metadata = {key: value for key, value in rec.items()
+                        if not key.startswith("_")}
+            metadata.update({
+                "length": _frame_count(root, rec),
+                "preview": preview,
+                "source": "preview" if preview else "dataset",
+                "deletable": bool(preview or not self.dataset_read_only),
+            })
+            return metadata
 
     def delete_episode(self, episode_id: str) -> dict:
         """Delete exactly one episode directory and its manifest record."""
         with self._io_lock:
             root, rec, preview = self._find(episode_id)
-            episode_id = str(episode_id)
-            episode_dir = root / episode_id
+            if not preview and self.dataset_read_only:
+                raise EpisodeReadOnly(
+                    f"dataset episode is read-only: {episode_id}")
+            storage_id = str(rec.get("_storage_episode_id", rec["episode_id"]))
+            episode_dir = root / storage_id
             if episode_dir.resolve().parent != root.resolve() or not episode_dir.is_dir():
-                raise EpisodeNotFound(episode_id)
+                raise EpisodeNotFound(str(episode_id))
 
             # Resolve the record again from the manifest so a malformed or stale
             # directory cannot cause an unrelated entry to be removed.
             records = _read_manifest(root)
-            if not any(str(item.get("episode_id")) == episode_id for item in records):
-                raise EpisodeNotFound(episode_id)
+            if not any(str(item.get("episode_id")) == storage_id for item in records):
+                raise EpisodeNotFound(str(episode_id))
             shutil.rmtree(episode_dir)
             remaining = [item for item in records
-                         if str(item.get("episode_id")) != episode_id]
+                         if str(item.get("episode_id")) != storage_id]
             _write_manifest(root, remaining)
-            self._preview_records.pop(episode_id, None)
-            return {"episode_id": episode_id, "preview": bool(preview),
+            self._preview_records.pop(storage_id, None)
+            return {"episode_id": str(episode_id), "preview": bool(preview),
                     "success": bool(rec.get("success", False)), "deleted": True}
 
     def load_episode_frame(self, episode_id: str, frame_index: int) -> dict:
@@ -266,7 +298,8 @@ class WorkbenchState:
             }
 
         # Backward-compatible fallback for the one legacy preview format.
-        path = root / rec["episode_id"] / "signals.json"
+        storage_id = str(rec.get("_storage_episode_id", rec["episode_id"]))
+        path = root / storage_id / "signals.json"
         if not path.is_file():
             return {"episode_id": rec["episode_id"], "t": [], "fz": [],
                     "contact": []}

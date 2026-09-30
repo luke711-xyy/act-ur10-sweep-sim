@@ -302,6 +302,9 @@ def test_training_reader_and_act_rollout_work_when_astar_entrypoints_raise(
             return torch.zeros((1, 25, 4), dtype=torch.float32)
 
     class FakePolicyConfig:
+        input_features = {
+            "observation.environment_state": SimpleNamespace(shape=(1,)),
+        }
         output_features = {"action": SimpleNamespace(shape=(4,))}
 
     class FakeEndEffector(_FakeEndEffector):

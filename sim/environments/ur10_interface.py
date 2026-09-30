@@ -1,4 +1,4 @@
-"""MuJoCo end-effector adapter for the vendored UR10e Menagerie model."""
+"""MuJoCo end-effector adapters for the vendored UR10 model variants."""
 
 from __future__ import annotations
 
@@ -27,16 +27,22 @@ class UR10CB3EndEffector(CartesianEndEffector):
         self._mujoco = mujoco
         self.model, self.data, self.cfg = model, data, cfg
         self.yaw_enabled = True
+        if str(cfg.end_effector.type) == "ur10_cb3_rudra":
+            self.joint_names = tuple(f"joint_{index}" for index in range(6))
+            self.actuator_names = tuple(f"joint_{index}_act" for index in range(6))
+        else:
+            self.joint_names = self.JOINT_NAMES
+            self.actuator_names = self.ACTUATOR_NAMES
         self.jnt_ids = {n: mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n)
-                        for n in self.JOINT_NAMES}
+                        for n in self.joint_names}
         if any(v < 0 for v in self.jnt_ids.values()):
             raise RuntimeError("MuJoCo model is missing one or more UR10 joints")
         self.qpos_adr = {n: int(model.jnt_qposadr[j]) for n, j in self.jnt_ids.items()}
         self.qvel_adr = {n: int(model.jnt_dofadr[j]) for n, j in self.jnt_ids.items()}
         self.act_ids = {name: mujoco.mj_name2id(
-            model, mujoco.mjtObj.mjOBJ_ACTUATOR, name) for name in self.ACTUATOR_NAMES}
+            model, mujoco.mjtObj.mjOBJ_ACTUATOR, name) for name in self.actuator_names}
         if any(v < 0 for v in self.act_ids.values()):
-            raise RuntimeError("MuJoCo model is missing one or more UR10e actuators")
+            raise RuntimeError("MuJoCo model is missing one or more UR10 position actuators")
         self.tool_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "tool")
         self.tcp_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "tcp_site")
         self.ft_sensor_adr = self._sensor_adr("ft_force")
@@ -51,10 +57,17 @@ class UR10CB3EndEffector(CartesianEndEffector):
         self._normal_force_filtered = 0.0
 
     def reset(self, tcp_target: Sequence[float]) -> None:
-        q0 = np.asarray(self.cfg.end_effector.initial_joint_positions, dtype=float)
+        if str(self.cfg.end_effector.type) == "ur10_cb3_rudra":
+            initial = self.cfg.end_effector.get(
+                "rudra_initial_joint_positions",
+                self.cfg.end_effector.initial_joint_positions,
+            )
+        else:
+            initial = self.cfg.end_effector.initial_joint_positions
+        q0 = np.asarray(initial, dtype=float)
         if q0.shape != (6,):
             raise ValueError("initial_joint_positions must contain six values")
-        for name, value in zip(self.JOINT_NAMES, q0):
+        for name, value in zip(self.joint_names, q0):
             self.data.qpos[self.qpos_adr[name]] = value
             self.data.qvel[self.qvel_adr[name]] = 0.0
         self._normal_force_filtered = 0.0
@@ -72,15 +85,15 @@ class UR10CB3EndEffector(CartesianEndEffector):
         # least-squares solve from selecting a visually discontinuous branch.
         max_step = float(self.cfg.end_effector.get("ik_max_joint_step", 0.04))
         q = q_current + np.clip(q_solution - q_current, -max_step, max_step)
-        for name, value in zip(self.JOINT_NAMES, q_current):
+        for name, value in zip(self.joint_names, q_current):
             self.data.qpos[self.qpos_adr[name]] = value
         self._mujoco.mj_forward(self.model, self.data)
-        for name, value in zip(self.ACTUATOR_NAMES, q):
+        for name, value in zip(self.actuator_names, q):
             self.data.ctrl[self.act_ids[name]] = float(value)
 
     def _solve_ik(self, target: np.ndarray) -> np.ndarray:
         mj = self._mujoco
-        q = np.array([self.data.qpos[self.qpos_adr[n]] for n in self.JOINT_NAMES], dtype=float)
+        q = np.array([self.data.qpos[self.qpos_adr[n]] for n in self.joint_names], dtype=float)
         jacp = np.zeros((3, self.model.nv), dtype=float)
         jacr = np.zeros((3, self.model.nv), dtype=float)
         damping = float(self.cfg.end_effector.ik_damping)
@@ -103,14 +116,14 @@ class UR10CB3EndEffector(CartesianEndEffector):
             if np.linalg.norm(error) < 1e-4:
                 break
             mj.mj_jacSite(self.model, self.data, jacp, jacr, self.tcp_site_id)
-            cols = [self.qvel_adr[n] for n in self.JOINT_NAMES]
+            cols = [self.qvel_adr[n] for n in self.joint_names]
             jac = np.vstack((jacp[:, cols], jacr[:, cols]))
             dq = jac.T @ np.linalg.solve(jac @ jac.T + damping ** 2 * np.eye(6), error)
             q += np.clip(dq, -0.12, 0.12)
-            for i, name in enumerate(self.JOINT_NAMES):
+            for i, name in enumerate(self.joint_names):
                 lo, hi = self.model.jnt_range[self.jnt_ids[name]]
                 q[i] = float(np.clip(q[i], lo, hi))
-            for i, name in enumerate(self.JOINT_NAMES):
+            for i, name in enumerate(self.joint_names):
                 self.data.qpos[self.qpos_adr[name]] = q[i]
         mj.mj_forward(self.model, self.data)
         final_pos = np.asarray(
@@ -209,7 +222,7 @@ class UR10CB3EndEffector(CartesianEndEffector):
         return float(self._normal_force_filtered)
 
     def joint_state(self) -> np.ndarray:
-        return np.array([self.data.qpos[self.qpos_adr[n]] for n in self.JOINT_NAMES], dtype=float)
+        return np.array([self.data.qpos[self.qpos_adr[n]] for n in self.joint_names], dtype=float)
 
 
 class UR10eEndEffector(UR10CB3EndEffector):

@@ -45,6 +45,58 @@ def test_workbench_lists_episode_and_loads_all_three_views(tmp_path):
     assert frame["inspection"].shape == (12, 12, 3)
 
 
+def test_workbench_mounts_dataset_without_hiding_existing_previews(
+        tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from sim.web import jobs
+
+    class EmptyJobRegistry:
+        def __init__(self, _project_root):
+            pass
+
+    monkeypatch.setattr(jobs, "JobRegistry", EmptyJobRegistry)
+
+    dataset_root = tmp_path / "dataset"
+    preview_root = tmp_path / "previews"
+    _episode(dataset_root, "preview_goal_3_0001")
+    _episode(preview_root, "preview_goal_3_0001")
+    _episode(preview_root, "inference_saved_0001")
+
+    app = create_app(load_config(overrides=["sim.real_time=false"]),
+                     dataset_root=dataset_root,
+                     preview_root=preview_root)
+    client = TestClient(app)
+
+    response = client.get("/api/episodes")
+    assert response.status_code == 200
+    episodes = response.json()
+    by_id = {episode["episode_id"]: episode for episode in episodes}
+    assert set(by_id) == {
+        "dataset:preview_goal_3_0001",
+        "preview_goal_3_0001",
+        "inference_saved_0001",
+    }
+    assert by_id["dataset:preview_goal_3_0001"]["source"] == "dataset"
+    assert by_id["dataset:preview_goal_3_0001"]["deletable"] is False
+    assert by_id["preview_goal_3_0001"]["source"] == "preview"
+    assert by_id["preview_goal_3_0001"]["deletable"] is True
+
+    dataset_frame = client.get(
+        "/api/episodes/dataset:preview_goal_3_0001/frame/0")
+    old_preview_frame = client.get(
+        "/api/episodes/preview_goal_3_0001/frame/0")
+    inference_frame = client.get(
+        "/api/episodes/inference_saved_0001/frame/0")
+    assert dataset_frame.status_code == 200
+    assert old_preview_frame.status_code == 200
+    assert inference_frame.status_code == 200
+
+    protected_delete = client.delete(
+        "/api/episodes/dataset:preview_goal_3_0001")
+    assert protected_delete.status_code == 409
+    assert (dataset_root / "preview_goal_3_0001").is_dir()
+
+
 def test_workbench_rejects_unknown_episode(tmp_path):
     state = WorkbenchState(load_config(), dataset_root=tmp_path,
                            preview_root=tmp_path / "previews")

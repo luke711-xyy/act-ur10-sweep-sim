@@ -205,9 +205,11 @@ class ActDataset:
     def __init__(self, root: str, chunk_size: int = 25,
                  include_failures: bool = False,
                  image_stat_samples: int = 1000,
-                 split: str = "train"):
+                 split: str = "train",
+                 ordinary_target_count_only: bool = False):
         self.root = Path(root)
         self.chunk_size = int(chunk_size)
+        self.ordinary_target_count_only = bool(ordinary_target_count_only)
         self.image_stat_samples = max(1, int(image_stat_samples))
         self._stats = None
         manifest_records = [
@@ -377,9 +379,12 @@ class ActDataset:
         for _, record, frame_id in self.index:
             with np.load(self.root / record["arrays"], mmap_mode="r") as arrays:
                 vectors["observation.state"].append(np.asarray(arrays["state"][frame_id], dtype=np.float32))
-                vectors["observation.environment_state"].append(
-                    np.asarray(arrays["environment_state"][frame_id], dtype=np.float32)
+                environment_state = np.asarray(
+                    arrays["environment_state"][frame_id], dtype=np.float32
                 )
+                if self.ordinary_target_count_only:
+                    environment_state = environment_state[1:2]
+                vectors["observation.environment_state"].append(environment_state)
                 vectors["action"].append(np.asarray(arrays["action"][frame_id], dtype=np.float32))
         self._stats = {
             key: self._vector_stats(np.stack(values, axis=0))
@@ -409,6 +414,8 @@ class ActDataset:
             environment_state = np.asarray(
                 arrays["environment_state"][i], dtype=np.float32
             )
+            if self.ordinary_target_count_only:
+                environment_state = environment_state[1:2]
             actions = np.asarray(arrays["action"][i:i + self.chunk_size], dtype=np.float32)
             valid = (np.asarray(arrays["action_valid"][i:i + self.chunk_size], dtype=bool)
                      if "action_valid" in arrays.files else np.ones(len(actions), dtype=bool))

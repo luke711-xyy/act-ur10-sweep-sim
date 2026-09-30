@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 import numpy as np
@@ -227,3 +228,47 @@ def test_approved_plan_cli_passes_custom_episodes_per_target(tmp_path, monkeypat
         "max_attempts": 64,
         "episodes_per_target": 15,
     }
+
+
+def test_one_off_generator_logs_unreplayable_failure_without_writing_empty_episode(
+    tmp_path, monkeypatch, capsys,
+):
+    cfg = collect_dataset.load_config()
+    monkeypatch.setattr(collect_dataset, "load_config", lambda *_a, **_k: cfg)
+    monkeypatch.setattr(collect_dataset, "save_config", lambda *_args: None)
+    monkeypatch.setattr(
+        collect_dataset,
+        "run_expert_episode",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            success=False,
+            observations=[],
+            actions=np.empty(0, dtype=np.float32),
+            target_indices=[],
+            collected=0,
+            total=6,
+            planner_status="infeasible",
+            planner_failure_reason="no exact-count path",
+            planner_strategy="coverage_astar",
+            planner_turn_count=0,
+            planner_attempts=3,
+            planner_score=float("inf"),
+            trace=[],
+            failure_reason="no exact-count path",
+        ),
+    )
+
+    assert collect_dataset.main([
+        "--out", str(tmp_path), "--episode-plan", "3:290926",
+        "--all-episodes", "--composition", "mixed",
+    ]) == 0
+
+    assert not (tmp_path / "manifest.jsonl").exists()
+    failure = json.loads(
+        (tmp_path / "generation_failures.jsonl").read_text(encoding="utf-8")
+    )
+    assert failure["stage"] == "rollout"
+    assert failure["target_count"] == 3
+    assert failure["seed"] == 290926
+    assert failure["reason"] == "no exact-count path"
+    assert not list(tmp_path.glob("*.tmp-*"))
+    assert json.loads(capsys.readouterr().out)["success"] is False

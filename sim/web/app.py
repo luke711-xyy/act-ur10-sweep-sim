@@ -61,7 +61,7 @@ async function json(url,opts){const r=await fetch(url,opts);const body=await r.t
 function esc(value){return String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
 async function refreshAll(){try{const [h,f]=await Promise.all([json('/api/health'),json('/api/frames')]);if(!timer&&!current){image('overheadImage',f.overhead);image('wristImage',f.wrist);image('inspectionImage',f.inspection)}$('healthPills').innerHTML=`<span class="pill ok">sim ${h.time.toFixed(2)} s</span><span class="pill">full ${h.collected}/${h.components} · goal ${h.target_count}</span><span class="pill">Fz ${h.normal_force.toFixed(2)} N</span><span class="pill">${h.model}</span>`;await loadEpisodes();await refreshJobs()}catch(e){$('globalStatus').textContent='Dashboard error: '+e.message;$('globalStatus').className='bad'}}
 function filteredEpisodes(){const target=$('episodeTargetFilter')?.value||'all';const status=$('episodeStatusFilter')?.value||'all';return episodes.filter(e=>(target==='all'||String(e.target_count)===target)&&(status==='all'||(status==='success'?Boolean(e.success):!Boolean(e.success))))}
-function renderEpisodeList(){const visible=filteredEpisodes().slice().reverse();$('episodeList').innerHTML=visible.length?visible.map(e=>`<button class="episode-row ${e.episode_id===selectedEpisodeId?'selected':''}" data-episode-id="${esc(e.episode_id)}" onclick="selectEpisode('${esc(e.episode_id)}')" oncontextmenu="deleteEpisode(event,'${esc(e.episode_id)}');return false;" title="右键删除这条记录"><span><strong>${esc(e.episode_id)}</strong><small>${esc(e.split)} · exact ${e.collected??'?'} / ${e.target_count??'?'} · ${e.success?'success':'failed'}${e.failure_mode?' · '+esc(e.failure_mode):''} · ${e.length} frames · ${esc(e.planner_strategy||'legacy')} / ${esc(e.planner_status||'unknown')}</small></span><span class="result ${e.success?'':'failure'}">${e.success?'SUCCESS':'FAIL'}</span></button>`).join(''):'<div class="hint" style="padding:12px">当前筛选没有示教数据。</div>'}
+function renderEpisodeList(){const visible=filteredEpisodes().slice().reverse();$('episodeList').innerHTML=visible.length?visible.map(e=>{const deletion=e.deletable?`oncontextmenu="deleteEpisode(event,'${esc(e.episode_id)}');return false;" title="右键删除这条记录"`:'title="训练集示教只读；原 inference/preview 保留"';return `<button class="episode-row ${e.episode_id===selectedEpisodeId?'selected':''}" data-episode-id="${esc(e.episode_id)}" onclick="selectEpisode('${esc(e.episode_id)}')" ${deletion}><span><strong>${esc(e.episode_id)}</strong><small>${esc(e.source||e.split)} · exact ${e.collected??'?'} / ${e.target_count??'?'} · ${e.success?'success':'failed'}${e.failure_mode?' · '+esc(e.failure_mode):''} · ${e.length} frames · ${esc(e.planner_strategy||'legacy')} / ${esc(e.planner_status||'unknown')}</small></span><span class="result ${e.success?'':'failure'}">${e.success?'SUCCESS':'FAIL'}</span></button>`}).join(''):'<div class="hint" style="padding:12px">当前筛选没有示教数据。</div>'}
 async function deleteEpisode(event,id){event.preventDefault();if(!confirm(`删除示教记录 ${id}？此操作不可撤销。`))return;try{if(timer){clearInterval(timer);timer=null;$('playButton').textContent='Play'}if(selectedEpisodeId===id){selectedEpisodeId=null;current=null}await json(`/api/episodes/${encodeURIComponent(id)}`,{method:'DELETE'});await loadEpisodes();$('globalStatus').textContent=`已删除示教记录 · ${id}`}catch(e){$('globalStatus').textContent='删除失败: '+e.message;$('globalStatus').className='bad'}}
 function applyEpisodeFilters(){renderEpisodeList();const visible=filteredEpisodes();if(visible.length&&!visible.some(e=>e.episode_id===selectedEpisodeId))selectEpisode(visible[visible.length-1].episode_id)}
 async function loadEpisodes(){const data=await json('/api/episodes');episodes=data;const select=$('episodeSelect');const old=select.value;select.innerHTML=data.length?data.map(e=>`<option value="${esc(e.episode_id)}">${e.preview?'preview':'dataset'} · ${esc(e.episode_id)} · ${e.success?'success':'failure'}</option>`).join(''):'<option value="">No episodes yet</option>';renderEpisodeList();const visible=filteredEpisodes();if(visible.length){const preferred=selectedEpisodeId||old;const id=visible.some(e=>e.episode_id===preferred)?preferred:visible[visible.length-1].episode_id;select.value=id;if(id!==current?.episode_id)await selectEpisode(id)}}
@@ -104,7 +104,7 @@ def _png_bytes(image):
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def create_app(cfg):
+def create_app(cfg, dataset_root=None, preview_root=None):
     try:
         from fastapi import FastAPI, HTTPException
         from fastapi.responses import HTMLResponse
@@ -113,19 +113,26 @@ def create_app(cfg):
     from ..config import save_config
     from ..environments.sweep_env import SweepEnv
     from .jobs import JobRegistry, build_inference_argv, build_train_argv
-    from .workbench import EpisodeNotFound, FrameNotFound, WorkbenchState
+    from .workbench import (
+        EpisodeNotFound, EpisodeReadOnly, FrameNotFound, WorkbenchState,
+    )
 
     project_root = Path(__file__).resolve().parents[2]
     app = FastAPI(title="ACT MuJoCo Sweep Workbench")
     app.state.cfg = cfg
     app.state.env = None
     app.state.env_lock = RLock()
-    dataset_root = Path(str(cfg.act.dataset_dir))
+    mounted_dataset_read_only = dataset_root is not None
+    dataset_root = Path(str(dataset_root or cfg.act.dataset_dir))
     if not dataset_root.is_absolute():
         dataset_root = project_root / dataset_root
+    preview_root = Path(str(preview_root or project_root / "runs" / "workbench_previews"))
+    if not preview_root.is_absolute():
+        preview_root = project_root / preview_root
     app.state.workbench = WorkbenchState(
         cfg, dataset_root=dataset_root,
-        preview_root=project_root / "runs" / "workbench_previews")
+        preview_root=preview_root,
+        dataset_read_only=mounted_dataset_read_only)
     app.state.jobs = JobRegistry(project_root)
 
     def env():
@@ -194,6 +201,8 @@ def create_app(cfg):
     def delete_episode(episode_id: str):
         try:
             return app.state.workbench.delete_episode(episode_id)
+        except EpisodeReadOnly as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (EpisodeNotFound, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
