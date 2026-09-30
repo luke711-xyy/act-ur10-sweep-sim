@@ -357,7 +357,7 @@ def test_workbench_html_has_five_operational_areas():
                   "inspection-only", "Play", "Frame inspector", "Signal group"):
         assert label in html
     assert ('id="inferModel" '
-            'value="runs/act_model_curve_v10/checkpoints/step_100000"') in html
+            'value="runs/act_model_rudra_ordinary_200k_v1/checkpoints/step_100000"') in html
     for element_id in ("episodeTargetFilter", "episodeStatusFilter", "previewOutcome",
                        "previewCount", "previewFailureMode", "inferTarget",
                        "inferRandomize"):
