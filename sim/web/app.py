@@ -46,7 +46,7 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 <div class="row"><button class="primary" onclick="startTraining()">Start training job</button><button class="danger" onclick="stopLatest('train')">Stop</button></div><div id="trainJob" class="job">No training job.</div>
 </section>
 <section class="panel inference"><h2>Inference <span class="muted">· MuJoCo rollout</span></h2>
-<label>Model checkpoint<input id="inferModel" value="runs/act_model_curve_v10/checkpoints/step_100000"></label><label>Exact target count (of 6)<select id="inferTarget"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></label><label>Seed<input id="inferSeed" type="number" value="0"></label><label class="check"><input id="inferRandomize" type="checkbox" checked> Randomize layout seed on each run</label><label class="check"><input id="inferPreview" type="checkbox" checked> Simulation preview · allow late inference</label>
+<label>Model checkpoint<input id="inferModel" value="runs/act_model_rudra_ordinary_200k_v1/checkpoints/step_100000"></label><label>Exact target count (of 6)<select id="inferTarget"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></label><label>Seed<input id="inferSeed" type="number" value="0"></label><label class="check"><input id="inferRandomize" type="checkbox" checked> Randomize layout seed on each run</label><label class="check"><input id="inferPreview" type="checkbox" checked> Simulation preview · allow late inference</label>
 <div class="row"><button class="primary" onclick="startInference()">Run inference</button><button class="danger" onclick="stopLatest('inference')">Stop</button></div><div id="inferJob" class="job">No inference job.</div>
 </section>
 <section class="panel parameters"><h2>Parameters <span class="muted">· explicit, editable knobs</span></h2>
@@ -418,7 +418,8 @@ def create_app(cfg, dataset_root=None, preview_root=None):
         preview = bool(payload.get("preview", True))
         argv = build_inference_argv(project_root,
                                     payload.get("config", str(app.state.cfg.get_path("_source_config"))),
-                                    payload.get("seed", app.state.cfg.seed), payload.get("model"),
+                                    payload.get("seed", app.state.cfg.seed),
+                                    payload.get("model", "runs/act_model_rudra_ordinary_200k_v1/checkpoints/step_100000"),
                                     target_count, preview=preview)
         try:
             return app.state.jobs.start("inference", argv)
