@@ -239,6 +239,37 @@ class WorkbenchState:
                 frame["inspection"] = _image(root, inspection[frame_index])
             return frame
 
+    def episode_video_source(self, episode_id: str) -> dict:
+        """Return safe saved-frame paths and timing for synchronized export."""
+        with self._io_lock:
+            root, rec, _ = self._find(episode_id)
+            root = root.resolve()
+            length = _frame_count(root, rec)
+            fps = float(rec.get("fps", 25.0))
+            if length <= 0 or not np.isfinite(fps) or fps <= 0:
+                raise ValueError(f"episode has invalid video timing: {episode_id}")
+
+            frames = []
+            readable_view = False
+            for index in range(length):
+                frame = {}
+                for role in ("overhead", "wrist", "inspection"):
+                    paths = rec.get(role) or []
+                    relative = paths[index] if index < len(paths) else ""
+                    path = None
+                    if relative:
+                        candidate = (root / str(relative)).resolve()
+                        if candidate != root and root in candidate.parents:
+                            if candidate.is_file():
+                                path = candidate
+                                readable_view = True
+                    frame[role] = path
+                frames.append(frame)
+            if not readable_view:
+                raise FileNotFoundError(f"episode has no saved camera frames: {episode_id}")
+            return {"episode_id": str(episode_id), "fps": fps,
+                    "frames": frames}
+
     def load_episode_signals(self, episode_id: str) -> dict:
         """Load the persisted full-run force trace for an episode.
 
