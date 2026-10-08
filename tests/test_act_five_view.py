@@ -82,6 +82,42 @@ def test_default_collection_config_uses_five_views_and_rudra_force_tuning():
     assert float(cfg.controller.yaw_speed_limit) == 0.35
 
 
+def test_act_model_config_receives_all_five_views_not_inspection(monkeypatch):
+    import sys
+    import sim.act.policy as policy
+
+    class FeatureType:
+        VISUAL = "visual"
+        STATE = "state"
+        ENV = "environment"
+        ACTION = "action"
+
+    class FakeACTConfig:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setattr(
+        policy, "require_act_dependencies",
+        lambda: (FeatureType, lambda feature_type, shape: {
+            "type": feature_type, "shape": shape,
+        }, FakeACTConfig, object),
+    )
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False))
+    ))
+    cfg = load_config()
+
+    model_config = policy.build_act_config(cfg)
+    model_views = {
+        key.removeprefix("observation.images.")
+        for key, feature in model_config.input_features.items()
+        if feature["type"] == FeatureType.VISUAL
+    }
+
+    assert model_views == set(VIEWS)
+    assert "observation.images.inspection" not in model_config.input_features
+
+
 def test_five_view_episode_round_trips_through_dataset_and_workbench(tmp_path):
     cfg = load_config(overrides=[
         "act.image_size=[16,16]", f"act.dataset_dir={tmp_path / 'dataset'}",

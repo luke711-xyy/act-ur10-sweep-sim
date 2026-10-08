@@ -669,6 +669,14 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             if env.time >= float(cfg.episode.max_time):
                 failure = "episode timeout"
                 break
+            # Once an exact count is reached and the brush has delivered it to
+            # the configured tray depth, stop the expert path and enter the
+            # existing one-second object-stability confirmation.  Continuing
+            # the remaining preplanned curve can lift the brush or disturb a
+            # correctly delivered set, turning a completed sweep into a false
+            # contact-loss failure.
+            if goal_reached and delivery_reached and not failure_mode:
+                break
         executed_reference[:] = [
             float(action[0]), float(action[1]), applied_z_command,
             float(action[3]),
@@ -681,6 +689,8 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             observations[captured_index]["applied_z"] = float(executed_reference[2])
             observations[captured_index]["z_owner"] = owner
         if failure or (goal_reached and failure_mode and not do_not_stop_on_goal):
+            break
+        if goal_reached and delivery_reached and not failure_mode:
             break
         if (execution_index == len(execution) and recovery_planner is not None
                 and recovery_round < int(max_recovery_rounds)):

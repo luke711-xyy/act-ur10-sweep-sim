@@ -28,9 +28,11 @@ table:
 
 target:
   # Shallow tray, open towards +X, its floor being the table surface itself.
-  # Shifted 3 cm toward the table centre so the loaded final push is shorter.
-  x_min: -0.45
-  x_max: -0.31
+  # Shifted 6 cm toward the table centre from the original placement.  The
+  # extra 3 cm shortens the high-load final push while keeping a 9 cm in-tray
+  # brush-centre depth for complete part entry.
+  x_min: -0.42
+  x_max: -0.28
   y_min: -0.18
   y_max: 0.18
   wall_thickness: 0.012
@@ -244,7 +246,7 @@ planner:
   lane_overlap: 0.15         # fraction of the pusher width overlapped between lanes
   consolidation: true        # final consolidation stroke in front of the tray
   consolidation_lead: 0.18
-  stroke_end_x: -0.40        # where every sweeping stroke terminates
+  stroke_end_x: -0.36        # endpoint bound; tray depth places brush centre at x=-0.37
   stroke_lead_in: 0.06       # start this far to the +X side of the target cluster
   tray_margin: 0.05          # keep stroke end points this far inside the tray in y
   align_yaw: true            # rotate the pusher face perpendicular to the stroke
@@ -410,7 +412,9 @@ act:
   keep_checkpoints: 6
   train_hours: 24
   training_episodes_per_target: 50
-  dataset_dir: runs/act_dataset_five_view_rudra_300_v1
+  # Keep the reviewed preview records separate from the clean randomized
+  # 300-episode training dataset.
+  dataset_dir: runs/act_dataset_five_view_rudra_300_train_v1
   model_dir: runs/act_model_five_view_rudra_v1
   realtime_budget_seconds: 0.2
   approach_sample_fraction: 0.35
