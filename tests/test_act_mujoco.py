@@ -1486,6 +1486,7 @@ def test_curve_planner_physically_sweeps_feasible_all_six_layout():
     cfg = load_config(overrides=[
         "sim.real_time=false", "components.count=6",
         "components.spawn_mode=cluster", "task.target_count=6",
+        "planner.expert_validation_workers=4",
     ])
     result = run_expert_episode(cfg, seed=951301,
                                 collect_observations=False)
@@ -1609,6 +1610,7 @@ def test_expert_retries_next_candidate_after_physical_failure(monkeypatch):
     cfg = load_config(overrides=[
         "sim.real_time=false", "components.count=6",
         "components.spawn_mode=cluster", "task.target_count=1",
+        "planner.expert_validation_workers=1",
     ])
     plans = [
         ExpertPlan(target_indices=np.array([0]),
@@ -1670,6 +1672,7 @@ def test_expert_retries_next_candidate_after_physical_failure(monkeypatch):
 
 def test_parallel_expert_screening_uses_best_ranked_success(monkeypatch):
     """Parallel screening must keep planner order, not completion order."""
+    from concurrent.futures import ThreadPoolExecutor
     import threading
     import time
     import sim.act.rollout as rollout
@@ -1689,6 +1692,7 @@ def test_parallel_expert_screening_uses_best_ranked_success(monkeypatch):
     ]
     second_screening_started = threading.Event()
     screening_results = []
+    worker_payloads = []
 
     class FakeEnv:
         def __init__(self, _cfg, seed):
@@ -1706,14 +1710,6 @@ def test_parallel_expert_screening_uses_best_ranked_success(monkeypatch):
         selected = kwargs["target_indices"].tolist()
         if kwargs["collect_observations"]:
             assert selected == [0]
-        elif selected == [0]:
-            assert second_screening_started.wait(2), (
-                "the second candidate was not screened concurrently")
-            time.sleep(0.03)
-            screening_results.append(selected)
-        else:
-            second_screening_started.set()
-            screening_results.append(selected)
         return rollout.ActRolloutResult(
             success=True,
             failure_reason="",
@@ -1725,15 +1721,48 @@ def test_parallel_expert_screening_uses_best_ranked_success(monkeypatch):
             unexpected_collected=0,
         )
 
+    def fake_process_worker(payload):
+        worker_payloads.append(payload)
+        plan, attempt = payload[4], payload[5]
+        selected = plan.target_indices.tolist()
+        if selected == [0]:
+            assert second_screening_started.wait(2), (
+                "the second candidate was not screened concurrently")
+            time.sleep(0.03)
+            screening_results.append(selected)
+        else:
+            second_screening_started.set()
+            screening_results.append(selected)
+        result = rollout.ActRolloutResult(
+            success=True,
+            failure_reason="",
+            total=6,
+            target_count=1,
+            collected=1,
+            target_indices=selected,
+            target_collected=1,
+            unexpected_collected=0,
+        )
+        return plan, attempt, result
+
     monkeypatch.setattr(rollout, "SweepEnv", FakeEnv)
     monkeypatch.setattr(rollout, "expert_plan_candidates",
                         lambda _env, _cfg: plans)
     monkeypatch.setattr(rollout, "run_action_path", fake_run_action_path)
+    # Exercise batch ordering without spawning pytest child processes. A real
+    # MuJoCo process-pool integration is covered by the all-six rollout test.
+    monkeypatch.setattr(
+        rollout, "ProcessPoolExecutor",
+        lambda max_workers, mp_context: ThreadPoolExecutor(
+            max_workers=max_workers), raising=False)
+    monkeypatch.setattr(rollout, "_screen_expert_candidate_process",
+                        fake_process_worker, raising=False)
 
     result = rollout.run_expert_episode(
         cfg, seed=5203, collect_observations=True)
 
     assert sorted(screening_results) == [[0], [1]]
+    assert len(worker_payloads) == 2
     assert result.success
     assert result.target_indices == [0]
     assert result.planner_attempts == 1
@@ -1746,6 +1775,7 @@ def test_expert_falls_back_to_original_tray_entry_after_aligned_routes_fail(
 
     cfg = load_config(overrides=[
         "sim.real_time=false", "components.count=6", "task.target_count=6",
+        "planner.expert_validation_workers=1",
     ])
     planned_leads = []
     execution_yaws = []

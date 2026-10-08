@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+import multiprocessing
 
 import numpy as np
 
@@ -14,6 +15,7 @@ from ..controllers.admittance import (
     OverforceReliefParams,
 )
 from ..controllers.hybrid import Command
+from ..config import Config
 from ..environments.sweep_env import SweepEnv
 from .expert import (ExpertPlan, expert_plan_candidates,
                       _tray_exit_x, contact_home_xy, expert_recovery_waypoints,
@@ -957,6 +959,47 @@ def _annotate_expert_result(result: ActRolloutResult, plan: ExpertPlan,
     return result
 
 
+def _screen_expert_candidate_process(payload):
+    """Run one render-free candidate rollout in an isolated worker process."""
+    cfg_data, seed, total, failure_mode, plan, attempt = payload
+    cfg = Config(cfg_data)
+    env = SweepEnv(cfg, seed=seed)
+    try:
+        env.reset(seed=seed)
+        path, phases = _expert_execution_path(
+            cfg, plan, failure_mode, failure_seed=seed,
+            table_top_z=env.table_top_z)
+        result = run_action_path(
+            env, cfg, path, collect_observations=False,
+            phases=phases,
+            target_indices=np.asarray(plan.target_indices, dtype=int),
+            recovery_planner=None, max_recovery_rounds=0,
+            failure_mode=failure_mode,
+            contact_z_mode="expert_admittance")
+        result = _annotate_expert_result(result, plan, attempt)
+        if failure_mode and not result.failure_reason:
+            result.failure_reason = f"deliberate failure: {failure_mode}"
+        result.failure_mode = failure_mode
+        return plan, attempt, result
+    except RuntimeError as exc:
+        # A 2-D-feasible plan can still be outside the arm's orientation-
+        # constrained workspace. Treat that as a candidate rejection, while
+        # allowing unrelated runtime faults to reach the parent process.
+        if "UR10 IK target is unreachable" not in str(exc):
+            raise
+        result = ActRolloutResult(
+            success=False,
+            failure_reason=f"candidate rejected by IK: {exc}",
+            total=int(total),
+            target_count=int(cfg.get_path(
+                "task.target_count", cfg.get_path("components.count", total))),
+            target_indices=[int(value) for value in plan.target_indices],
+        )
+        return plan, attempt, _annotate_expert_result(result, plan, attempt)
+    finally:
+        env.close()
+
+
 def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
                        failure_mode: str = "") -> ActRolloutResult:
     """Execute and physically vet a shortlist of deterministic expert plans.
@@ -1076,10 +1119,19 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
             if validation_workers == 1 or len(batch) == 1:
                 yield [screen_one(item) for item in batch]
             else:
-                with ThreadPoolExecutor(max_workers=validation_workers) as pool:
+                payloads = [
+                    (cfg.to_dict(), int(seed), len(probe.layout), failure_mode,
+                     plan, attempt)
+                    for plan, attempt in batch
+                ]
+                with ProcessPoolExecutor(
+                        max_workers=len(batch),
+                        mp_context=multiprocessing.get_context("spawn")) as pool:
                     # map preserves candidate rank even when rollout runtimes
                     # differ, so selection remains deterministic.
-                    yield list(pool.map(screen_one, batch))
+                    screened = list(pool.map(
+                        _screen_expert_candidate_process, payloads))
+                yield screened
 
     def outcome_matches(result):
         return (
