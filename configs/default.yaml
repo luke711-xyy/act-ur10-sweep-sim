@@ -268,6 +268,13 @@ planner:
   expert_candidate_limit: 12  # shortlist for optional MuJoCo-in-the-loop validation
   expert_capture_exit_margin: 0.02  # [m] clear selected parts before changing lanes
   expert_corner_radius: 0.025  # [m] smooth contact turns; yaw limit slows XY by curvature
+  expert_delivery_slowdown_score_weight: 0.01  # [m per second] prefer entry curves without near-stops
+  expert_route_curvature_score_weight: 0.0003  # [m^2] integrated squared curvature penalty
+  expert_route_turn_rate_score_weight: 0.008  # dimensionless, penalize yaw demand near actuator limit
+  expert_route_slow_turn_score_weight: 0.04  # [m/s] penalty per second of sharp-turn low speed
+  expert_route_slow_speed_ratio: 0.55  # count sharp-turn time below this fraction of sweep speed
+  expert_route_sharp_yaw_demand_ratio: 0.50  # turns demanding this fraction of yaw limit are sharp
+  expert_tray_alignment_lead: 0.16  # [m] align brush yaw before reaching the tray mouth
   expert_curve_order_limit: 4  # winding orders physically vetted per target subset
   expert_curve_grid_resolution: 0.02  # [m] global capture-coverage A* lattice
   expert_curve_max_expansions: 480000  # broader dispersed layouts need more A* coverage states
@@ -314,8 +321,8 @@ video:
   # The policy input uses four fixed table-corner views plus the wrist camera.
   cameras: [corner_xminus_yminus, corner_xminus_yplus,
             corner_xplus_yminus, corner_xplus_yplus, wrist_cam]
-  width: 640
-  height: 480
+  width: 320
+  height: 320
   fps: 25
   every_n_control_steps: 4   # 100 Hz control / 4 -> 25 fps, i.e. real time
   hud: true
@@ -397,16 +404,18 @@ act:
   device: mps
   batch_size: 4
   image_stat_samples: 100
-  max_steps: 100000
-  checkpoint_start_step: 50000
-  checkpoint_every_steps: 10000
-  keep_checkpoints: 6
-  train_hours: 24
+  max_steps: 200000
+  checkpoint_start_step: 100000
+  checkpoint_every_steps: 100000
+  keep_checkpoints: 2
+  # Five-view MPS benchmark is about 30 optimizer steps/min at batch 4.
+  # Allow the full requested run (estimated ~4.7 days) to reach step 200k.
+  train_hours: 192
   training_episodes_per_target: 50
   # Keep the reviewed preview records separate from the clean randomized
   # 300-episode training dataset.
-  dataset_dir: runs/act_dataset_five_view_rudra_300_train_v1
-  model_dir: runs/act_model_five_view_rudra_v1
+  dataset_dir: runs/act_dataset_five_view_rudra_300_smooth320_v1
+  model_dir: runs/act_model_five_view_rudra_300_smooth320_v1
   realtime_budget_seconds: 0.2
   approach_sample_fraction: 0.35
   tracking_project: act-ur10-sweep-full-episode-v1

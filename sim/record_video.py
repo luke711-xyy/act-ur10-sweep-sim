@@ -81,12 +81,13 @@ def record_one(cfg, planner: str, args, out_path: str):
     from .environments.episode import run_episode
     from .video import EpisodeRecorder
 
+    policy_width, policy_height = (int(value) for value in cfg.act.image_size)
     recorder = EpisodeRecorder(
         cfg, out_path,
         cameras=args.cameras, fps=args.fps, every_n=args.every_n,
         hud=not args.no_hud,
-        size=(args.width or cfg.get_path("video.width", 640),
-              args.height or cfg.get_path("video.height", 480)),
+        size=(args.width or cfg.get_path("video.width", policy_width),
+              args.height or cfg.get_path("video.height", policy_height)),
     )
 
     from .environments.sweep_env import SweepEnv

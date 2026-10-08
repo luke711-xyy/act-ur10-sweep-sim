@@ -905,25 +905,20 @@ def _expert_execution_path(cfg, plan: ExpertPlan,
     descent[:, 0:2] = points[1]
     descent[:, 2] = descent_z
     descent[:, 3] = first_yaw
-    if len(points) >= 4:
-        # Keep the final loaded push in the same continuous arc-length clock.
-        # A previous fixed hold at points[-2] made the expert stop at the tray
-        # mouth and taught ACT an artificial stop-and-go pattern.
-        sweep_prefix = sample_polyline(
-            points[1:-1], hz, float(cfg.controller.sweep_speed),
-            yaw_rate=yaw_rate, initial_yaw=first_yaw, accel=accel,
-            curve_radius=curve_radius)
-        final_push = sample_polyline(
-            points[-2:], hz,
-            float(cfg.controller.get("tray_entry_speed", cfg.controller.sweep_speed)),
-            yaw_rate=yaw_rate, initial_yaw=float(sweep_prefix[-1, 3]), accel=accel,
-            curve_radius=curve_radius)
-        sweep = np.concatenate((sweep_prefix, final_push), axis=0)
-    else:
-        sweep = sample_polyline(
-            points[1:], hz, float(cfg.controller.sweep_speed),
-            yaw_rate=yaw_rate, initial_yaw=first_yaw, accel=accel,
-            curve_radius=curve_radius)
+    final_push_distance = (
+        float(np.linalg.norm(points[-1] - points[-2]))
+        if len(points) >= 4 else 0.0
+    )
+    sweep = sample_polyline(
+        points[1:], hz, float(cfg.controller.sweep_speed),
+        yaw_rate=yaw_rate, initial_yaw=first_yaw, accel=accel,
+        curve_radius=curve_radius,
+        terminal_speed=(
+            float(cfg.controller.get("tray_entry_speed", cfg.controller.sweep_speed))
+            if final_push_distance > 0.0 else None
+        ),
+        terminal_distance=final_push_distance,
+    )
     if failure_mode == "stall_outside_tray" and len(plan.target_indices):
         # The plan was generated against a virtual, laterally shifted tray in
         # ``run_expert_episode``.  Preserve that complete A* route here; the
@@ -1122,6 +1117,53 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
                -int(result.target_collected), float(plan.score))
         if best_key is None or key < best_key:
             best_key, best_failure = key, result
+
+    # The longer pre-alignment corridor prevents a last-moment yaw hook at the
+    # tray mouth, but it can be physically worse for some layouts. Preserve the
+    # old mouth-adjacent entry as a fallback, and let the same MuJoCo exact-count
+    # check choose between them instead of imposing one geometry on every task.
+    alignment_lead = max(0.0, float(planning_cfg.get_path(
+        "planner.expert_tray_alignment_lead", 0.16)))
+    if best_failure is not None and not failure_mode and alignment_lead > 1e-6:
+        fallback_cfg = planning_cfg.copy()
+        fallback_cfg.set_path("planner.expert_tray_alignment_lead", 0.0)
+        fallback_probe = SweepEnv(fallback_cfg, seed=seed)
+        fallback_probe.reset(seed=seed)
+        try:
+            fallback_candidates = expert_plan_candidates(
+                fallback_probe, fallback_cfg)
+            if not fallback_candidates:
+                fallback_candidates = [
+                    plan_expert_sweep(fallback_probe, fallback_cfg)]
+        finally:
+            fallback_probe.close()
+
+        attempt_offset = len(candidates)
+        for fallback_index, plan in enumerate(
+                fallback_candidates, start=attempt_offset + 1):
+            try:
+                result = execute(plan, fallback_index, False)
+            except RuntimeError as exc:
+                if "UR10 IK target is unreachable" not in str(exc):
+                    raise
+                result = ActRolloutResult(
+                    success=False,
+                    failure_reason=f"candidate rejected by IK: {exc}",
+                    total=len(probe.layout), target_count=requested_target_count,
+                    target_indices=[int(value) for value in plan.target_indices],
+                )
+                result = _annotate_expert_result(
+                    result, plan, fallback_index)
+            if result.success and collect_observations:
+                result = execute(plan, fallback_index, True)
+            if result.success:
+                return result
+            key = (int(result.unexpected_collected > 0),
+                   abs(int(result.target_count) - int(result.target_collected)),
+                   -int(result.target_collected), float(plan.score))
+            if best_key is None or key < best_key:
+                best_key, best_failure = key, result
+
     if best_failure is not None:
         return best_failure
     raise RuntimeError("expert candidate search returned no executable plan")

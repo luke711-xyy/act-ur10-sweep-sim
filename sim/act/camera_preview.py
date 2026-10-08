@@ -87,16 +87,26 @@ def compose_contact_sheet(frames: Mapping[str, np.ndarray], *, columns: int = 2,
     return sheet
 
 
+def preview_render_size(cfg, width: int | None = None,
+                        height: int | None = None) -> tuple[int, int]:
+    """Use ACT's frame dimensions for preview exports unless overridden."""
+    policy_width, policy_height = (int(value) for value in cfg.act.image_size)
+    resolved = (policy_width if width is None else int(width),
+                policy_height if height is None else int(height))
+    if any(value < 1 for value in resolved):
+        raise ValueError("render dimensions must be positive")
+    return resolved
+
+
 def render_candidate_views(*, output_dir: str | Path = "runs/five_view_camera_preview",
-                           seed: int = 2026, width: int = 640, height: int = 480,
+                           seed: int = 2026, width: int | None = None,
+                           height: int | None = None,
                            config_path: str | Path | None = None) -> dict[str, Path]:
     """Render four views of one fixed randomized scene and a contact sheet."""
-    if width < 1 or height < 1:
-        raise ValueError("render dimensions must be positive")
-
     from PIL import Image
 
     cfg = load_config(str(config_path) if config_path is not None else None)
+    width, height = preview_render_size(cfg, width, height)
     specs = candidate_camera_specs(cfg)
     extra = cfg.video.extra_cameras.to_dict()
     extra.update(specs)
@@ -141,8 +151,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--output", default="runs/five_view_camera_preview")
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--width", type=int, default=None)
+    parser.add_argument("--height", type=int, default=None)
     parser.add_argument("--config", default=None)
     args = parser.parse_args()
     paths = render_candidate_views(output_dir=args.output, seed=args.seed,

@@ -1,6 +1,7 @@
 import numpy as np
 
-from sim.act.camera_preview import candidate_camera_specs
+from sim.act.camera_preview import (candidate_camera_specs,
+                                    preview_render_size)
 from sim.config import load_config
 
 
@@ -39,3 +40,10 @@ def test_candidate_camera_specs_keep_each_view_above_and_outside_table_corners()
         assert abs(y) >= half_y + margin
         assert z >= cfg.table.top_z + 0.85
         assert spec["up"] == [0.0, 0.0, 1.0]
+
+
+def test_candidate_view_export_defaults_to_policy_image_size():
+    cfg = load_config()
+    expected_size = tuple(int(value) for value in cfg.act.image_size)
+    assert preview_render_size(cfg) == expected_size
+    assert preview_render_size(cfg, width=640) == (640, expected_size[1])

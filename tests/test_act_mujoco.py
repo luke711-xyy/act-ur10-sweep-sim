@@ -689,9 +689,7 @@ def test_expert_finishes_last_object_with_a_horizontal_sweep():
         safe_y = (min(float(cfg.target.y_max), -float(cfg.target.y_min))
                   - half_width - float(cfg.target.wall_thickness))
         assert np.all(np.abs(points[inside, 1]) <= safe_y + 1e-9)
-        assert points[-1, 0] == pytest.approx(
-            float(np.clip(float(cfg.planner.stroke_end_x),
-                          float(cfg.workspace.x_min), float(cfg.workspace.x_max))))
+        assert points[-1, 0] == pytest.approx(_tray_exit_x(cfg))
     finally:
         env.close()
 
@@ -720,6 +718,81 @@ def test_expert_final_push_has_no_artificial_long_hold():
     outside_entry = np.array([-0.32, 0.0])
     held = np.linalg.norm(sweep[:, :2] - outside_entry, axis=1) < 1e-6
     assert int(held.sum()) <= 3
+
+
+def test_expert_final_push_uses_one_continuous_speed_profile():
+    cfg = load_config()
+    plan = ExpertPlan(
+        target_indices=np.array([0]),
+        waypoints=np.array([
+            [0.42, 0.0], [0.20, 0.0], [-0.32, 0.0], [-0.40, 0.0],
+        ]),
+        feasible=True,
+    )
+
+    path, phases = _expert_execution_path(cfg, plan)
+    sweep = path[np.asarray(phases) == "sweep"]
+    step_lengths = np.linalg.norm(np.diff(sweep[:, :2], axis=0), axis=1)
+
+    # No artificial zero-speed seam at the tray mouth; the only endpoint is
+    # the end of the final loaded push.
+    assert not np.any(step_lengths[:-1] < 1e-8)
+    final_segment = step_lengths[-int(round(
+        0.08 / float(cfg.controller.tray_entry_speed)
+        * float(cfg.act.action_hz))):]
+    assert float(np.max(final_segment) * float(cfg.act.action_hz)) <= (
+        float(cfg.controller.tray_entry_speed) + 0.005)
+
+
+def test_expert_candidate_score_penalizes_slow_entry_hook():
+    from sim.act.expert import _delivery_slowdown_penalty
+
+    cfg = load_config()
+    straight_entry = np.asarray([
+        [0.42, 0.0], [0.20, 0.0], [-0.32, 0.0], [-0.40, 0.0],
+    ])
+    hooked_entry = np.asarray([
+        [0.42, 0.0], [0.20, 0.0], [-0.28, 0.0], [-0.30, 0.04],
+        [-0.32, 0.0], [-0.40, 0.0],
+    ])
+
+    straight_cost = _delivery_slowdown_penalty(cfg, straight_entry, 0.025)
+    hooked_cost = _delivery_slowdown_penalty(cfg, hooked_entry, 0.025)
+
+    assert hooked_cost > straight_cost + 0.01
+
+
+def test_route_screening_penalizes_sharp_turns_and_turning_near_stops():
+    from sim.act.expert import _route_motion_metrics, _route_motion_penalty
+
+    cfg = load_config()
+    smooth = np.asarray([
+        [0.42, 0.0], [0.20, 0.0], [-0.32, 0.0], [-0.40, 0.0],
+    ])
+    zigzag = np.asarray([
+        [0.42, 0.0], [0.20, 0.0], [0.16, 0.04], [0.12, -0.04],
+        [0.08, 0.04], [0.04, -0.04], [0.0, 0.0], [-0.32, 0.0],
+        [-0.40, 0.0],
+    ])
+
+    smooth_metrics = _route_motion_metrics(cfg, smooth, 0.025)
+    zigzag_metrics = _route_motion_metrics(cfg, zigzag, 0.025)
+
+    assert zigzag_metrics["curvature_energy"] > smooth_metrics["curvature_energy"]
+    assert zigzag_metrics["peak_required_yaw_rate"] > (
+        smooth_metrics["peak_required_yaw_rate"])
+    assert zigzag_metrics["sharp_turn_low_speed_seconds"] > 0.0
+    assert _route_motion_penalty(cfg, zigzag, 0.025) > (
+        _route_motion_penalty(cfg, smooth, 0.025) + 0.05)
+
+
+def test_expert_tray_entry_has_room_to_align_before_the_mouth():
+    from sim.act.expert import _tray_entry_point
+
+    cfg = load_config()
+    entry = _tray_entry_point(cfg, 0.0)
+
+    assert entry[0] >= float(cfg.target.x_max) + 0.16 - 1e-6
 
 
 def test_expert_execution_path_preserves_symmetric_yaw_branch():
@@ -1395,8 +1468,11 @@ def test_coverage_astar_ranks_routes_with_physical_capture_robustness():
         candidates = _coverage_astar_candidates(env, cfg, 6)
         assert candidates
         for score, path, selected, _ in candidates:
+            from sim.act.expert import _route_motion_penalty
+
             robust_score, _ = _score_capture_plan(env, cfg, selected, path)
-            assert score == pytest.approx(robust_score)
+            assert score == pytest.approx(
+                robust_score + _route_motion_penalty(cfg, path, 0.0))
         assert [score for score, *_ in candidates] == sorted(
             score for score, *_ in candidates)
     finally:
@@ -1437,31 +1513,38 @@ def test_curve_planner_tracks_yaw_on_dispersed_six_part_layout():
 
 
 def test_expert_planner_returns_both_symmetric_brush_yaw_branches(monkeypatch):
-    """A geometric sweep must be tried in both physically equivalent yaw branches."""
+    """Try every low-rotation branch before the symmetric fallback branch."""
     import sim.act.expert as expert
 
     cfg = load_config(overrides=[
         "sim.real_time=false", "components.count=6", "task.target_count=1",
     ])
-    env = SimpleNamespace(component_positions=lambda: np.asarray([
-        [0.20, -0.10], [0.20, -0.05], [0.20, 0.00],
-        [0.20, 0.05], [0.20, 0.10], [0.24, 0.00],
-    ]))
+    env = SimpleNamespace(
+        component_positions=lambda: np.asarray([[0.20, 0.0]]),
+        ee=SimpleNamespace(tcp_yaw=lambda: np.pi - 0.1),
+    )
     waypoints = np.asarray([[0.42, 0.0], [0.20, 0.0], [-0.40, 0.0]])
+    alternate_waypoints = np.asarray([
+        [0.42, 0.0], [0.20, 0.04], [-0.40, 0.04],
+    ])
     monkeypatch.setattr(expert, "_capture_lane_candidates",
-                        lambda _env, _cfg, _order: [(1.0, waypoints)])
+                        lambda _env, _cfg, _order: [
+                            (1.0, waypoints), (2.0, alternate_waypoints),
+                        ])
     monkeypatch.setattr(expert, "_coverage_astar_candidates",
                         lambda *_args: [])
     monkeypatch.setattr(expert, "_score_capture_plan",
                         lambda *_args: (1.0, 0))
 
-    candidates = expert.expert_plan_candidates(env, cfg, max_candidates=1)
+    candidates = expert.expert_plan_candidates(env, cfg, max_candidates=2)
 
-    assert len(candidates) == 2
+    assert len(candidates) == 4
     assert [candidate.yaw_offset for candidate in candidates] == pytest.approx(
-        [0.0, np.pi])
-    np.testing.assert_array_equal(candidates[0].waypoints,
-                                  candidates[1].waypoints)
+        [np.pi, np.pi, 0.0, 0.0])
+    np.testing.assert_array_equal(candidates[0].waypoints, waypoints)
+    np.testing.assert_array_equal(candidates[1].waypoints, alternate_waypoints)
+    np.testing.assert_array_equal(candidates[2].waypoints, waypoints)
+    np.testing.assert_array_equal(candidates[3].waypoints, alternate_waypoints)
 
 
 def test_target_six_curve_retries_equivalent_yaw_for_missed_layout():
@@ -1542,6 +1625,7 @@ def test_expert_retries_next_candidate_after_physical_failure(monkeypatch):
         def __init__(self, _cfg, seed):
             self.seed = seed
             self.layout = [object() for _ in range(6)]
+            self.table_top_z = 0.0
 
         def reset(self, seed=None):
             self.seed = seed
@@ -1581,3 +1665,65 @@ def test_expert_retries_next_candidate_after_physical_failure(monkeypatch):
     assert result.unexpected_collected == 0
     assert result.planner_attempts == 2
     assert result.target_indices == [1]
+
+
+def test_expert_falls_back_to_original_tray_entry_after_aligned_routes_fail(
+        monkeypatch):
+    """Longer pre-alignment is preferred, but cannot veto a proven baseline route."""
+    import sim.act.rollout as rollout
+
+    cfg = load_config(overrides=[
+        "sim.real_time=false", "components.count=6", "task.target_count=6",
+    ])
+    planned_leads = []
+    execution_yaws = []
+
+    class FakeEnv:
+        def __init__(self, _cfg, seed):
+            self.seed = seed
+            self.layout = [object() for _ in range(6)]
+            self.table_top_z = 0.0
+
+        def reset(self, seed=None):
+            self.seed = seed
+
+        def close(self):
+            pass
+
+    def fake_candidates(_env, planner_cfg):
+        lead = float(planner_cfg.planner.expert_tray_alignment_lead)
+        planned_leads.append(lead)
+        return [ExpertPlan(
+            target_indices=np.arange(6),
+            waypoints=np.asarray([[0.42, 0.0], [-0.40, 0.0]]),
+            feasible=True, score=1.0, strategy=f"lead_{lead}",
+            yaw_offset=lead,
+        )]
+
+    def fake_execution_path(_cfg, plan, *_args, **_kwargs):
+        return np.asarray([[0.0, 0.0, 0.1, plan.yaw_offset]], dtype=np.float32), ["sweep"]
+
+    def fake_run_action_path(_env, _cfg, path, **kwargs):
+        yaw = float(path[0, 3])
+        execution_yaws.append(yaw)
+        success = yaw == pytest.approx(0.0)
+        return rollout.ActRolloutResult(
+            success=success,
+            failure_reason="" if success else "contact lost for 100 ms",
+            total=6, target_count=6, collected=6 if success else 0,
+            target_indices=kwargs["target_indices"].tolist(),
+            target_collected=6 if success else 0,
+        )
+
+    monkeypatch.setattr(rollout, "SweepEnv", FakeEnv)
+    monkeypatch.setattr(rollout, "expert_plan_candidates", fake_candidates)
+    monkeypatch.setattr(rollout, "_expert_execution_path", fake_execution_path)
+    monkeypatch.setattr(rollout, "run_action_path", fake_run_action_path)
+
+    result = rollout.run_expert_episode(
+        cfg, seed=5203, collect_observations=False)
+
+    assert result.success
+    assert planned_leads == pytest.approx([0.16, 0.0])
+    assert execution_yaws == pytest.approx([0.16, 0.0])
+    assert result.planner_strategy == "lead_0.0"

@@ -51,8 +51,12 @@ class EpisodeRecorder:
         self.fps = int(fps or (vcfg.fps if vcfg else 25))
         self.every_n = int(every_n or (vcfg.every_n_control_steps if vcfg else 4))
         self.hud = bool(cfg.get_path("video.hud", True) if hud is None else hud)
-        self.width = int(size[0] if size else cfg.get_path("video.width", 640))
-        self.height = int(size[1] if size else cfg.get_path("video.height", 480))
+        policy_size = tuple(int(value) for value in cfg.get_path(
+            "act.image_size", [640, 480]))
+        self.width = int(size[0] if size else cfg.get_path(
+            "video.width", policy_size[0]))
+        self.height = int(size[1] if size else cfg.get_path(
+            "video.height", policy_size[1]))
         self.path = path
         self._renderer = None
         self._writer = None

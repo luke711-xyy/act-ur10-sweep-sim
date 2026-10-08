@@ -366,12 +366,15 @@ def _polyline_point_distance(point: np.ndarray, path: np.ndarray) -> float:
 
 
 def _tray_entry_point(cfg, delivery_y: float) -> np.ndarray:
-    """Return a point just outside the tray with the final y already aligned."""
+    """Return a pre-alignment point before the tray's straight delivery lane."""
     margin = max(
         float(_planner_value(cfg, "expert_tray_entry_margin", 0.02)),
         float(_planner_value(cfg, "expert_grid_resolution", 0.01)),
     )
-    entry_x = max(float(cfg.target.x_max) + margin,
+    alignment_lead = max(
+        0.0, float(_planner_value(cfg, "expert_tray_alignment_lead", 0.16))
+    )
+    entry_x = max(float(cfg.target.x_max) + margin + alignment_lead,
                   float(cfg.planner.stroke_end_x))
     entry_x = float(np.clip(entry_x, float(cfg.workspace.x_min),
                             float(cfg.workspace.x_max)))
@@ -734,6 +737,7 @@ def _curved_capture_candidates(env, cfg, order: tuple[int, ...]
         if unintended:
             continue
         score, _ = _score_capture_plan(env, cfg, sequence, rounded)
+        score += _route_motion_penalty(cfg, rounded, 0.0)
         # Keep equal-length straight strips ahead, but retain these winding
         # alternatives in the execution shortlist for layouts where contact
         # physics rejects the geometric optimum.
@@ -1151,6 +1155,7 @@ def _coverage_astar_candidates(env, cfg, target_count: int
             # Length-only ranking systematically promoted short grazing paths
             # that satisfy the geometric mask but lose objects in MuJoCo.
             score, _ = _score_capture_plan(env, cfg, selected, rounded)
+            score += _route_motion_penalty(cfg, rounded, 0.0)
             candidates.append((float(score), rounded, selected, turns))
             round_candidates.append((float(score), states))
 
@@ -1320,6 +1325,9 @@ def expert_plan_candidates(env, cfg, max_candidates: int | None = None) -> list[
         order = tuple(sorted(candidate, key=lambda index: positions[index, 0], reverse=True))
         for _, path in _capture_lane_candidates(env, cfg, order):
             score, turn_count = _score_capture_plan(env, cfg, order, path)
+            score += _route_motion_penalty(
+                cfg, path,
+                float(_planner_value(cfg, "expert_corner_radius", 0.025)))
             lane_candidates.append(ExpertPlan(
                 target_indices=np.asarray(order, dtype=int),
                 waypoints=np.asarray(path, dtype=float),
@@ -1349,7 +1357,8 @@ def expert_plan_candidates(env, cfg, max_candidates: int | None = None) -> list[
     curved_candidates.sort(key=key)
     if limit == 1:
         selected = sorted(lane_candidates + curved_candidates, key=key)[:1]
-        return _add_symmetric_yaw_branches(selected)
+        return _add_symmetric_yaw_branches(
+            selected, _current_brush_yaw(env))
 
     # Reserve shortlist capacity for both straight capture strips and global
     # curved coverage routes so a short strip cannot crowd out all turns.
@@ -1361,11 +1370,20 @@ def expert_plan_candidates(env, cfg, max_candidates: int | None = None) -> list[
         remaining = [item for item in sorted(lane_candidates + curved_candidates, key=key)
                      if id(item) not in already]
         selected.extend(remaining[:limit - len(selected)])
-    return _add_symmetric_yaw_branches(sorted(selected, key=key))
+    return _add_symmetric_yaw_branches(
+        sorted(selected, key=key), _current_brush_yaw(env))
 
 
-def _add_symmetric_yaw_branches(plans: list[ExpertPlan]) -> list[ExpertPlan]:
-    """Duplicate geometric paths at yaw 0 and pi for the symmetric brush."""
+def _current_brush_yaw(env) -> float:
+    """Read the reset TCP yaw when available, defaulting for planner-only callers."""
+    ee = getattr(env, "ee", None)
+    tcp_yaw = getattr(ee, "tcp_yaw", None)
+    return float(tcp_yaw()) if callable(tcp_yaw) else 0.0
+
+
+def _add_symmetric_yaw_branches(plans: list[ExpertPlan],
+                                current_yaw: float = 0.0) -> list[ExpertPlan]:
+    """Try all low-rotation brush-yaw branches before larger reset turns."""
     branched = []
     for plan in plans:
         for yaw_offset in (0.0, float(np.pi)):
@@ -1379,7 +1397,19 @@ def _add_symmetric_yaw_branches(plans: list[ExpertPlan]) -> list[ExpertPlan]:
                 strategy=plan.strategy,
                 yaw_offset=yaw_offset,
             ))
-    return branched
+    # Branches are physically equivalent for the symmetric plate, but not
+    # necessarily equivalent for the arm's IK or gripper assembly. Exhaust
+    # the branch closest to the reset TCP yaw across the geometric shortlist
+    # before falling back to the opposite orientation.
+    return sorted(
+        branched,
+        key=lambda plan: (
+            abs(_wrap_angle(float(plan.yaw_offset) - float(current_yaw))),
+            float(plan.score), tuple(plan.target_indices.tolist()),
+            str(plan.strategy), tuple(np.round(plan.waypoints[-1], 4)),
+            float(plan.yaw_offset),
+        ),
+    )
 
 
 def _best_target_sweep_plan(env, cfg, target_count: int):
@@ -1522,7 +1552,9 @@ def sample_polyline(points: np.ndarray, hz: float, speed: float,
                     yaw_rate: float = np.deg2rad(45.0),
                     initial_yaw: float | None = None,
                     accel: float = 0.8,
-                    curve_radius: float = 0.025) -> np.ndarray:
+                    curve_radius: float = 0.025,
+                    terminal_speed: float | None = None,
+                    terminal_distance: float = 0.0) -> np.ndarray:
     """Time-parameterize a rounded path without letting XY outrun brush yaw.
 
     Curvature limits the local translational speed to ``yaw_rate / |curvature|``;
@@ -1571,6 +1603,12 @@ def sample_polyline(points: np.ndarray, hz: float, speed: float,
 
     curvature = np.gradient(curve_yaw, arc)
     speed_limit = np.full_like(arc, max(float(speed), 1e-4))
+    if terminal_speed is not None and float(terminal_distance) > 0.0:
+        terminal_start = max(
+            0.0, total_length - min(total_length, float(terminal_distance)))
+        terminal_mask = arc >= terminal_start
+        speed_limit[terminal_mask] = np.minimum(
+            speed_limit[terminal_mask], max(float(terminal_speed), 1e-4))
     if yaw is None:
         angular_limit = max(float(yaw_rate), 1e-4)
         turning = np.abs(curvature) > 1e-6
@@ -1616,3 +1654,122 @@ def sample_polyline(points: np.ndarray, hz: float, speed: float,
             np.clip(delta, -max_step, max_step))
     return np.column_stack((sampled_xy, np.full(len(times), 0.18),
                             sampled_yaw)).astype(np.float32)
+
+
+def _route_motion_metrics(cfg, path: np.ndarray,
+                          curve_radius: float) -> dict[str, float]:
+    """Estimate the executed route's curvature, yaw demand, and turn slowdowns."""
+    points = np.asarray(path, dtype=float).reshape(-1, 2)
+    empty = {
+        "curvature_energy": 0.0,
+        "turn_rate_excess_energy": 0.0,
+        "sharp_turn_low_speed_seconds": 0.0,
+        "delivery_slowdown_seconds": 0.0,
+        "peak_curvature": 0.0,
+        "peak_yaw_rate": 0.0,
+        "peak_required_yaw_rate": 0.0,
+    }
+    if len(points) < 2:
+        return empty
+
+    hz = float(cfg.act.action_hz)
+    sweep_speed = float(cfg.controller.sweep_speed)
+    yaw_rate_limit = float(cfg.controller.get(
+        "yaw_speed_limit", np.deg2rad(45.0)))
+    tray_speed = float(cfg.controller.get("tray_entry_speed", sweep_speed))
+    final_distance = float(np.linalg.norm(points[-1] - points[-2]))
+    if hz <= 0.0 or sweep_speed <= 0.0:
+        return empty
+
+    # The first waypoint is the fixed staging/contact-home point. Execution
+    # descends at the following waypoint, so score the same contact path ACT's
+    # expert actually executes rather than charging the airborne connector.
+    sweep_points = points[1:] if len(points) >= 3 else points
+    sampled = sample_polyline(
+        sweep_points, hz, sweep_speed,
+        yaw_rate=yaw_rate_limit,
+        accel=float(cfg.get_path("planner.accel", 0.8)),
+        curve_radius=float(curve_radius),
+        terminal_speed=(tray_speed if len(sweep_points) >= 3 else None),
+        terminal_distance=(final_distance if len(sweep_points) >= 3 else 0.0),
+    )
+    segment_lengths = np.linalg.norm(np.diff(sampled[:, :2], axis=0), axis=1)
+    if not len(segment_lengths):
+        return empty
+
+    speed = segment_lengths * hz
+    yaw_delta = np.abs(np.diff(sampled[:, 3]))
+    yaw_rate = yaw_delta * hz
+    curvature = yaw_delta / np.maximum(segment_lengths, 1e-4)
+    curvature_energy = float(np.sum(curvature ** 2 * segment_lengths))
+    yaw_demand_ratio = curvature * sweep_speed / max(yaw_rate_limit, 1e-6)
+    sharp_yaw_ratio = float(_planner_value(
+        cfg, "expert_route_sharp_yaw_demand_ratio", 0.50))
+    excess_turn_demand = np.maximum(yaw_demand_ratio - sharp_yaw_ratio, 0.0)
+    turn_rate_excess_energy = float(np.sum(
+        excess_turn_demand ** 2 * segment_lengths))
+    sharp_curvature = (yaw_rate_limit / sweep_speed) * sharp_yaw_ratio
+    slow_speed_ratio = float(_planner_value(
+        cfg, "expert_route_slow_speed_ratio", 0.55))
+    slow_turn = ((curvature >= sharp_curvature)
+                 & (speed < slow_speed_ratio * sweep_speed))
+    sharp_turn_low_speed_seconds = float(np.count_nonzero(slow_turn)) / hz
+
+    delivery_slowdown_seconds = 0.0
+    if len(sweep_points) >= 3 and final_distance > 1e-6:
+        remaining = (np.cumsum(segment_lengths[::-1])[::-1]
+                     - 0.5 * segment_lengths)
+        entry_window = max(
+            0.08,
+            float(_planner_value(cfg, "expert_tray_entry_margin", 0.02)) + 0.06,
+        )
+        delivery_threshold = min(0.5 * sweep_speed, 0.75 * tray_speed)
+        before_entry = ((remaining > final_distance + 1e-6)
+                        & (remaining <= final_distance + entry_window))
+        delivery_slowdown_seconds = float(np.count_nonzero(
+            before_entry & (speed < delivery_threshold))) / hz
+
+    return {
+        "curvature_energy": curvature_energy,
+        "turn_rate_excess_energy": turn_rate_excess_energy,
+        "sharp_turn_low_speed_seconds": sharp_turn_low_speed_seconds,
+        "delivery_slowdown_seconds": delivery_slowdown_seconds,
+        "peak_curvature": float(np.max(curvature, initial=0.0)),
+        "peak_yaw_rate": float(np.max(yaw_rate, initial=0.0)),
+        "peak_required_yaw_rate": float(np.max(
+            curvature * sweep_speed, initial=0.0)),
+    }
+
+
+def _route_motion_penalty(cfg, path: np.ndarray,
+                          curve_radius: float) -> float:
+    """Rank routes by executable curvature and turning-induced slow motion.
+
+    The exact-count/collision geometry remains a hard filter. This soft cost
+    then prefers broad, trackable turns over paths that demand excessive yaw
+    rate or spend a long time creeping through sharp corners.
+    """
+    metrics = _route_motion_metrics(cfg, path, curve_radius)
+    curvature_weight = float(_planner_value(
+        cfg, "expert_route_curvature_score_weight", 0.0003))
+    turn_rate_weight = float(_planner_value(
+        cfg, "expert_route_turn_rate_score_weight", 0.008))
+    slow_turn_weight = float(_planner_value(
+        cfg, "expert_route_slow_turn_score_weight", 0.04))
+    delivery_weight = float(_planner_value(
+        cfg, "expert_delivery_slowdown_score_weight", 0.01))
+    return float(
+        curvature_weight * metrics["curvature_energy"]
+        + turn_rate_weight * metrics["turn_rate_excess_energy"]
+        + slow_turn_weight * metrics["sharp_turn_low_speed_seconds"]
+        + delivery_weight * metrics["delivery_slowdown_seconds"]
+    )
+
+
+def _delivery_slowdown_penalty(cfg, path: np.ndarray,
+                               curve_radius: float) -> float:
+    """Compatibility helper for the delivery-only slowdown score."""
+    metrics = _route_motion_metrics(cfg, path, curve_radius)
+    weight = float(_planner_value(
+        cfg, "expert_delivery_slowdown_score_weight", 0.01))
+    return weight * metrics["delivery_slowdown_seconds"]

@@ -163,7 +163,9 @@ def test_recorder_reads_its_configuration(cfg):
     rec = EpisodeRecorder(cfg, "/tmp/does-not-exist.mp4")
     assert rec.cameras == list(cfg.video.cameras)
     assert rec.fps == int(cfg.video.fps)
-    assert rec.force_gauge_max == pytest.approx(2.5 * float(cfg.controller.desired_force))
+    assert (rec.width, rec.height) == tuple(int(v) for v in cfg.act.image_size)
+    assert rec.force_gauge_max == pytest.approx(
+        max(2.5 * float(cfg.controller.desired_force), 1.0))
 
 
 def test_recorder_composes_panes_and_hud(cfg):
