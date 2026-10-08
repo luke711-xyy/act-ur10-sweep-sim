@@ -69,6 +69,18 @@ def test_observation_builder_emits_all_five_policy_images_and_only_goal_count():
     np.testing.assert_array_equal(observation["supervisor_state"], [6, 4, 1])
 
 
+def test_default_collection_config_uses_five_views_and_rudra_force_tuning():
+    cfg = load_config()
+
+    assert tuple(cfg.act.camera_views) == VIEWS
+    assert int(cfg.components.count) == 6
+    assert int(cfg.act.training_episodes_per_target) == 50
+    assert cfg.controller.force_sensor == "wrist_ft"
+    assert float(cfg.controller.desired_force) == 0.1
+    assert float(cfg.controller.force_filter_cutoff_hz) == 5.0
+    assert float(cfg.controller.yaw_speed_limit) == 0.35
+
+
 def test_five_view_episode_round_trips_through_dataset_and_workbench(tmp_path):
     cfg = load_config(overrides=[
         "act.image_size=[16,16]", f"act.dataset_dir={tmp_path / 'dataset'}",

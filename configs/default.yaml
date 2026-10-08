@@ -141,7 +141,9 @@ controller:
   contact_threshold: 0.05     # sensor latch below the 0.1 N force target
   release_threshold: 0.02
   force_ramp_rate: 15.0      # N/s, used for ramp-up and ramp-down
-  force_filter_cutoff_hz: 12.0
+  # Keep the wrist F/T sensor as the sole force source; the lower cutoff
+  # attenuates brief impact transients before the 100 Hz admittance update.
+  force_filter_cutoff_hz: 5.0
   admittance:
     # Retuned for the imported Rudra CB3 arm and its wrist-sensor force loop.
     m: 0.5
@@ -161,7 +163,7 @@ controller:
   sweep_speed: 0.08          # slower for the longer gripper/brush lever arm [m/s]
   tray_entry_speed: 0.04     # slow only the final loaded push near the -X reach limit [m/s]
   recovery_speed: 0.04       # contact-preserving miss chase / tray exit [m/s]
-  yaw_speed_limit: 0.7853981634  # 45 deg/s at the high-level reference grid
+  yaw_speed_limit: 0.35         # ~20 deg/s; smoother in-plane brush turns
   travel_speed: 0.35         # XY speed for lifted transfer motions [m/s]
   z_speed: 0.12              # fast initial expert descent [m/s]
   expert_contact_slow_band: 0.008
