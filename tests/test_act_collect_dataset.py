@@ -197,16 +197,16 @@ def test_approved_generator_resume_skips_previously_failed_seeds(
     assert events[0]["seed"] == 940001
 
 
-def test_capture_training_episode_screens_without_images_then_replays_for_capture(
+def test_capture_training_episode_delegates_candidate_screening_to_expert_rollout(
     tmp_path, monkeypatch,
 ):
     calls = []
     writes = []
 
-    def result():
+    def result(success=True):
         return SimpleNamespace(
-            success=True,
-            failure_reason="",
+            success=success,
+            failure_reason="contact lost for 100 ms" if not success else "",
             collected=1,
             target_count=1,
             planner_status="feasible",
@@ -214,18 +214,12 @@ def test_capture_training_episode_screens_without_images_then_replays_for_captur
             planner_turn_count=2,
             planner_attempts=1,
             sampled_frames=2,
-            final_collected_mask=np.array([True]),
-            trace=[
-                {"t": 0.01, "tcp": np.array([0.1, 0.2, 0.3]),
-                 "normal_force": 0.1, "contact": True, "collected": 0},
-                {"t": 0.02, "tcp": np.array([0.2, 0.2, 0.3]),
-                 "normal_force": 0.1, "contact": True, "collected": 1},
-            ],
             observations=[{"frame": 0}, {"frame": 1}],
             actions=np.zeros((2, 4), dtype=np.float32),
+            trace=[],
         )
 
-    def rollout(_cfg, *, seed, collect_observations):
+    def rollout(_cfg, *, seed, collect_observations, **_kwargs):
         calls.append((seed, collect_observations))
         return result()
 
@@ -245,52 +239,47 @@ def test_capture_training_episode_screens_without_images_then_replays_for_captur
         generation_attempt=1,
     )
 
-    assert calls == [(5123, False), (5123, True)]
+    assert calls == [(5123, True)]
     assert episode["episode_id"] == "expert_goal_1_0001"
     assert len(writes) == 1
 
 
-def test_capture_training_episode_rejects_screen_capture_dynamics_mismatch(
+def test_capture_training_episode_rejects_failed_expert_rollout_without_writing(
     tmp_path, monkeypatch,
 ):
     calls = []
+    writes = []
 
-    def result(captured):
-        tcp = np.array([0.1, 0.2, 0.3])
-        if captured:
-            tcp[2] += 0.001
+    def rollout(_cfg, *, seed, collect_observations, **_kwargs):
+        calls.append((seed, collect_observations))
         return SimpleNamespace(
-            success=True,
-            failure_reason="",
-            collected=1,
+            success=False,
+            failure_reason="contact lost for 100 ms",
+            collected=0,
             target_count=1,
             planner_status="feasible",
             planner_strategy="coverage_astar",
             planner_turn_count=2,
             planner_attempts=1,
-            sampled_frames=1,
-            final_collected_mask=np.array([True]),
-            trace=[{"t": 0.01, "tcp": tcp, "normal_force": 0.1,
-                    "contact": True, "collected": 1}],
-            observations=[{"frame": 0}],
-            actions=np.zeros((1, 4), dtype=np.float32),
+            sampled_frames=30,
         )
 
-    def rollout(_cfg, *, seed, collect_observations):
-        calls.append(collect_observations)
-        return result(collect_observations)
+    class Writer:
+        def add_episode(self, *args, **kwargs):
+            writes.append((args, kwargs))
 
     monkeypatch.setattr(collect_dataset, "_expert_config", lambda *_args: "cfg")
     monkeypatch.setattr(collect_dataset, "run_expert_episode", rollout)
     spec = collect_dataset.EpisodeSpec(
         "train", 1, 5123, "train_n1_layout_000", "independent")
 
-    with pytest.raises(RuntimeError, match="control trace field tcp"):
+    with pytest.raises(RuntimeError, match="contact lost for 100 ms"):
         collect_dataset._capture_training_episode(
-            object(), object(), tmp_path, spec, requested_seed=5123,
+            object(), Writer(), tmp_path, spec, requested_seed=5123,
             generation_attempt=1,
         )
-    assert calls == [False, True]
+    assert calls == [(5123, True)]
+    assert writes == []
 
 
 def test_approved_plan_cli_passes_custom_episodes_per_target(tmp_path, monkeypatch):
