@@ -1329,6 +1329,49 @@ def test_global_coverage_astar_produces_a_curved_exact_count_demonstration():
     assert result.peak_force < float(cfg.controller.safe_max_force)
 
 
+def test_coverage_astar_cached_heuristic_matches_scalar_formula():
+    from sim.act.expert import _coverage_astar_heuristic_table
+
+    xs = np.linspace(-0.3, 0.3, 4)
+    ys = np.linspace(-0.2, 0.2, 3)
+    grid_points = np.stack(np.meshgrid(xs, ys, indexing="ij"), axis=-1)
+    goal_points = np.asarray([[-0.45, 0.15], [-0.5, -0.1]])
+    positions = np.asarray([
+        [-0.22, -0.08], [-0.12, 0.03], [0.02, 0.09],
+        [0.18, 0.01], [0.25, -0.1], [0.06, -0.12],
+    ])
+    radii = np.asarray([0.01, 0.012, 0.009, 0.011, 0.01, 0.008])
+    brush_width, brush_depth, target_count = 0.12, 0.018, 3
+
+    table = _coverage_astar_heuristic_table(
+        grid_points, goal_points, positions, radii,
+        brush_width, brush_depth, target_count,
+    )
+    for ix in range(len(xs)):
+        for iy in range(len(ys)):
+            point = grid_points[ix, iy]
+            to_goal = min(float(np.linalg.norm(goal - point))
+                          for goal in goal_points)
+            for mask in range(1 << len(positions)):
+                remaining = target_count - mask.bit_count()
+                if remaining <= 0:
+                    expected = to_goal
+                else:
+                    uncovered = [index for index in range(len(positions))
+                                 if not (mask & (1 << index))]
+                    reach = (brush_width / 2.0 + radii[uncovered]
+                             + brush_depth / 2.0)
+                    distances = np.maximum(
+                        0.0,
+                        np.linalg.norm(positions[uncovered] - point, axis=1)
+                        - reach,
+                    )
+                    kth = float(np.partition(
+                        distances, remaining - 1)[remaining - 1])
+                    expected = max(to_goal, kth)
+                assert table[mask, ix, iy] == pytest.approx(expected, abs=1e-12)
+
+
 def test_global_coverage_astar_can_plan_all_six_on_spread_cluster():
     """All-target coverage may route through the group instead of requiring only -X contacts."""
     from sim.act.expert import _coverage_astar_candidates

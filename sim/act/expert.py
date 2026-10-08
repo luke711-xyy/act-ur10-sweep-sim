@@ -907,6 +907,48 @@ def _rounded_corner_capture_mask(previous: np.ndarray, corner: np.ndarray,
     return mask
 
 
+def _coverage_astar_heuristic_table(grid_points: np.ndarray,
+                                    goal_points: np.ndarray,
+                                    positions: np.ndarray,
+                                    radii: np.ndarray,
+                                    brush_width: float,
+                                    brush_depth: float,
+                                    target_count: int) -> np.ndarray:
+    """Precompute the unchanged A* lower bound for every grid cell and mask.
+
+    The search revisits the same small set of grid cells and captured-object
+    masks across many direction states. Computing a NumPy norm/partition on
+    every heap insertion repeats that work, so calculate it once while keeping
+    the exact distance and kth-object heuristic used by the search.
+    """
+    nx, ny = grid_points.shape[:2]
+    flattened_points = grid_points.reshape(-1, 2)
+    goal_distance = np.linalg.norm(
+        flattened_points[:, None, :] - goal_points[None, :, :], axis=2
+    ).min(axis=1).reshape(nx, ny)
+    object_count = len(positions)
+    table = np.zeros((1 << object_count, nx, ny), dtype=np.float64)
+    for mask in range(1 << object_count):
+        remaining = int(target_count) - int(mask.bit_count())
+        if remaining <= 0:
+            table[mask] = goal_distance
+            continue
+        uncovered = [index for index in range(object_count)
+                     if not (mask & (1 << index))]
+        reach = (float(brush_width) / 2.0 + radii[uncovered]
+                 + float(brush_depth) / 2.0)
+        distances = np.linalg.norm(
+            flattened_points[:, None, :] - positions[uncovered][None, :, :],
+            axis=2,
+        )
+        distances = np.maximum(0.0, distances - reach[None, :])
+        kth_distance = np.partition(
+            distances, remaining - 1, axis=1
+        )[:, remaining - 1]
+        table[mask] = np.maximum(goal_distance, kth_distance.reshape(nx, ny))
+    return table
+
+
 def _coverage_astar_candidates(env, cfg, target_count: int
                                ) -> list[tuple[float, np.ndarray,
                                                tuple[int, ...], int]]:
@@ -938,6 +980,10 @@ def _coverage_astar_candidates(env, cfg, target_count: int
         return np.array([x_min + node[0] * resolution,
                          y_min + node[1] * resolution], dtype=float)
 
+    grid_points = np.empty((nx, ny, 2), dtype=float)
+    grid_points[:, :, 0] = x_min + np.arange(nx, dtype=float)[:, None] * resolution
+    grid_points[:, :, 1] = y_min + np.arange(ny, dtype=float)[None, :] * resolution
+
     tray_half = min(abs(float(cfg.target.y_min)), abs(float(cfg.target.y_max)))
     safe_y = max(0.0, tray_half - float(cfg.end_effector.brush_width) / 2.0
                  - float(cfg.target.wall_thickness) - 0.005)
@@ -955,6 +1001,11 @@ def _coverage_astar_candidates(env, cfg, target_count: int
     capture_margin = float(_planner_value(cfg, "expert_curve_capture_margin", 0.040))
     brush_width = float(cfg.end_effector.brush_width)
     brush_depth = float(cfg.end_effector.brush_depth)
+    goal_points = np.asarray([value[0] for value in goals.values()], dtype=float)
+    heuristic_table = _coverage_astar_heuristic_table(
+        grid_points, goal_points, positions, radii,
+        brush_width, brush_depth, int(target_count),
+    )
     corner_radius = float(_planner_value(cfg, "expert_corner_radius", 0.025))
     forward_cos_min = _capture_forward_cos_min(cfg, int(target_count), len(positions))
     max_expansions = max(1000, int(_planner_value(
@@ -1001,19 +1052,7 @@ def _coverage_astar_candidates(env, cfg, target_count: int
         expansions = 0
 
         def heuristic(node, mask):
-            remaining = int(target_count) - int(mask.bit_count())
-            point = to_point(node)
-            to_goal = min(float(np.linalg.norm(goal_point - point))
-                          for goal_point, _ in goals.values())
-            if remaining <= 0:
-                return to_goal
-            uncovered = [index for index in range(len(positions))
-                         if not (mask & (1 << index))]
-            reach = (brush_width / 2.0 + radii[uncovered] + brush_depth / 2.0)
-            distances = np.maximum(
-                0.0, np.linalg.norm(positions[uncovered] - to_point(node), axis=1) - reach)
-            kth = float(np.partition(distances, remaining - 1)[remaining - 1])
-            return max(to_goal, kth)
+            return float(heuristic_table[int(mask), int(node[0]), int(node[1])])
 
         while frontier and expansions < expansion_budget:
             _, current_cost, current = heappop(frontier)
