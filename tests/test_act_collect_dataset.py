@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 import numpy as np
@@ -194,6 +195,102 @@ def test_approved_generator_resume_skips_previously_failed_seeds(
     assert events[0]["target_count"] == 6
     assert events[0]["attempt"] == 2
     assert events[0]["seed"] == 940001
+
+
+def test_capture_training_episode_screens_without_images_then_replays_for_capture(
+    tmp_path, monkeypatch,
+):
+    calls = []
+    writes = []
+
+    def result():
+        return SimpleNamespace(
+            success=True,
+            failure_reason="",
+            collected=1,
+            target_count=1,
+            planner_status="feasible",
+            planner_strategy="coverage_astar",
+            planner_turn_count=2,
+            planner_attempts=1,
+            sampled_frames=2,
+            final_collected_mask=np.array([True]),
+            trace=[
+                {"t": 0.01, "tcp": np.array([0.1, 0.2, 0.3]),
+                 "normal_force": 0.1, "contact": True, "collected": 0},
+                {"t": 0.02, "tcp": np.array([0.2, 0.2, 0.3]),
+                 "normal_force": 0.1, "contact": True, "collected": 1},
+            ],
+            observations=[{"frame": 0}, {"frame": 1}],
+            actions=np.zeros((2, 4), dtype=np.float32),
+        )
+
+    def rollout(_cfg, *, seed, collect_observations):
+        calls.append((seed, collect_observations))
+        return result()
+
+    class Writer:
+        def add_episode(self, *args, **kwargs):
+            writes.append((args, kwargs))
+
+    spec = collect_dataset.EpisodeSpec(
+        "train", 1, 5123, "train_n1_layout_000", "independent")
+    monkeypatch.setattr(collect_dataset, "_expert_config", lambda *_args: "cfg")
+    monkeypatch.setattr(collect_dataset, "run_expert_episode", rollout)
+    monkeypatch.setattr(collect_dataset, "next_demo_name", lambda *_args: "expert_goal_1_0001")
+    monkeypatch.setattr(collect_dataset, "_expert_metadata", lambda *_args: {"success": True})
+
+    episode = collect_dataset._capture_training_episode(
+        object(), Writer(), tmp_path, spec, requested_seed=5123,
+        generation_attempt=1,
+    )
+
+    assert calls == [(5123, False), (5123, True)]
+    assert episode["episode_id"] == "expert_goal_1_0001"
+    assert len(writes) == 1
+
+
+def test_capture_training_episode_rejects_screen_capture_dynamics_mismatch(
+    tmp_path, monkeypatch,
+):
+    calls = []
+
+    def result(captured):
+        tcp = np.array([0.1, 0.2, 0.3])
+        if captured:
+            tcp[2] += 0.001
+        return SimpleNamespace(
+            success=True,
+            failure_reason="",
+            collected=1,
+            target_count=1,
+            planner_status="feasible",
+            planner_strategy="coverage_astar",
+            planner_turn_count=2,
+            planner_attempts=1,
+            sampled_frames=1,
+            final_collected_mask=np.array([True]),
+            trace=[{"t": 0.01, "tcp": tcp, "normal_force": 0.1,
+                    "contact": True, "collected": 1}],
+            observations=[{"frame": 0}],
+            actions=np.zeros((1, 4), dtype=np.float32),
+        )
+
+    def rollout(_cfg, *, seed, collect_observations):
+        calls.append(collect_observations)
+        return result(collect_observations)
+
+    monkeypatch.setattr(collect_dataset, "_expert_config", lambda *_args: "cfg")
+    monkeypatch.setattr(collect_dataset, "run_expert_episode", rollout)
+    spec = collect_dataset.EpisodeSpec(
+        "train", 1, 5123, "train_n1_layout_000", "independent")
+
+    with pytest.raises(RuntimeError, match="control trace field tcp"):
+        collect_dataset._capture_training_episode(
+            object(), object(), tmp_path, spec, requested_seed=5123,
+            generation_attempt=1,
+        )
+    assert calls == [False, True]
 
 
 def test_approved_plan_cli_passes_custom_episodes_per_target(tmp_path, monkeypatch):

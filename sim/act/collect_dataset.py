@@ -570,18 +570,35 @@ def _capture_training_episode(cfg, writer: ActDatasetWriter,
                               requested_seed: int,
                               generation_attempt: int) -> dict:
     local_cfg = _expert_config(cfg, spec.target_count)
+    # Most randomized expert candidates are rejected.  Screen their physical
+    # rollouts without rendering camera frames, and spend the multi-camera
+    # capture cost only on candidates that satisfy the task contract.
+    screened = run_expert_episode(
+        local_cfg, seed=int(spec.seed), collect_observations=False
+    )
+    if not screened.success:
+        raise RuntimeError(
+            f"expert screening rollout failed: {screened.failure_reason}; "
+            f"collected={screened.collected}/{screened.target_count}; "
+            f"planner={screened.planner_status}/{screened.planner_strategy}; "
+            f"turns={screened.planner_turn_count}; "
+            f"candidate={screened.planner_attempts}; "
+            f"frames={screened.sampled_frames}"
+        )
+
     result = run_expert_episode(
         local_cfg, seed=int(spec.seed), collect_observations=True
     )
     if not result.success:
         raise RuntimeError(
-            f"expert rollout failed: {result.failure_reason}; "
+            f"expert image-capture replay failed: {result.failure_reason}; "
             f"collected={result.collected}/{result.target_count}; "
             f"planner={result.planner_status}/{result.planner_strategy}; "
             f"turns={result.planner_turn_count}; "
             f"candidate={result.planner_attempts}; "
             f"frames={result.sampled_frames}"
         )
+    _assert_screen_capture_match(screened, result)
     episode_id = next_demo_name([root], spec.target_count)
     metadata = _expert_metadata(
         spec, result, requested_seed, generation_attempt, local_cfg
@@ -591,6 +608,38 @@ def _capture_training_episode(cfg, writer: ActDatasetWriter,
         control_trace=result.trace,
     )
     return {"episode_id": episode_id, **metadata}
+
+
+def _assert_screen_capture_match(screened, captured) -> None:
+    """Refuse a dataset row if image capture changed its physical rollout."""
+    scalar_fields = (
+        "success", "collected", "target_count", "sampled_frames",
+        "planner_status", "planner_strategy", "planner_turn_count",
+        "planner_attempts",
+    )
+    mismatches = [name for name in scalar_fields
+                  if getattr(screened, name) != getattr(captured, name)]
+    if mismatches:
+        raise RuntimeError(
+            "screen/capture replay mismatch in " + ", ".join(mismatches)
+        )
+
+    if not np.array_equal(screened.final_collected_mask,
+                          captured.final_collected_mask):
+        raise RuntimeError("screen/capture replay changed the final collection mask")
+    if len(screened.trace) != len(captured.trace):
+        raise RuntimeError("screen/capture replay changed control-trace length")
+
+    for field in ("t", "tcp", "normal_force", "contact", "collected"):
+        if any(field not in row for row in screened.trace + captured.trace):
+            continue
+        before = np.asarray([row[field] for row in screened.trace])
+        after = np.asarray([row[field] for row in captured.trace])
+        if before.shape != after.shape or not np.allclose(
+                before, after, rtol=0.0, atol=1e-6):
+            raise RuntimeError(
+                f"screen/capture replay changed control trace field {field}"
+            )
 
 
 def _screen_single_layout(cfg, target_count: int, requested_seed: int,
