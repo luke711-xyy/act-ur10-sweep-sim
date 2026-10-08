@@ -320,6 +320,87 @@ def test_expert_stops_sweep_once_exact_count_reaches_delivery_depth(monkeypatch)
     assert not env._lost
 
 
+def test_exact_delivery_wins_over_contact_loss_on_same_control_substep(monkeypatch):
+    import sim.act.rollout as rollout
+
+    class FakeEndEffector:
+        def tcp_yaw(self):
+            return 0.0
+
+    class FakeEnv:
+        table_top_z = 0.0
+        control_dt = 0.1
+        layout = [object()]
+
+        def __init__(self):
+            self.ee = FakeEndEffector()
+            self.time = 0.0
+            self._tcp = np.array([0.30, 0.0, 0.0], dtype=np.float32)
+            self._collected = np.array([False])
+
+        def tcp(self):
+            return self._tcp.copy()
+
+        def component_positions(self):
+            return np.zeros((1, 3), dtype=np.float32)
+
+        def normal_force(self):
+            return 0.1
+
+        def wrench(self):
+            return np.zeros(6, dtype=np.float32)
+
+        def step_control(self, command):
+            self._tcp = np.asarray(command.as_array()[:3], dtype=np.float32)
+            if self._tcp[0] <= 0.20:
+                self._collected[0] = True
+                # Simulate the contact-loss threshold and exact delivery
+                # becoming true on this same substep.
+                self._tcp[2] = 0.02
+            self.time += self.control_dt
+
+        def collected_mask(self):
+            return self._collected.copy()
+
+        def partial_collection_overlap_mask(self):
+            return np.zeros(1, dtype=bool)
+
+        def brush_fully_inside_target(self):
+            return bool(self._collected[0])
+
+        def brush_table_contact(self):
+            return False
+
+        def unsafe_robot_collision(self):
+            return False
+
+        def lost_mask(self):
+            return np.zeros(1, dtype=bool)
+
+        def brush_component_contact_mask(self):
+            return np.zeros(1, dtype=bool)
+
+    monkeypatch.setattr(rollout, "_tray_exit_x", lambda _cfg: 0.20)
+    cfg = load_config(overrides=[
+        "sim.real_time=false", "sim.control_hz=10", "act.action_hz=10",
+        "task.target_count=1", "episode.max_frames=100",
+        "episode.stable_time=1.0",
+    ])
+    result = rollout.run_action_path(
+        FakeEnv(), cfg,
+        np.array([[0.30, 0.0, 0.0, 0.0], [0.19, 0.0, 0.0, 0.0]],
+                 dtype=np.float32),
+        collect_observations=False,
+        phases=["approach", "sweep"],
+        target_indices=np.array([0]),
+        contact_z_mode="expert_admittance",
+    )
+
+    assert result.success
+    assert result.collected == result.target_count == 1
+    assert result.failure_reason == ""
+
+
 def test_inference_collection_tracker_keeps_act_running_during_target_hold():
     tracker = CollectionTerminationTracker(
         target_count=3, target_hold_seconds=2.0, stall_timeout_seconds=3.0,

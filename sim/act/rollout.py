@@ -663,7 +663,13 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             else:
                 contact_loss_steps = 0
             if contact_loss_steps >= max(1, int(round(0.1 * float(cfg.sim.control_hz)))):
-                failure = "contact lost for 100 ms"
+                # If the exact requested count and the configured tray-depth
+                # gate become true on this same control substep, delivery has
+                # completed.  Do not let the contact-loss timer preempt that
+                # terminal condition; otherwise a late sensor/geometry release
+                # can turn an already-delivered episode into a false failure.
+                if not (goal_reached and delivery_reached and not failure_mode):
+                    failure = "contact lost for 100 ms"
                 break
             if path_length > float(cfg.episode.max_contact_path):
                 failure = "contact path exceeded limit"
