@@ -31,7 +31,7 @@ def _episode(root, episode_id="episode_0000"):
     )
 
 
-def test_workbench_lists_episode_and_loads_all_three_views(tmp_path):
+def test_workbench_lists_episode_and_loads_only_requested_views(tmp_path):
     _episode(tmp_path)
     state = WorkbenchState(load_config(), dataset_root=tmp_path,
                            preview_root=tmp_path / "previews")
@@ -41,8 +41,9 @@ def test_workbench_lists_episode_and_loads_all_three_views(tmp_path):
     assert episodes[0]["success"] is True
     assert episodes[0]["target_count"] == 2
     frame = state.load_episode_frame("episode_0000", 0)
-    assert set(frame) == {"overhead", "wrist", "inspection"}
-    assert frame["inspection"].shape == (12, 12, 3)
+    assert set(frame) == {"images", "overhead", "wrist"}
+    assert set(frame["images"]) == {"overhead", "wrist"}
+    assert "inspection" not in frame
 
 
 def test_workbench_rejects_unknown_episode(tmp_path):
@@ -302,8 +303,10 @@ def test_workbench_html_has_five_operational_areas():
     html = index.endpoint()
     html = html.body.decode("utf-8") if hasattr(html, "body") else html
     for label in ("Simulation", "Demonstrations", "Training", "Inference", "Parameters",
-                  "inspection-only", "Play", "Frame inspector", "Signal group"):
+                  "Play", "Frame inspector", "Signal group"):
         assert label in html
+    assert "inspection-only" not in html
+    assert 'id="inspectionImage"' not in html
     assert ('id="inferModel" '
             'value="runs/act_model_curve_v10/checkpoints/step_100000"') in html
     for element_id in ("episodeTargetFilter", "episodeStatusFilter", "previewOutcome",
@@ -508,9 +511,9 @@ def test_playback_uses_the_live_view_canvas_and_renders_fz():
     assert 'id="demoWristImage"' not in html
     assert 'id="demoInspectionImage"' not in html
     assert 'class="demo-views"' not in html
-    assert "image('overheadImage',f.overhead)" in html
-    assert "image('wristImage',f.wrist)" in html
-    assert "image('inspectionImage',f.inspection)" in html
+    assert "for(const view of ['corner_xminus_yminus','corner_xminus_yplus'" in html
+    assert "'corner_xplus_yminus','corner_xplus_yplus','wrist']" in html
+    assert "inspectionImage" not in html
     assert "renderFz" in html
     assert "/api/episodes/${encodeURIComponent(id)}/signals" in html
     assert "refreshPreviewProgress" in html
@@ -701,6 +704,10 @@ def test_workbench_serializes_mujoco_render_requests(monkeypatch):
 
     assert len(results) == 2
     assert FakeEnv.max_active == 1
+    expected_views = set(load_config().act.camera_views)
+    assert set(results[0]["images"]) == expected_views
+    assert set(results[0]["camera_roles"]) == expected_views
+    assert "inspection" not in results[0]
 
 
 def test_frame_render_route_keeps_mujoco_on_the_event_loop_thread():

@@ -10,7 +10,7 @@ starting points; branches may advance as experiments continue.
 | `feat/mt-act-goal-embedding` | `1a0d484` | Optional categorical goal-token/embedding experiment. The branch name alone does not mean every run on it uses the embedding: the active 200k run selected the ordinary policy and `ordinary_target_count_only: true`, so it did not train or use an embedding head. |
 | `feat/objectact-bev` | `5ce7a97` | Structured object/BEV perception experiment; separate from ordinary ACT and the camera-view work. |
 | `feat/v4-residual-rl` | `9965e8c` | V4-based residual reinforcement-learning prototype. |
-| `feat/act-five-view` | based on `feat/robot-learning-workbench` / `e8895a2` | Five-view policy-input development line: the four table-corner cameras and the wrist camera are all ACT observations. The separate whole-scene inspection camera is preview-only. Corner-camera poses are still candidates pending user review. Current Rudra UR10, fixed Robotiq, and brush model assets are carried over. |
+| `feat/act-five-view` | based on `feat/robot-learning-workbench` / `e8895a2` | Five-view policy-input development line: the four table-corner cameras and the wrist camera are the complete workbench and ACT views; there is no extra inspection-only camera. Corner-camera poses are still candidates pending user review. Current Rudra UR10, fixed Robotiq, and brush model assets are carried over. |
 
 ## Which branch to start from
 

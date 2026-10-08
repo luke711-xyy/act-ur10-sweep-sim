@@ -661,9 +661,8 @@ def _add_ur10_sensors(sensor: ET.Element) -> None:
 def _add_render_cameras(world: ET.Element, cfg) -> None:
     """Add configured fixed cameras used by ACT and synchronized recordings.
 
-    The human-only inspection camera is a separate configured view. The
-    perception backend continues to use ``scene_cam`` and is not implicitly
-    substituted for the policy's explicit image inputs.
+    The perception backend continues to use ``scene_cam`` and is not
+    implicitly substituted for the policy's explicit image inputs.
     """
     extra = cfg.get_path("video.extra_cameras", None)
     if not extra:

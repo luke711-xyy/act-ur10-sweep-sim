@@ -74,6 +74,7 @@ def test_default_collection_config_uses_five_views_and_rudra_force_tuning():
     cfg = load_config()
 
     assert tuple(cfg.act.camera_views) == VIEWS
+    assert "inspection_cam" not in cfg.video.extra_cameras
     assert int(cfg.components.count) == 6
     assert int(cfg.act.training_episodes_per_target) == 50
     assert cfg.controller.force_sensor == "wrist_ft"
@@ -166,7 +167,8 @@ def test_five_view_episode_round_trips_through_dataset_and_workbench(tmp_path):
     assert all(path.endswith(".webp")
                for paths in manifest_record["images"].values()
                for path in paths)
-    assert all(path.endswith(".webp") for path in manifest_record["inspection"])
+    assert "inspection" not in manifest_record
+    assert not list((root / "expert_five_view").glob("inspection_*"))
     for view in VIEWS:
         np.testing.assert_array_equal(
             np.transpose(sample[f"observation.images.{view}"], (1, 2, 0)),
@@ -181,12 +183,9 @@ def test_five_view_episode_round_trips_through_dataset_and_workbench(tmp_path):
     state = WorkbenchState(cfg, dataset_root=root, preview_root=tmp_path / "empty")
     frame = state.load_episode_frame("expert_five_view", 0)
     assert set(frame["images"]) == set(VIEWS)
-    assert frame["inspection"].shape == (16, 16, 3)
+    assert set(frame) == {"images", "overhead", "wrist"}
     for view in VIEWS:
         np.testing.assert_array_equal(frame["images"][view], images[view])
-    np.testing.assert_array_equal(
-        frame["inspection"], np.full((16, 16, 3), 99, dtype=np.uint8)
-    )
     signals = state.load_episode_signals("expert_five_view")
     assert signals["environment_state"] == [[6.0, 3.0, 1.0]]
     assert signals["control_t"] == [0.0, 0.01]

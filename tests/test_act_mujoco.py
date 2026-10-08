@@ -211,19 +211,11 @@ def test_global_act_camera_is_rotated_higher_and_slightly_closer():
     assert elevation > np.deg2rad(50.0)
 
 
-def test_inspection_camera_is_a_far_full_scene_view():
+def test_no_extra_inspection_camera_is_configured_or_rendered():
     cfg = load_config()
-    camera = cfg.video.extra_cameras.inspection_cam
-    pos = np.asarray(camera.pos, dtype=float)
-    lookat = np.asarray(camera.lookat, dtype=float)
-
-    # This camera is for human inspection, so it must frame the complete arm,
-    # table and the -X collection tray rather than act as a second close-up.
-    assert np.linalg.norm(pos - lookat) > 1.50
-    assert pos[2] > 0.90
-    assert float(camera.fovy_deg) >= 52.0
-    assert -0.10 <= lookat[0] <= 0.15
-    assert abs(lookat[1]) < 0.15
+    assert "inspection_cam" not in cfg.video.extra_cameras
+    xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
+    assert 'name="inspection_cam"' not in xml
 
 
 def test_render_lighting_uses_shadowless_multi_source_fill():

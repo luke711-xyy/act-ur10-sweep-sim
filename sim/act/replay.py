@@ -32,7 +32,7 @@ def _episode_id(root: Path, target_count: int, seed: int) -> str:
 
 def save_inference_replay(cfg, seed: int, result, root: str | Path,
                           model: str | None = None) -> str | None:
-    """Replay the recorded commands and save three cameras plus telemetry.
+    """Replay the recorded commands and save five policy cameras plus telemetry.
 
     The inference process itself does not render frames, so its 5 Hz/25 Hz
     timing budget is not distorted by image encoding.  After the episode, the
@@ -93,8 +93,6 @@ def save_inference_replay(cfg, seed: int, result, root: str | Path,
             previous_policy_reference = policy_reference.copy()
             frame_observation = {
                 "images": images,
-                "inspection": np.asarray(env.render_rgb(
-                    "inspection_cam", size=image_size), dtype=np.uint8),
                 "state": obs["observation.state"],
                 "environment_state": obs["observation.environment_state"],
                 "supervisor_state": obs["supervisor_state"],

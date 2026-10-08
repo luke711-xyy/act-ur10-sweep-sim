@@ -311,8 +311,7 @@ planner:
     max_no_progress: 4
 
 video:
-  # The five-camera policy input is four fixed table-corner views plus wrist.
-  # ``inspection_cam`` remains a separate human-only whole-scene view.
+  # The policy input uses four fixed table-corner views plus the wrist camera.
   cameras: [corner_xminus_yminus, corner_xminus_yplus,
             corner_xplus_yminus, corner_xplus_yplus, wrist_cam]
   width: 640
@@ -365,14 +364,6 @@ video:
       target: tool
       pos: [0.30, -0.55, 0.40]
       fovy_deg: 45.0
-    inspection_cam:
-      # Human-only far oblique-front-above view: frame the complete UR10e,
-      # table and the -X collection tray in one square inspection pane.
-      pos: [1.10, -1.45, 1.15]
-      lookat: [0.05, 0.0, 0.24]
-      up: [0.0, 0.0, 1.0]
-      fovy_deg: 52.0
-
 act:
   enabled: true
   image_size: [320, 320]

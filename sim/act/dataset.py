@@ -106,7 +106,6 @@ class ActDatasetWriter:
         try:
             image_views = {}
             expected_views = None
-            inspection = []
             for i, obs in enumerate(observations):
                 frame_images = _observation_images(obs)
                 if not frame_images:
@@ -140,20 +139,6 @@ class ActDatasetWriter:
                     image_views[view].append(str(
                         (episode_dir / image_name).relative_to(self.root)
                     ))
-                inspection_image = obs.get("inspection")
-                if inspection_image is None:
-                    inspection.append("")
-                else:
-                    inspection_path = temporary_dir / (
-                        f"inspection_{i:05d}{self._image_extension}"
-                    )
-                    Image.fromarray(
-                        np.asarray(inspection_image, dtype=np.uint8)
-                    ).save(
-                        inspection_path, format=self._pillow_image_format,
-                        **self._image_save_options,
-                    )
-                    inspection.append(str((episode_dir / inspection_path.name).relative_to(self.root)))
             states = state_values
             env_states = np.stack([o["environment_state"] for o in observations]).astype(np.float32)
             n_frames = len(observations)
@@ -307,7 +292,7 @@ class ActDatasetWriter:
             }
             record = {"episode_id": episode_id, "success": bool(success),
                       "camera_views": list(expected_views or ()),
-                      "images": image_views, "inspection": inspection,
+                      "images": image_views,
                       "image_storage_format": self.image_format,
                       "arrays": str((episode_dir / "arrays.npz").relative_to(self.root)),
                       **({"control_trace": control_trace_path}

@@ -102,8 +102,8 @@ It contains five connected areas: live simulation views, saved/preview expert
 episode playback, local ACT training jobs, MuJoCo inference jobs, and a bounded
 parameter editor. Every policy observation contains five synchronized RGB
 images: four fixed cameras outside the tabletop corners, each aimed toward the
-table centre, plus the wrist camera. A separate oblique whole-scene inspection
-camera is rendered for human review only and never enters the ACT input.
+table centre, plus the wrist camera. These are the only cameras used by the
+workbench and the ACT policy.
 
 "Generate expert preview" runs the force-controlled expert and stores the
 accepted rollout under `runs/workbench_previews/`; a failed layout is retried
@@ -151,8 +151,7 @@ performed in scratch state, the physical joint state is restored before stepping
 and `end_effector.ik_max_joint_step` bounds each joint target update. This keeps
 near-singular least-squares solves from causing a visible branch jump. Demo
 playback takes over the five ACT image panes and pauses periodic live refresh,
-so the policy views remain synchronized with the episode slider; inspection
-stays in its separate human-only pane.
+so the policy views remain synchronized with the episode slider.
 The full-run Fz chart and the selectable TCP/action/wrench/joint/count plots use
 the same frame cursor; the frame table includes the exact values and all six
 object poses. The current wrist-sensor force target is 0.1 N; 20 N remains the
@@ -673,8 +672,6 @@ python -m sim.record_video --compare fixed global_sweep visual_greedy \
 | `overhead_cam` | front-oblique global view; retained name for the ACT input contract |
 | `side_cam` | low side view; best for seeing tip–table contact and parts tipping |
 | `follow_cam` | fixed position, rotates to keep the tool centred |
-| `inspection_cam` | oblique front-above human inspection view; never an ACT input |
-
 Every frame carries a HUD: simulated time, stroke index, phase, planner, collected count,
 and a normal-force gauge showing measured fill against a tick at the setpoint, plus a
 contact dot. The gauge is scaled to 2.5 × `desired_force` rather than to
@@ -895,7 +892,7 @@ UR10e six-joint model with official visual meshes and collision geometry. It
 is suitable for validating the ACT observation/action plumbing and the hybrid
 force-control loop, but it is not a calibrated hardware model.
 The model is mounted just beyond the table's +X edge and starts from an above-table IK
-seed so the human inspection view does not show a link passing through the work surface.
+seed that keeps the link clear of the work surface in the initial pose.
 The fixed-closed Robotiq 2F-85, handled brush, TCP, wrist F/T site and wrist camera are
 attached at the model's `attachment_site`. The official 2F-85 meshes are frozen at their
 closed pose: the handle is visibly held between the pads, but there are no finger joints or

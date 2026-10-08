@@ -182,7 +182,6 @@ class ACTObservationBuilder:
                 else:
                     camera_name = {
                         "overhead": "overhead_cam",
-                        "inspection": "inspection_cam",
                     }.get(view, view)
                     image = env.render_rgb(camera_name, size=size)
                 image = _resize_rgb(image, size)

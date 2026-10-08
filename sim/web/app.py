@@ -33,17 +33,16 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 <figure class="view"><img id="corner_xplus_yminusImage"><figcaption>ACT input / upper corner 3</figcaption></figure>
 <figure class="view"><img id="corner_xplus_yplusImage"><figcaption>ACT input / upper corner 4</figcaption></figure>
 <figure class="view"><img id="wristImage"><figcaption>ACT input / wrist</figcaption></figure>
-<figure class="view"><img id="inspectionImage"><figcaption>Whole-scene preview <span class="tag">inspection-only</span></figcaption></figure>
 </div><div id="healthPills" class="status"></div><div class="signal-card"><div class="signal-header"><span>Fz · wrist sensor · 100 Hz filtered / raw peak</span><span id="fzMeta">Select an episode</span></div><svg id="fzChart" class="fz-chart" viewBox="0 0 640 170" role="img" aria-label="Full episode wrist sensor Fz force trace"><line class="fz-grid" x1="24" y1="152" x2="632" y2="152"></line><line class="fz-grid" x1="24" y1="86" x2="632" y2="86"></line><path id="fzRawPath" class="fz-raw-path" d=""></path><path id="fzPath" class="fz-path" d=""></path><line id="fzCursor" class="fz-cursor" x1="24" y1="18" x2="24" y2="152"></line><text id="fzEmpty" class="signal-empty" x="320" y="84" text-anchor="middle">No force trace saved</text></svg><div class="axis"><span>0 s</span><span id="fzEndTime">—</span><span>force / N</span></div></div></section>
 <section class="panel demonstrations"><h2>Demonstrations <span class="muted">· episode playback</span></h2>
 <div class="episode-filters"><label>目标数量筛选<select id="episodeTargetFilter" onchange="applyEpisodeFilters()"><option value="all">all</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option></select></label><label>结果筛选<select id="episodeStatusFilter" onchange="applyEpisodeFilters()"><option value="all">all</option><option value="success">success</option><option value="failed">failed</option></select></label></div>
 <select id="episodeSelect" class="sr-only" onchange="selectEpisode(this.value)" aria-label="Selected demonstration"></select><div id="episodeList" class="episode-list" aria-label="Demonstration episode list"></div>
 <div class="generation-panel"><div class="hint" style="margin-bottom:8px">生成示教数据 · 成功数据使用物理质量门；失败数据使用可解释的故障模式。目标 6 固定只有 6 个零件，因此错误数量只生成少扫。</div><div class="generation-grid"><label>目标数量<select id="previewTarget"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></label><label>生成结果<select id="previewOutcome" onchange="toggleFailureMode()"><option value="success">success · 成功示教</option><option value="failed">failed · 失败示教</option></select></label><label>生成条数<input id="previewCount" type="number" min="1" max="100" value="1"></label><label id="previewFailureModeWrap">失败类型<select id="previewFailureMode"><option value="">自动轮换</option><option value="stall_outside_tray">stall_outside_tray · 卡在收集区左右壁外</option><option value="wrong_count">wrong_count · 错误数量（自动多扫/少扫）</option><option value="misroute">misroute · 路径偏离</option></select></label></div><button class="primary" onclick="makePreview()">生成示教数据</button></div>
 <div class="row"><button onclick="togglePlay()" id="playButton">Play</button><button onclick="stepFrame(-1)" aria-label="Previous frame">‹</button><button onclick="stepFrame(1)" aria-label="Next frame">›</button></div>
-<div class="hint" style="margin-top:10px">Play synchronizes all five ACT input cameras; the whole-scene inspection camera is preview-only.</div>
+<div class="hint" style="margin-top:10px">Play synchronizes all five ACT input cameras.</div>
 <input id="frameSlider" type="range" min="0" max="0" value="0" oninput="seekFrame(this.value)"><div id="episodeMeta" class="meta">No episode loaded.</div>
 </section>
-<section class="panel telemetry"><div class="telemetry-head"><div><h2>Frame inspector <span class="muted">· synchronized observation and action traces</span></h2><div class="hint">拖动上方帧滑块，图线游标、三路画面和右侧数值会同步更新。</div></div><label>Signal group<select id="signalGroup" onchange="renderTelemetry(Number($('frameSlider').value||0))"><option value="tcp">TCP pose</option><option value="action">ACT label</option><option value="zcontrol">Policy / applied Z</option><option value="wrench">6D wrench</option><option value="joints">UR10 joints</option><option value="counts">Counts & contact</option></select></label></div><div class="telemetry-layout"><div class="telemetry-chart"><svg viewBox="0 0 900 260" role="img" aria-label="Selected episode signals"><g id="telemetryGrid"></g><g id="telemetryPaths"></g><line id="telemetryCursor" class="fz-cursor" x1="42" y1="18" x2="42" y2="224"></line><text id="telemetryEmpty" class="signal-empty" x="450" y="126" text-anchor="middle">Select an episode with detailed signals</text></svg><div id="telemetryLegend" class="telemetry-legend"></div><div class="axis"><span id="telemetryStart">0 s</span><span id="telemetryRange">—</span><span id="telemetryEnd">—</span></div></div><div class="frame-detail"><table class="frame-table"><tbody id="frameData"><tr><th>Frame</th><td>—</td></tr></tbody></table></div></div></section>
+<section class="panel telemetry"><div class="telemetry-head"><div><h2>Frame inspector <span class="muted">· synchronized observation and action traces</span></h2><div class="hint">拖动上方帧滑块，图线游标、五路画面和右侧数值会同步更新。</div></div><label>Signal group<select id="signalGroup" onchange="renderTelemetry(Number($('frameSlider').value||0))"><option value="tcp">TCP pose</option><option value="action">ACT label</option><option value="zcontrol">Policy / applied Z</option><option value="wrench">6D wrench</option><option value="joints">UR10 joints</option><option value="counts">Counts & contact</option></select></label></div><div class="telemetry-layout"><div class="telemetry-chart"><svg viewBox="0 0 900 260" role="img" aria-label="Selected episode signals"><g id="telemetryGrid"></g><g id="telemetryPaths"></g><line id="telemetryCursor" class="fz-cursor" x1="42" y1="18" x2="42" y2="224"></line><text id="telemetryEmpty" class="signal-empty" x="450" y="126" text-anchor="middle">Select an episode with detailed signals</text></svg><div id="telemetryLegend" class="telemetry-legend"></div><div class="axis"><span id="telemetryStart">0 s</span><span id="telemetryRange">—</span><span id="telemetryEnd">—</span></div></div><div class="frame-detail"><table class="frame-table"><tbody id="frameData"><tr><th>Frame</th><td>—</td></tr></tbody></table></div></div></section>
 <section class="panel training"><h2>Training <span class="muted">· local ACT</span></h2>
 <label>Dataset directory<input id="trainDataset" value="runs/act_dataset"></label><label>Output directory<input id="trainOut" value="runs/act_model"></label><label>Steps (optional)<input id="trainSteps" type="number" min="1" placeholder="use config default"></label>
 <div class="row"><button class="primary" onclick="startTraining()">Start training job</button><button class="danger" onclick="stopLatest('train')">Stop</button></div><div id="trainJob" class="job">No training job.</div>
@@ -60,7 +59,7 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 </div></main><script>
 const $=id=>document.getElementById(id);let episodes=[];let current=null;let selectedEpisodeId=null;let lastInferenceReplayId=null;let previewJobId=null;let previewJobHandled=null;let timer=null;let playbackBusy=false;let signalSeries=null;let currentFrameData=null;let seekSerial=0;let seekAbort=null;let signalSerial=0;let signalAbort=null;let selectionSerial=0;
 function image(id,b64){$(id).src=b64?(String(b64).startsWith('data:')?b64:'data:image/png;base64,'+b64):''}
-function renderCameraFrames(frame){const images=frame?.images||{};for(const view of ['corner_xminus_yminus','corner_xminus_yplus','corner_xplus_yminus','corner_xplus_yplus','wrist'])image(view+'Image',images[view]||(view==='wrist'?frame?.wrist:(view==='corner_xminus_yminus'?frame?.overhead:null)));image('inspectionImage',frame?.inspection)}
+function renderCameraFrames(frame){const images=frame?.images||{};for(const view of ['corner_xminus_yminus','corner_xminus_yplus','corner_xplus_yminus','corner_xplus_yplus','wrist'])image(view+'Image',images[view]||(view==='wrist'?frame?.wrist:(view==='corner_xminus_yminus'?frame?.overhead:null)))}
 async function json(url,opts){const r=await fetch(url,opts);const body=await r.text();let data=null;try{data=body?JSON.parse(body):null}catch(_){if(!r.ok)throw new Error(`HTTP ${r.status}: ${body.slice(0,180)||r.statusText}`);throw new Error(`Invalid JSON from ${url}`)}if(!r.ok)throw new Error(data?.detail||data?.message||`HTTP ${r.status}: ${r.statusText}`);return data}
 function esc(value){return String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
 async function refreshAll(){try{const [h,f]=await Promise.all([json('/api/health'),json('/api/frames')]);if(!timer&&!current)renderCameraFrames(f);$('healthPills').innerHTML=`<span class="pill ok">sim ${h.time.toFixed(2)} s</span><span class="pill">full ${h.collected}/${h.components} · goal ${h.target_count}</span><span class="pill">Fz ${h.normal_force.toFixed(2)} N</span><span class="pill">${h.model}</span>`;await loadEpisodes();await refreshJobs()}catch(e){$('globalStatus').textContent='Dashboard error: '+e.message;$('globalStatus').className='bad'}}
@@ -163,12 +162,12 @@ def create_app(cfg):
                     "collected": int(e.collected_mask().sum()),
                     "tcp": e.tcp().tolist(), "normal_force": e.normal_force(),
                     "model": str(current.end_effector.type),
-                    "camera_roles": {**{
+                    "camera_roles": {
                         str(view): "act_input"
                         for view in app.state.cfg.act.get(
                             "camera_views", ["overhead", "wrist"]
                         )
-                    }, "inspection": "inspection_only"}}
+                    }}
 
     @app.post("/api/reset")
     def reset():
@@ -199,9 +198,7 @@ def create_app(cfg):
                 "images": images,
                 "overhead": images.get("overhead") or next(iter(images.values()), None),
                 "wrist": images.get("wrist"),
-                "inspection": _png_bytes(e.render_rgb("inspection_cam", size=size)),
-                "camera_roles": {**{str(view): "act_input" for view in views},
-                                 "inspection": "inspection_only"},
+                "camera_roles": {str(view): "act_input" for view in views},
             }
 
     @app.get("/api/episodes")

@@ -7,7 +7,7 @@ from sim.config import load_config
 from sim.web.workbench import WorkbenchState
 
 
-def test_inference_command_trace_is_saved_as_a_three_camera_episode(tmp_path):
+def test_inference_command_trace_is_saved_with_five_policy_views(tmp_path):
     cfg = load_config(overrides=[
         "sim.real_time=false", "act.image_size=[32,32]",
         "task.target_count=2",
@@ -52,7 +52,8 @@ def test_inference_command_trace_is_saved_as_a_three_camera_episode(tmp_path):
     frame = state.load_episode_frame(episode_id, 0)
     assert frame["overhead"].shape == (32, 32, 3)
     assert frame["wrist"].shape == (32, 32, 3)
-    assert frame["inspection"].shape == (32, 32, 3)
+    assert set(frame["images"]) == set(cfg.act.camera_views)
+    assert "inspection" not in frame
     signals = state.load_episode_signals(episode_id)
     assert len(signals["fz"]) == 1
     assert len(signals["policy_z"]) == 1

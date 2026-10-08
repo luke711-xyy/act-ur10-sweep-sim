@@ -206,17 +206,17 @@ class WorkbenchState:
                 for view, paths in image_paths.items()
                 if frame_index < len(paths) and paths[frame_index]
             }
-            # Preserve the old response keys for clients that have not yet
-            # switched to the dynamic five-camera map.
+            overhead = images.get("overhead")
+            if overhead is None:
+                overhead = next(iter(images.values()), None)
+            # Preserve the old overhead/wrist aliases for clients that have
+            # not yet switched to the dynamic five-camera map. Legacy
+            # inspection sidecars are intentionally ignored.
             frame = {
                 "images": images,
-                "overhead": images.get("overhead") or next(iter(images.values()), None),
+                "overhead": overhead,
                 "wrist": images.get("wrist"),
-                "inspection": None,
             }
-            inspection = rec.get("inspection")
-            if inspection and inspection[frame_index]:
-                frame["inspection"] = _image(root, inspection[frame_index])
             return frame
 
     def load_episode_signals(self, episode_id: str) -> dict:
