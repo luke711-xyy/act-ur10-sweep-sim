@@ -72,7 +72,10 @@ class ActDatasetWriter:
         self._image_extension = ".png" if image_format == "png" else ".webp"
         self._image_save_options = (
             {} if image_format == "png"
-            else {"lossless": True, "quality": 100, "method": 4}
+            # A low WebP method is much faster to encode while remaining
+            # pixel-exact; the modest size increase is preferable for large
+            # multi-camera expert datasets.
+            else {"lossless": True, "quality": 100, "method": 1}
         )
 
     def add_episode(self, episode_id: str, observations: list[dict], actions: np.ndarray,
