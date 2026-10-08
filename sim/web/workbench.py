@@ -240,6 +240,7 @@ class WorkbenchState:
             env_state = matrix(state_key, 3)
             signals = {
                 "episode_id": rec["episode_id"],
+                "force_processing": rec.get("force_processing", "legacy/unavailable"),
                 "t": [float(value) for value in arrays["t"]],
                 "phase": [str(value) for value in arrays["phase"]],
                 "policy_mask": [bool(value) for value in arrays["action_valid"]],
@@ -278,6 +279,14 @@ class WorkbenchState:
                 "environment_state": env_state,
                 "fully_collected": [int(value) for value in arrays["fully_collected"]],
             }
+            if "raw_normal_force" in arrays.files:
+                signals["raw_fz"] = [
+                    float(value) for value in arrays["raw_normal_force"]
+                ]
+            if "compensated_normal_force_raw" in arrays.files:
+                signals["compensated_fz_raw"] = [
+                    float(value) for value in arrays["compensated_normal_force_raw"]
+                ]
             if "raw_normal_force_peak" in arrays.files:
                 signals["raw_fz_peak"] = [
                     float(value) for value in arrays["raw_normal_force_peak"]
@@ -318,6 +327,15 @@ class WorkbenchState:
                         "control_table_contact": [bool(value)
                                                   for value in trace["table_contact"]],
                     })
+                    if "raw_normal_force" in trace.files:
+                        signals["control_raw_fz"] = [
+                            float(value) for value in trace["raw_normal_force"]
+                        ]
+                    if "compensated_normal_force_raw" in trace.files:
+                        signals["control_compensated_fz_raw"] = [
+                            float(value)
+                            for value in trace["compensated_normal_force_raw"]
+                        ]
             return signals
 
         # Backward-compatible fallback for the one legacy preview format.
@@ -331,6 +349,8 @@ class WorkbenchState:
                 "fz": [float(value) for value in data.get("fz", [])],
                 "raw_fz_peak": [float(value) for value in data.get(
                     "raw_fz_peak", [])],
+                "raw_fz": [float(value) for value in data.get(
+                    "raw_fz", [])],
                 "raw_fz_peak_t": [float(value) for value in data.get(
                     "raw_fz_peak_t", data.get("t", []))],
                 "contact": [bool(value) for value in data.get("contact", [])]}
@@ -378,6 +398,16 @@ class WorkbenchState:
             "tcp_pose": vector("tcp_pose", 4),
             "wrench": vector("wrench", 6),
             "normal_force": float(arrays["normal_force"][index]) if "normal_force" in arrays.files else 0.0,
+            "raw_normal_force": (
+                float(arrays["raw_normal_force"][index])
+                if "raw_normal_force" in arrays.files else None
+            ),
+            "compensated_normal_force_raw": float(
+                arrays["compensated_normal_force_raw"][index]
+                if "compensated_normal_force_raw" in arrays.files
+                else arrays["normal_force"][index]
+                if "normal_force" in arrays.files else 0.0
+            ),
             "raw_normal_force_peak": float(
                 arrays["raw_normal_force_peak"][index]
                 if "raw_normal_force_peak" in arrays.files else 0.0
@@ -636,6 +666,15 @@ class WorkbenchState:
                 if str(local_cfg.controller.get("force_sensor", "contact")) == "wrist_ft"
                 else "simulated_contact_geometry"
             ),
+            "force_processing": (
+                (
+                    "raw wrist F/T retained; reset-pose tare; modeled distal-tool "
+                    "inertial-load delta removed from Fz for control; "
+                    "pressing-positive; low-pass"
+                )
+                if str(local_cfg.controller.get("force_sensor", "contact")) == "wrist_ft"
+                else "contact-normal projection; low-pass"
+            ),
             "first_contact_position": (
                 np.asarray(result.first_contact_position, dtype=float).tolist()
                 if getattr(result, "first_contact_position", None) is not None else None
@@ -682,6 +721,16 @@ class WorkbenchState:
                               for row in result.trace],
             "contact": [bool(row["contact"]) for row in result.trace],
         }
+        if result.trace and all("raw_normal_force" in row for row in result.trace):
+            signals["raw_fz"] = [
+                float(row["raw_normal_force"]) for row in result.trace
+            ]
+        if result.trace and all(
+                "compensated_normal_force_raw" in row for row in result.trace):
+            signals["compensated_fz_raw"] = [
+                float(row["compensated_normal_force_raw"])
+                for row in result.trace
+            ]
         (self.preview_root / episode_id / "signals.json").write_text(
             json.dumps(signals, ensure_ascii=False), encoding="utf-8")
         return self.episode_metadata(episode_id)

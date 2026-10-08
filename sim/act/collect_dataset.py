@@ -555,7 +555,12 @@ def _expert_metadata(spec: EpisodeSpec, result, requested_seed: int,
             else "simulated_contact_geometry"
         ),
         "force_processing": (
-            "world-Z projection; reset-pose tare; pressing-positive; low-pass"
+            (
+                "raw wrist world-Z retained; reset-pose tare; distal payload "
+                "inertial-load delta estimated from modeled rigid-body kinematics "
+                "and removed for force control; pressing-positive; low-pass; "
+                "raw and compensated channels logged separately"
+            )
             if str(cfg.controller.get("force_sensor", "contact")) == "wrist_ft"
             else "contact-normal projection; low-pass"
         ),

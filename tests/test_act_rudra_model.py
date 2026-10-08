@@ -48,6 +48,54 @@ def test_rudra_ur10_mjcf_loads_with_existing_task_tool_and_sensor_contract():
     assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robotiq_2f85") >= 0
 
 
+def test_wrist_sensor_dynamic_payload_load_is_compensated_but_raw_wrench_is_preserved():
+    """A no-contact vertical tool motion should not look like brush pressure."""
+    cfg = _rudra_config()
+    env = SweepEnv(cfg, seed=31007)
+    try:
+        env.reset(seed=31007)
+        raw_at_tare = env.wrench().copy()
+        raw_z_delta = []
+        compensated = []
+        for index in range(300):
+            time = index * env.control_dt
+            z = 0.10 + 0.002 * np.sin(2.0 * np.pi * 0.4 * time)
+            env.step_control(Command(0.42, 0.0, z, 0.0))
+            raw = env.wrench()
+            compensated_wrench = env.compensated_wrench()
+            raw_z_delta.append(float(raw[2] - raw_at_tare[2]))
+            compensated.append(float(compensated_wrench[2]))
+
+        assert max(abs(value) for value in raw_z_delta) > 0.05
+        assert max(abs(value) for value in compensated) < 0.02
+        # The public wrench is still the untouched wrist sensor reading.
+        assert np.isclose(env.wrench()[2], raw[2], atol=1e-12)
+    finally:
+        env.close()
+
+
+def test_wrist_sensor_fz_compensates_arm_coupled_vertical_acceleration_during_xy_motion():
+    """Horizontal joint motion must not masquerade as normal brush pressure."""
+    cfg = _rudra_config()
+    env = SweepEnv(cfg, seed=31007)
+    try:
+        env.reset(seed=31007)
+        raw = []
+        compensated = []
+        for index in range(300):
+            time = index * env.control_dt
+            x = 0.42 + 0.035 * np.sin(2.0 * np.pi * 0.25 * time)
+            y = 0.04 * np.sin(2.0 * np.pi * 0.25 * time)
+            env.step_control(Command(x, y, 0.10, 0.0))
+            raw.append(env.raw_normal_force())
+            compensated.append(env.compensated_normal_force_raw())
+
+        assert max(raw) > 0.10
+        assert max(compensated) < 0.02
+    finally:
+        env.close()
+
+
 def test_rudra_tool_is_mounted_at_the_imported_flange_not_a_second_wrist_offset():
     cfg = _rudra_config()
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(5)))
@@ -228,6 +276,8 @@ def test_rudra_ur10_holds_brush_contact_across_nominal_sweep_lane():
 
         assert len(sweep) > 400
         assert all(row["contact"] for row in sweep)
+        assert max(row["normal_force"] for row in sweep) > float(
+            cfg.controller.contact_threshold)
         assert result.failure_reason != "contact lost for 100 ms"
         assert result.peak_force <= 20.0
     finally:

@@ -44,11 +44,13 @@ def test_ur10_normal_force_is_tared_and_filtered_wrist_sensor_world_z():
     ee.wrist_sign = -1.0
     ee._wrist_ft_bias_world_z = 0.0
     ee._normal_force_raw = 0.0
+    ee._normal_force_compensated_raw = 0.0
     ee._normal_force_filtered = 0.0
     ee.cfg = SimpleNamespace(
         controller=SimpleNamespace(force_filter_cutoff_hz=12.0))
     sample = {"world_z": -4.0}
     ee.wrist_ft_world = lambda: np.array([0.0, 0.0, sample["world_z"], 0, 0, 0])
+    ee._payload_motion_wrench_world = lambda: np.zeros(6, dtype=float)
 
     ee.calibrate_wrist_ft()
     sample["world_z"] = -6.0

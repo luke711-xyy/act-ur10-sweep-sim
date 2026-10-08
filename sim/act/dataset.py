@@ -212,6 +212,15 @@ class ActDatasetWriter:
                                 normal_force=np.asarray([
                                     float(o.get("normal_force", 0.0)) for o in observations
                                 ], dtype=np.float32),
+                                raw_normal_force=np.asarray([
+                                    float(o.get("raw_normal_force", 0.0))
+                                    for o in observations
+                                ], dtype=np.float32),
+                                compensated_normal_force_raw=np.asarray([
+                                    float(o.get("compensated_normal_force_raw",
+                                                o.get("normal_force", 0.0)))
+                                    for o in observations
+                                ], dtype=np.float32),
                                 raw_normal_force_peak=np.asarray([
                                     float(o.get("raw_normal_force_peak", 0.0))
                                     for o in observations
@@ -253,6 +262,14 @@ class ActDatasetWriter:
                                      for row in trace]),
                     "normal_force": np.asarray([
                         float(row.get("normal_force", 0.0)) for row in trace
+                    ], dtype=np.float32),
+                    "raw_normal_force": np.asarray([
+                        float(row.get("raw_normal_force", 0.0)) for row in trace
+                    ], dtype=np.float32),
+                    "compensated_normal_force_raw": np.asarray([
+                        float(row.get("compensated_normal_force_raw",
+                                      row.get("normal_force", 0.0)))
+                        for row in trace
                     ], dtype=np.float32),
                     "raw_normal_force_peak": np.asarray([
                         float(row.get("raw_normal_force_peak", 0.0)) for row in trace

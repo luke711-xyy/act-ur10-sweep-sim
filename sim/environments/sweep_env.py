@@ -232,6 +232,18 @@ class SweepEnv:
     def wrench(self) -> np.ndarray:
         return self.ee.wrench()
 
+    def compensated_wrench(self) -> np.ndarray:
+        """Return the tared wrist wrench with modeled payload motion removed."""
+        if hasattr(self.ee, "compensated_wrench_world"):
+            return np.asarray(self.ee.compensated_wrench_world(), dtype=float)
+        return np.asarray(self.wrench(), dtype=float)
+
+    def compensated_normal_force_raw(self) -> float:
+        """Read unfiltered, pressing-positive wrist Fz after motion compensation."""
+        if hasattr(self.ee, "compensated_normal_force_raw"):
+            return float(self.ee.compensated_normal_force_raw())
+        return float(self.raw_normal_force())
+
     def contact_breakdown(self):
         """``(wrench_parts, n_part_contacts)`` -- see EndEffectorInterface."""
         return self.ee.contact_breakdown()

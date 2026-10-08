@@ -148,8 +148,12 @@ def test_five_view_episode_round_trips_through_dataset_and_workbench(tmp_path):
         },
         control_trace=[
             {"t": 0.0, "tcp": [0.0, 0.0, 0.1], "normal_force": 0.0,
+             "raw_normal_force": 0.02,
+             "compensated_normal_force_raw": 0.0,
              "raw_normal_force_peak": 0.01, "raw_normal_force_peak_t": 0.001},
             {"t": 0.01, "tcp": [0.0, 0.0, 0.0], "normal_force": 0.08,
+             "raw_normal_force": 0.15,
+             "compensated_normal_force_raw": 0.09,
              "raw_normal_force_peak": 0.12, "raw_normal_force_peak_t": 0.008,
              "table_contact": True},
         ],
@@ -190,6 +194,8 @@ def test_five_view_episode_round_trips_through_dataset_and_workbench(tmp_path):
     assert signals["environment_state"] == [[6.0, 3.0, 1.0]]
     assert signals["control_t"] == [0.0, 0.01]
     np.testing.assert_allclose(signals["control_fz"], [0.0, 0.08])
+    np.testing.assert_allclose(signals["control_raw_fz"], [0.02, 0.15])
+    np.testing.assert_allclose(signals["control_compensated_fz_raw"], [0.0, 0.09])
     np.testing.assert_allclose(signals["control_raw_fz_peak"], [0.01, 0.12])
     np.testing.assert_allclose(signals["control_raw_fz_peak_t"], [0.001, 0.008])
 

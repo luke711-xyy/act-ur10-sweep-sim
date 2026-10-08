@@ -437,6 +437,10 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                 "tcp_pose": np.array([*tcp, float(env.ee.tcp_yaw())], dtype=np.float32),
                 "wrench": wrench,
                 "normal_force": sampled_force,
+                "raw_normal_force": float(
+                    getattr(env, "raw_normal_force", env.normal_force)()),
+                "compensated_normal_force_raw": float(
+                    getattr(env, "compensated_normal_force_raw", env.normal_force)()),
                 "raw_normal_force_peak": raw_force_peak,
                 "raw_normal_force_peak_t": float(
                     getattr(env, "last_raw_force_peak_time", None) or env.time),
@@ -569,10 +573,9 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                 delivery_reached = delivery_reached or brush_delivery_reached(
                     env, cfg, tcp
                 )
-            # The wrist sensor also sees transient inertial reactions from the
-            # position-controlled arm.  Latch only after the *post-step*
-            # measured brush load is above threshold while the TCP is near the
-            # table.  Entering the action's height band alone is not contact.
+                # Contact latching uses the post-step wrist Fz after the modeled
+                # distal-tool inertial-load delta is removed. Entering the action's
+                # height band alone is not contact.
             if not contact:
                 contact_band_z = (geometric_contact_z if geometry_latches_contact
                                   else float(cfg.workspace.z_search_start))
@@ -603,7 +606,13 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                           "z_owner": ("admittance" if frame_contact_at_start
                                       else ("transition" if contact else "policy")),
                           "phase": str(phase), "wrench": np.asarray(env.wrench()).copy(),
-                          "normal_force": post_force, "contact": contact,
+                          "normal_force": post_force,
+                          "raw_normal_force": float(
+                              getattr(env, "raw_normal_force", env.normal_force)()),
+                          "compensated_normal_force_raw": float(
+                              getattr(env, "compensated_normal_force_raw",
+                                      env.normal_force)()),
+                          "contact": contact,
                           "raw_normal_force_peak": raw_force_peak,
                           "raw_normal_force_peak_t": float(
                               getattr(env, "last_raw_force_peak_time", None) or env.time),
@@ -629,8 +638,7 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             if brush_inside_timeout_reached and (not goal_reached or failure_mode):
                 failure = "brush remained fully inside collection region for 1 s without exact goal"
                 break
-            # Before contact, the sensor includes arm acceleration.  The
-            # safety bound is a contact-load bound and is meaningful only
+            # The safety bound is a contact-load bound and is meaningful only
             # after the contact latch above.
             if contact and post_force > float(cfg.controller.safe_max_force):
                 overforce_steps += 1
@@ -736,7 +744,13 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                               "command": np.array([final[0], final[1], z, final_yaw]),
                               "phase": "stability", "wrench": np.asarray(env.wrench()).copy(),
                               "z_owner": "admittance",
-                              "normal_force": post_force, "contact": contact,
+                              "normal_force": post_force,
+                              "raw_normal_force": float(
+                                  getattr(env, "raw_normal_force", env.normal_force)()),
+                              "compensated_normal_force_raw": float(
+                                  getattr(env, "compensated_normal_force_raw",
+                                          env.normal_force)()),
+                              "contact": contact,
                               "raw_normal_force_peak": raw_force_peak,
                               "raw_normal_force_peak_t": float(
                                   getattr(env, "last_raw_force_peak_time", None) or env.time),

@@ -52,7 +52,11 @@ class UR10CB3EndEffector(CartesianEndEffector):
             raise RuntimeError("MuJoCo model is missing the wrist force sensor or its site")
         self.wrist_sign = float(cfg.controller.wrist_ft_sign)
         self._wrist_ft_bias_world_z = 0.0
+        self._wrist_ft_tare_world = np.zeros(6, dtype=float)
+        self._payload_motion_tare_world = np.zeros(6, dtype=float)
+        self.payload_body_ids = self._descendant_body_ids(self.tool_body_id)
         self._normal_force_raw = 0.0
+        self._normal_force_compensated_raw = 0.0
         self._normal_force_filtered = 0.0
         self.tip_geom_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
                              for name in ("brush_head", "brush_sole")]
@@ -207,10 +211,88 @@ class UR10CB3EndEffector(CartesianEndEffector):
         ).reshape(3, 3)
         return np.concatenate((rotation @ raw[:3], rotation @ raw[3:]))
 
+    def _descendant_body_ids(self, parent_id: int) -> list[int]:
+        """Return the sensor-downstream rigid bodies, including ``parent_id``."""
+        if parent_id < 0:
+            return []
+        result = []
+        for body_id in range(1, int(self.model.nbody)):
+            cursor = body_id
+            while cursor > 0 and cursor != parent_id:
+                cursor = int(self.model.body_parentid[cursor])
+            if cursor == parent_id:
+                result.append(body_id)
+        return result
+
+    def _payload_motion_wrench_world(self) -> np.ndarray:
+        """Estimate the wrench caused by distal-tool self-load dynamics.
+
+        The wrench is computed only from the modeled bodies downstream of the
+        wrist F/T site and their kinematic acceleration.  It is an inertial
+        load estimate, not a contact-force oracle; external brush/table/part
+        contact remains present in the measured sensor wrench.
+        """
+        result = np.zeros(6, dtype=float)
+        sensor_position = np.asarray(self.data.site_xpos[self.ft_site_id], dtype=float)
+        for body_id in self.payload_body_ids:
+            mass = float(self.model.body_mass[body_id])
+            if mass <= 0.0:
+                continue
+
+            acceleration = np.zeros(6, dtype=float)
+            velocity = np.zeros(6, dtype=float)
+            self._mujoco.mj_objectAcceleration(
+                self.model, self.data, self._mujoco.mjtObj.mjOBJ_BODY,
+                body_id, acceleration, 0)
+            self._mujoco.mj_objectVelocity(
+                self.model, self.data, self._mujoco.mjtObj.mjOBJ_BODY,
+                body_id, velocity, 0)
+
+            # MuJoCo's spatial acceleration is centered at the body origin;
+            # shift its linear component to the body's inertial COM.
+            body_origin = np.asarray(self.data.xpos[body_id], dtype=float)
+            center = np.asarray(self.data.xipos[body_id], dtype=float)
+            center_offset = center - body_origin
+            omega = velocity[:3]
+            alpha = acceleration[:3]
+            center_acceleration = (
+                acceleration[3:]
+                + np.cross(alpha, center_offset)
+                + np.cross(omega, np.cross(omega, center_offset))
+            )
+            force = mass * center_acceleration
+
+            inertial_frame = np.asarray(
+                self.data.ximat[body_id], dtype=float).reshape(3, 3)
+            inertia_world = (
+                inertial_frame
+                @ np.diag(np.asarray(self.model.body_inertia[body_id], dtype=float))
+                @ inertial_frame.T
+            )
+            torque_at_center = (
+                inertia_world @ alpha
+                + np.cross(omega, inertia_world @ omega)
+            )
+            torque_at_sensor = torque_at_center + np.cross(
+                center - sensor_position, force)
+            result[:3] += force
+            result[3:] += torque_at_sensor
+        return result
+
+    def compensated_wrench_world(self) -> np.ndarray:
+        """Tare the wrist wrench and remove changes in distal payload motion load."""
+        measured = self.wrist_ft_world()
+        motion_load = self._payload_motion_wrench_world()
+        return measured - self._wrist_ft_tare_world - (
+            motion_load - self._payload_motion_tare_world)
+
     def calibrate_wrist_ft(self) -> None:
-        """Tare world-Z at the reset pose; later Z force stays sensor-derived."""
-        self._wrist_ft_bias_world_z = float(self.wrist_ft_world()[2])
+        """Tare the wrist sensor and payload self-load at the reset pose."""
+        self._wrist_ft_tare_world = self.wrist_ft_world().copy()
+        self._wrist_ft_bias_world_z = float(self._wrist_ft_tare_world[2])
+        self._payload_motion_tare_world = self._payload_motion_wrench_world()
         self._normal_force_raw = 0.0
+        self._normal_force_compensated_raw = 0.0
         self._normal_force_filtered = 0.0
 
     def raw_normal_force(self) -> float:
@@ -218,17 +300,23 @@ class UR10CB3EndEffector(CartesianEndEffector):
         delta = float(self.wrist_ft_world()[2]) - self._wrist_ft_bias_world_z
         return max(0.0, self.wrist_sign * delta)
 
+    def compensated_normal_force_raw(self) -> float:
+        """Unfiltered, pressing-positive wrist Fz after payload-motion removal."""
+        return max(0.0, self.wrist_sign * float(
+            self.compensated_wrench_world()[2]))
+
     def update_normal_force(self, dt: float) -> float:
-        """Sample and low-pass wrist force once per control tick."""
-        raw = float(self.raw_normal_force())
-        self._normal_force_raw = raw
+        """Sample compensated wrist Fz and low-pass it for force control."""
+        self._normal_force_raw = float(self.raw_normal_force())
+        raw = float(self.compensated_normal_force_raw())
+        self._normal_force_compensated_raw = raw
         cutoff = max(0.0, float(self.cfg.controller.force_filter_cutoff_hz))
         alpha = 1.0 - float(np.exp(-2.0 * np.pi * cutoff * max(float(dt), 0.0)))
         self._normal_force_filtered += alpha * (raw - self._normal_force_filtered)
         return float(self._normal_force_filtered)
 
     def normal_force(self) -> float:
-        """Filtered, reset-tared wrist-sensor world-Z load; pressing is positive."""
+        """Filtered pressing-positive wrist Fz after tare-relative payload compensation."""
         return float(self._normal_force_filtered)
 
     def normal_force_observation(self) -> float:
