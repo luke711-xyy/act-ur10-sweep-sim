@@ -285,12 +285,14 @@ def test_capture_training_episode_rejects_failed_expert_rollout_without_writing(
 def test_approved_plan_cli_passes_custom_episodes_per_target(tmp_path, monkeypatch):
     calls = {}
 
-    def generate(_cfg, root, seed_base, max_attempts, episodes_per_target):
+    def generate(_cfg, root, seed_base, max_attempts, episodes_per_target,
+                 image_format):
         calls.update({
             "root": root,
             "seed_base": seed_base,
             "max_attempts": max_attempts,
             "episodes_per_target": episodes_per_target,
+            "image_format": image_format,
         })
         return {"total": 90}
 
@@ -304,6 +306,7 @@ def test_approved_plan_cli_passes_custom_episodes_per_target(tmp_path, monkeypat
         "--max-attempts-per-episode", "64",
         "--seed-base", "910000",
         "--out", str(tmp_path),
+        "--image-format", "webp-lossless",
     ])
 
     assert result == 0
@@ -312,4 +315,5 @@ def test_approved_plan_cli_passes_custom_episodes_per_target(tmp_path, monkeypat
         "seed_base": 910000,
         "max_attempts": 64,
         "episodes_per_target": 15,
+        "image_format": "webp-lossless",
     }

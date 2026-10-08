@@ -624,7 +624,8 @@ def _screen_single_layout(cfg, target_count: int, requested_seed: int,
 def generate_approved_training_dataset(cfg, root: str | Path,
                                        seed_base: int = 410000,
                                        max_attempts: int = 64,
-                                       episodes_per_target: int = 20) -> dict:
+                                       episodes_per_target: int = 20,
+                                       image_format: str = "png") -> dict:
     """Generate a balanced set of successful demonstrations on unique layouts.
 
     The accepted six-record pilot remains in the preview directory and is not
@@ -669,7 +670,7 @@ def generate_approved_training_dataset(cfg, root: str | Path,
             slot = (str(failure.get("layout_id", "")),
                     int(failure.get("target_count", 0)))
             failed_seeds.setdefault(slot, set()).add(int(failure["seed"]))
-    writer = ActDatasetWriter(str(root))
+    writer = ActDatasetWriter(str(root), image_format=image_format)
     generated = []
     completed = len(slots)
     for planned in training_episode_plan(seed_base, episodes_per_target):
@@ -790,6 +791,10 @@ def main(argv=None) -> int:
         help="successful independent training layouts per target with --approved-plan (default: 20)",
     )
     parser.add_argument(
+        "--image-format", choices=["png", "webp-lossless"], default="png",
+        help="lossless image storage format; WebP reduces disk use without changing RGB pixels",
+    )
+    parser.add_argument(
         "--write-split-manifests-only",
         action="store_true",
         help="write the frozen 60 validation and 120 test layout assignments",
@@ -833,10 +838,11 @@ def main(argv=None) -> int:
                 20 if args.episodes_per_target is None
                 else int(args.episodes_per_target)
             ),
+            image_format=args.image_format,
         )
         print(json.dumps(output, ensure_ascii=False))
         return 0
-    writer = ActDatasetWriter(root)
+    writer = ActDatasetWriter(root, image_format=args.image_format)
     preview_root = Path(root).parent / "workbench_previews"
     save_config(cfg, f"{root}/{args.split}_config.yaml")
     if args.episode_plan is not None:

@@ -60,10 +60,20 @@ def unnormalize_action(values: np.ndarray, stats: dict) -> np.ndarray:
 
 
 class ActDatasetWriter:
-    def __init__(self, root: str):
+    def __init__(self, root: str, image_format: str = "png"):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.manifest = self.root / "manifest.jsonl"
+        image_format = str(image_format).lower().replace("_", "-")
+        if image_format not in {"png", "webp-lossless"}:
+            raise ValueError("image_format must be 'png' or 'webp-lossless'")
+        self.image_format = image_format
+        self._pillow_image_format = "PNG" if image_format == "png" else "WEBP"
+        self._image_extension = ".png" if image_format == "png" else ".webp"
+        self._image_save_options = (
+            {} if image_format == "png"
+            else {"lossless": True, "quality": 100, "method": 4}
+        )
 
     def add_episode(self, episode_id: str, observations: list[dict], actions: np.ndarray,
                     success: bool, metadata: dict,
@@ -114,14 +124,19 @@ class ActDatasetWriter:
                         character if character.isalnum() or character in "-_" else "_"
                         for character in view
                     )
-                    image_name = f"image_{safe_view}_{i:05d}.png"
+                    image_name = (
+                        f"image_{safe_view}_{i:05d}{self._image_extension}"
+                    )
                     image_path = temporary_dir / image_name
                     image = frame_images[view]
                     if image.ndim != 3 or image.shape[-1] != 3:
                         raise ValueError(
                             f"ACT view {view!r} must be HxWx3 RGB, got {image.shape}"
                         )
-                    Image.fromarray(image).save(image_path)
+                    Image.fromarray(image).save(
+                        image_path, format=self._pillow_image_format,
+                        **self._image_save_options,
+                    )
                     image_views[view].append(str(
                         (episode_dir / image_name).relative_to(self.root)
                     ))
@@ -129,8 +144,15 @@ class ActDatasetWriter:
                 if inspection_image is None:
                     inspection.append("")
                 else:
-                    inspection_path = temporary_dir / f"inspection_{i:05d}.png"
-                    Image.fromarray(np.asarray(inspection_image, dtype=np.uint8)).save(inspection_path)
+                    inspection_path = temporary_dir / (
+                        f"inspection_{i:05d}{self._image_extension}"
+                    )
+                    Image.fromarray(
+                        np.asarray(inspection_image, dtype=np.uint8)
+                    ).save(
+                        inspection_path, format=self._pillow_image_format,
+                        **self._image_save_options,
+                    )
                     inspection.append(str((episode_dir / inspection_path.name).relative_to(self.root)))
             states = state_values
             env_states = np.stack([o["environment_state"] for o in observations]).astype(np.float32)
@@ -286,6 +308,7 @@ class ActDatasetWriter:
             record = {"episode_id": episode_id, "success": bool(success),
                       "camera_views": list(expected_views or ()),
                       "images": image_views, "inspection": inspection,
+                      "image_storage_format": self.image_format,
                       "arrays": str((episode_dir / "arrays.npz").relative_to(self.root)),
                       **({"control_trace": control_trace_path}
                          if control_trace_path else {}),

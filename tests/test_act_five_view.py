@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -102,7 +103,7 @@ def test_five_view_episode_round_trips_through_dataset_and_workbench(tmp_path):
         "policy_mask": True,
     }
     root = tmp_path / "dataset"
-    ActDatasetWriter(str(root)).add_episode(
+    ActDatasetWriter(str(root), image_format="webp-lossless").add_episode(
         "expert_five_view", [observation], np.zeros((1, 4), dtype=np.float32),
         True, {
             "episode_kind": "expert", "split": "train", "target_count": 4,
@@ -122,6 +123,19 @@ def test_five_view_episode_round_trips_through_dataset_and_workbench(tmp_path):
     assert dataset.camera_views == VIEWS
     assert all(sample[f"observation.images.{view}"].shape == (3, 16, 16)
                for view in VIEWS)
+    manifest_record = json.loads(
+        (root / "manifest.jsonl").read_text().splitlines()[0]
+    )
+    assert manifest_record["image_storage_format"] == "webp-lossless"
+    assert all(path.endswith(".webp")
+               for paths in manifest_record["images"].values()
+               for path in paths)
+    assert all(path.endswith(".webp") for path in manifest_record["inspection"])
+    for view in VIEWS:
+        np.testing.assert_array_equal(
+            np.transpose(sample[f"observation.images.{view}"], (1, 2, 0)),
+            images[view],
+        )
     assert sample["observation.environment_state"].shape == (1,)
     assert set(dataset.stats) == {
         "observation.state", "observation.environment_state", "action",
@@ -132,6 +146,11 @@ def test_five_view_episode_round_trips_through_dataset_and_workbench(tmp_path):
     frame = state.load_episode_frame("expert_five_view", 0)
     assert set(frame["images"]) == set(VIEWS)
     assert frame["inspection"].shape == (16, 16, 3)
+    for view in VIEWS:
+        np.testing.assert_array_equal(frame["images"][view], images[view])
+    np.testing.assert_array_equal(
+        frame["inspection"], np.full((16, 16, 3), 99, dtype=np.uint8)
+    )
     signals = state.load_episode_signals("expert_five_view")
     assert signals["environment_state"] == [[6.0, 3.0, 1.0]]
     assert signals["control_t"] == [0.0, 0.01]
