@@ -266,6 +266,7 @@ planner:
   expert_robustness_margin: 0.010  # [m] clearance reserve against distractor carry
   expert_clearance_score_weight: 0.20
   expert_candidate_limit: 12  # shortlist for optional MuJoCo-in-the-loop validation
+  expert_validation_workers: 4  # parallel deterministic MuJoCo candidate screens
   expert_capture_exit_margin: 0.02  # [m] clear selected parts before changing lanes
   expert_corner_radius: 0.025  # [m] smooth contact turns; yaw limit slows XY by curvature
   expert_delivery_slowdown_score_weight: 0.01  # [m per second] prefer entry curves without near-stops

@@ -1634,9 +1634,10 @@ def test_expert_retries_next_candidate_after_physical_failure(monkeypatch):
             pass
 
     def fake_run_action_path(_env, _cfg, _path, **kwargs):
-        calls.append(kwargs["target_indices"].tolist())
+        selected = kwargs["target_indices"].tolist()
+        calls.append(selected)
         observation_modes.append(kwargs["collect_observations"])
-        if len(calls) == 1:
+        if selected == [0] and not kwargs["collect_observations"]:
             raise RuntimeError(
                 "UR10 IK target is unreachable: candidate-specific residual")
         return rollout.ActRolloutResult(
@@ -1658,13 +1659,84 @@ def test_expert_retries_next_candidate_after_physical_failure(monkeypatch):
     result = rollout.run_expert_episode(
         cfg, seed=5202, collect_observations=True)
 
-    assert calls == [[0], [1], [1]]
-    assert observation_modes == [False, False, True]
+    assert sorted(calls) == [[0], [1], [1]]
+    assert sorted(observation_modes) == [False, False, True]
     assert result.success
     assert result.collected == result.target_collected == 1
     assert result.unexpected_collected == 0
     assert result.planner_attempts == 2
     assert result.target_indices == [1]
+
+
+def test_parallel_expert_screening_uses_best_ranked_success(monkeypatch):
+    """Parallel screening must keep planner order, not completion order."""
+    import threading
+    import time
+    import sim.act.rollout as rollout
+
+    cfg = load_config(overrides=[
+        "sim.real_time=false", "components.count=6",
+        "components.spawn_mode=cluster", "task.target_count=1",
+        "planner.expert_validation_workers=2",
+    ])
+    plans = [
+        ExpertPlan(target_indices=np.array([0]),
+                   waypoints=np.array([[0.42, 0.0], [0.20, 0.02], [0.10, 0.02]]),
+                   feasible=True, score=1.0, strategy="capture_lane"),
+        ExpertPlan(target_indices=np.array([1]),
+                   waypoints=np.array([[0.42, 0.0], [0.20, -0.02], [0.10, -0.02]]),
+                   feasible=True, score=1.1, strategy="capture_lane"),
+    ]
+    second_screening_started = threading.Event()
+    screening_results = []
+
+    class FakeEnv:
+        def __init__(self, _cfg, seed):
+            self.seed = seed
+            self.layout = [object() for _ in range(6)]
+            self.table_top_z = 0.0
+
+        def reset(self, seed=None):
+            self.seed = seed
+
+        def close(self):
+            pass
+
+    def fake_run_action_path(_env, _cfg, _path, **kwargs):
+        selected = kwargs["target_indices"].tolist()
+        if kwargs["collect_observations"]:
+            assert selected == [0]
+        elif selected == [0]:
+            assert second_screening_started.wait(2), (
+                "the second candidate was not screened concurrently")
+            time.sleep(0.03)
+            screening_results.append(selected)
+        else:
+            second_screening_started.set()
+            screening_results.append(selected)
+        return rollout.ActRolloutResult(
+            success=True,
+            failure_reason="",
+            total=6,
+            target_count=1,
+            collected=1,
+            target_indices=selected,
+            target_collected=1,
+            unexpected_collected=0,
+        )
+
+    monkeypatch.setattr(rollout, "SweepEnv", FakeEnv)
+    monkeypatch.setattr(rollout, "expert_plan_candidates",
+                        lambda _env, _cfg: plans)
+    monkeypatch.setattr(rollout, "run_action_path", fake_run_action_path)
+
+    result = rollout.run_expert_episode(
+        cfg, seed=5203, collect_observations=True)
+
+    assert sorted(screening_results) == [[0], [1]]
+    assert result.success
+    assert result.target_indices == [0]
+    assert result.planner_attempts == 1
 
 
 def test_expert_falls_back_to_original_tray_entry_after_aligned_routes_fail(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -1013,6 +1014,8 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
 
     best_failure = None
     best_key = None
+    validation_workers = max(1, int(planning_cfg.get_path(
+        "planner.expert_validation_workers", 1)))
     # Deliberate failures use physically valid candidates, but unlike the
     # success path they are accepted only when their measured outcome matches
     # the requested failure family.  This prevents an ``over`` example that
@@ -1046,6 +1049,51 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
         finally:
             env.close()
 
+    def screen_one(item):
+        plan, attempt = item
+        try:
+            result = execute(plan, attempt, False)
+        except RuntimeError as exc:
+            # A candidate can pass the 2-D planner yet contain a Cartesian
+            # waypoint outside the orientation-constrained workspace.
+            if "UR10 IK target is unreachable" not in str(exc):
+                raise
+            result = ActRolloutResult(
+                success=False,
+                failure_reason=f"candidate rejected by IK: {exc}",
+                total=len(probe.layout),
+                target_count=requested_target_count,
+                target_indices=[int(value) for value in plan.target_indices],
+            )
+            result = _annotate_expert_result(result, plan, attempt)
+        return plan, attempt, result
+
+    def screened_batches(plans_with_attempts):
+        """Screen small parallel batches, yielding results in planner order."""
+        items = list(plans_with_attempts)
+        for start_index in range(0, len(items), validation_workers):
+            batch = items[start_index:start_index + validation_workers]
+            if validation_workers == 1 or len(batch) == 1:
+                yield [screen_one(item) for item in batch]
+            else:
+                with ThreadPoolExecutor(max_workers=validation_workers) as pool:
+                    # map preserves candidate rank even when rollout runtimes
+                    # differ, so selection remains deterministic.
+                    yield list(pool.map(screen_one, batch))
+
+    def outcome_matches(result):
+        return (
+            (not failure_mode and result.success)
+            or (failure_mode == "wrong_count_over"
+                and result.collected == requested_target_count + 1)
+            or (failure_mode == "wrong_count_under"
+                and result.collected == max(0, requested_target_count - 1))
+            or (failure_mode == "stall_outside_tray"
+                and stall_failure_sidewall_ok(result, cfg))
+            or (failure_mode == "misroute" and len(result.trace) >= 100)
+        )
+
+    prepared = []
     for attempt, original_plan in enumerate(candidates, start=1):
         plan = original_plan
         if (failure_mode in {"wrong_count_under", "stall_outside_tray"}
@@ -1063,60 +1111,24 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
                 strategy=plan.strategy,
                 yaw_offset=plan.yaw_offset,
             )
-        # Failure candidates are physically screened without rendering.  The
-        # accepted candidate is replayed once with the full synchronized
-        # observations before it is persisted by the workbench.
-        try:
-            result = execute(plan, attempt, False)
-        except RuntimeError as exc:
-            # A candidate can pass the 2-D planner yet contain a Cartesian
-            # waypoint outside the UR10's orientation-constrained workspace.
-            # That is a candidate/layout rejection, not a broken collection
-            # process: discard this fresh-environment attempt and try the next
-            # geometrically ranked candidate.
-            if "UR10 IK target is unreachable" not in str(exc):
-                raise
-            result = ActRolloutResult(
-                success=False,
-                failure_reason=f"candidate rejected by IK: {exc}",
-                total=len(probe.layout),
-                target_count=requested_target_count,
-                    target_indices=[int(value) for value in plan.target_indices],
-            )
-            result = _annotate_expert_result(result, plan, attempt)
-        matched = (not failure_mode and result.success)
-        matched = matched or (
-            failure_mode == "wrong_count_over"
-            and result.collected == requested_target_count + 1)
-        matched = matched or (
-            failure_mode == "wrong_count_under"
-            and result.collected == max(0, requested_target_count - 1))
-        matched = matched or (
-            failure_mode == "stall_outside_tray"
-            and stall_failure_sidewall_ok(result, cfg))
-        matched = matched or (
-            failure_mode == "misroute" and len(result.trace) >= 100)
-        if matched:
-            if collect_observations:
-                result = execute(plan, attempt, True)
-                matched = ((not failure_mode and result.success)
-                           or (failure_mode == "wrong_count_over"
-                               and result.collected == requested_target_count + 1)
-                           or (failure_mode == "wrong_count_under"
-                               and result.collected == max(0, requested_target_count - 1))
-                           or (failure_mode == "stall_outside_tray"
-                               and stall_failure_sidewall_ok(result, cfg))
-                           or (failure_mode == "misroute"
-                               and len(result.trace) >= 100))
+        prepared.append((plan, attempt))
+
+    for batch in screened_batches(prepared):
+        for plan, attempt, result in batch:
+            matched = outcome_matches(result)
             if matched:
-                return result
-        # Keep the closest exact-count attempt as the diagnostic return if all
-        # candidates fail, while still preferring no unexpected parts.
-        key = (int(result.unexpected_collected > 0),
-               abs(int(result.target_count) - int(result.target_collected)),
-               -int(result.target_collected), float(plan.score))
-        if best_key is None or key < best_key:
-            best_key, best_failure = key, result
+                if collect_observations:
+                    result = execute(plan, attempt, True)
+                    matched = outcome_matches(result)
+                if matched:
+                    return result
+            # Keep the closest exact-count attempt as the diagnostic return if
+            # all candidates fail, while preferring no unexpected parts.
+            key = (int(result.unexpected_collected > 0),
+                   abs(int(result.target_count) - int(result.target_collected)),
+                   -int(result.target_collected), float(plan.score))
+            if best_key is None or key < best_key:
+                best_key, best_failure = key, result
 
     # The longer pre-alignment corridor prevents a last-moment yaw hook at the
     # tray mouth, but it can be physically worse for some layouts. Preserve the
@@ -1139,30 +1151,20 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
             fallback_probe.close()
 
         attempt_offset = len(candidates)
-        for fallback_index, plan in enumerate(
-                fallback_candidates, start=attempt_offset + 1):
-            try:
-                result = execute(plan, fallback_index, False)
-            except RuntimeError as exc:
-                if "UR10 IK target is unreachable" not in str(exc):
-                    raise
-                result = ActRolloutResult(
-                    success=False,
-                    failure_reason=f"candidate rejected by IK: {exc}",
-                    total=len(probe.layout), target_count=requested_target_count,
-                    target_indices=[int(value) for value in plan.target_indices],
-                )
-                result = _annotate_expert_result(
-                    result, plan, fallback_index)
-            if result.success and collect_observations:
-                result = execute(plan, fallback_index, True)
-            if result.success:
-                return result
-            key = (int(result.unexpected_collected > 0),
-                   abs(int(result.target_count) - int(result.target_collected)),
-                   -int(result.target_collected), float(plan.score))
-            if best_key is None or key < best_key:
-                best_key, best_failure = key, result
+        fallback_items = list(enumerate(
+            fallback_candidates, start=attempt_offset + 1))
+        for batch in screened_batches(
+                [(plan, attempt) for attempt, plan in fallback_items]):
+            for plan, fallback_index, result in batch:
+                if result.success and collect_observations:
+                    result = execute(plan, fallback_index, True)
+                if result.success:
+                    return result
+                key = (int(result.unexpected_collected > 0),
+                       abs(int(result.target_count) - int(result.target_collected)),
+                       -int(result.target_collected), float(plan.score))
+                if best_key is None or key < best_key:
+                    best_key, best_failure = key, result
 
     if best_failure is not None:
         return best_failure
