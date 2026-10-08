@@ -14,6 +14,26 @@ import numpy as np
 from .interface import ACT_SCHEMA_VERSION, ACT_STATE_DIM
 
 
+def _observation_images(observation: dict) -> dict[str, np.ndarray]:
+    """Return a frame's policy images, accepting legacy two-view records."""
+    images = observation.get("images")
+    if images is not None:
+        return {str(name): np.asarray(value, dtype=np.uint8)
+                for name, value in images.items()}
+    legacy = {name: np.asarray(observation[name], dtype=np.uint8)
+              for name in ("overhead", "wrist") if name in observation}
+    return legacy
+
+
+def _record_image_paths(record: dict) -> dict[str, list[str]]:
+    """Resolve a manifest's dynamic view map or its legacy aliases."""
+    images = record.get("images")
+    if isinstance(images, dict) and images:
+        return {str(name): list(paths) for name, paths in images.items()}
+    return {name: list(record[name]) for name in ("overhead", "wrist")
+            if name in record}
+
+
 def normalize_feature(values: np.ndarray, stats: dict, feature: str) -> np.ndarray:
     """Apply the MEAN_STD transform used by LeRobot to one feature array.
 
@@ -46,7 +66,8 @@ class ActDatasetWriter:
         self.manifest = self.root / "manifest.jsonl"
 
     def add_episode(self, episode_id: str, observations: list[dict], actions: np.ndarray,
-                    success: bool, metadata: dict) -> Path:
+                    success: bool, metadata: dict,
+                    control_trace: list[dict] | None = None) -> Path:
         from PIL import Image
 
         if len(observations) != len(actions):
@@ -73,14 +94,37 @@ class ActDatasetWriter:
         committed = False
         final_created = False
         try:
-            overhead, wrist, inspection = [], [], []
+            image_views = {}
+            expected_views = None
+            inspection = []
             for i, obs in enumerate(observations):
-                overhead_path = temporary_dir / f"overhead_{i:05d}.png"
-                wrist_path = temporary_dir / f"wrist_{i:05d}.png"
-                Image.fromarray(np.asarray(obs["overhead"], dtype=np.uint8)).save(overhead_path)
-                Image.fromarray(np.asarray(obs["wrist"], dtype=np.uint8)).save(wrist_path)
-                overhead.append(str((episode_dir / overhead_path.name).relative_to(self.root)))
-                wrist.append(str((episode_dir / wrist_path.name).relative_to(self.root)))
+                frame_images = _observation_images(obs)
+                if not frame_images:
+                    raise ValueError("each ACT frame must contain at least one policy image")
+                views = tuple(frame_images)
+                if expected_views is None:
+                    expected_views = views
+                    image_views = {view: [] for view in views}
+                elif set(views) != set(expected_views):
+                    raise ValueError(
+                        "all frames in an episode must contain the same ACT views"
+                    )
+                for view in expected_views:
+                    safe_view = "".join(
+                        character if character.isalnum() or character in "-_" else "_"
+                        for character in view
+                    )
+                    image_name = f"image_{safe_view}_{i:05d}.png"
+                    image_path = temporary_dir / image_name
+                    image = frame_images[view]
+                    if image.ndim != 3 or image.shape[-1] != 3:
+                        raise ValueError(
+                            f"ACT view {view!r} must be HxWx3 RGB, got {image.shape}"
+                        )
+                    Image.fromarray(image).save(image_path)
+                    image_views[view].append(str(
+                        (episode_dir / image_name).relative_to(self.root)
+                    ))
                 inspection_image = obs.get("inspection")
                 if inspection_image is None:
                     inspection.append("")
@@ -91,6 +135,25 @@ class ActDatasetWriter:
             states = state_values
             env_states = np.stack([o["environment_state"] for o in observations]).astype(np.float32)
             n_frames = len(observations)
+
+            def supervisor_vectors():
+                values = []
+                for obs in observations:
+                    value = obs.get("supervisor_state")
+                    if value is None:
+                        policy_state = np.asarray(
+                            obs["environment_state"], dtype=np.float32
+                        ).reshape(-1)
+                        if policy_state.size == 3:
+                            value = policy_state
+                        else:
+                            value = [
+                                int(metadata.get("total_count", metadata.get("count", 6))),
+                                int(metadata.get("target_count", 0)),
+                                int(obs.get("fully_collected", 0)),
+                            ]
+                    values.append(np.asarray(value, dtype=np.float32).reshape(3))
+                return np.stack(values)
 
             def vectors(key, width, dtype=np.float32):
                 return np.stack([
@@ -131,6 +194,7 @@ class ActDatasetWriter:
             ])
             np.savez_compressed(temporary_dir / "arrays.npz", state=states,
                                 environment_state=env_states,
+                                supervisor_state=supervisor_vectors(),
                                 action=action_values,
                                 action_valid=action_valid,
                                 t=times,
@@ -141,6 +205,14 @@ class ActDatasetWriter:
                                 normal_force=np.asarray([
                                     float(o.get("normal_force", 0.0)) for o in observations
                                 ], dtype=np.float32),
+                                raw_normal_force_peak=np.asarray([
+                                    float(o.get("raw_normal_force_peak", 0.0))
+                                    for o in observations
+                                ], dtype=np.float32),
+                                raw_normal_force_peak_t=np.asarray([
+                                    float(o.get("raw_normal_force_peak_t", times[i]))
+                                    for i, o in enumerate(observations)
+                                ], dtype=np.float64),
                                 contact=np.asarray([
                                     bool(o.get("contact", False)) for o in observations
                                 ], dtype=bool),
@@ -161,6 +233,48 @@ class ActDatasetWriter:
                                     for i, o in enumerate(observations)
                                 ], dtype=np.float32),
                                 z_owner=z_owner)
+            control_trace_path = ""
+            if control_trace:
+                trace = list(control_trace)
+                trace_values = {
+                    "t": np.asarray([float(row.get("t", 0.0)) for row in trace],
+                                    dtype=np.float64),
+                    "phase": np.asarray([str(row.get("phase", "unknown"))
+                                          for row in trace], dtype="U16"),
+                    "tcp": np.stack([np.asarray(row.get("tcp", np.zeros(3)),
+                                                dtype=np.float32).reshape(3)
+                                     for row in trace]),
+                    "normal_force": np.asarray([
+                        float(row.get("normal_force", 0.0)) for row in trace
+                    ], dtype=np.float32),
+                    "raw_normal_force_peak": np.asarray([
+                        float(row.get("raw_normal_force_peak", 0.0)) for row in trace
+                    ], dtype=np.float32),
+                    "raw_normal_force_peak_t": np.asarray([
+                        float(row.get("raw_normal_force_peak_t", row.get("t", 0.0)))
+                        for row in trace
+                    ], dtype=np.float64),
+                    "policy_z": np.asarray([
+                        float(row.get("policy_z", 0.0)) for row in trace
+                    ], dtype=np.float32),
+                    "applied_z": np.asarray([
+                        float(row.get("applied_z", 0.0)) for row in trace
+                    ], dtype=np.float32),
+                    "z_owner": np.asarray([
+                        str(row.get("z_owner", "unknown")) for row in trace
+                    ], dtype="U24"),
+                    "contact": np.asarray([
+                        bool(row.get("contact", False)) for row in trace
+                    ], dtype=bool),
+                    "table_contact": np.asarray([
+                        bool(row.get("table_contact", False)) for row in trace
+                    ], dtype=bool),
+                }
+                np.savez_compressed(
+                    temporary_dir / "control_trace_100hz.npz", **trace_values)
+                control_trace_path = str(
+                    (episode_dir / "control_trace_100hz.npz").relative_to(self.root)
+                )
             metadata = {
                 **metadata,
                 "schema_version": ACT_SCHEMA_VERSION,
@@ -170,9 +284,16 @@ class ActDatasetWriter:
                 "episode_kind": str(metadata.get("episode_kind", "unknown")),
             }
             record = {"episode_id": episode_id, "success": bool(success),
-                      "overhead": overhead, "wrist": wrist, "inspection": inspection,
+                      "camera_views": list(expected_views or ()),
+                      "images": image_views, "inspection": inspection,
                       "arrays": str((episode_dir / "arrays.npz").relative_to(self.root)),
+                      **({"control_trace": control_trace_path}
+                         if control_trace_path else {}),
                       **metadata}
+            # Keep aliases for the older workbench and two-camera records.
+            for legacy_view in ("overhead", "wrist"):
+                if legacy_view in image_views:
+                    record[legacy_view] = image_views[legacy_view]
 
             # Publish the completed episode directory first, then atomically
             # replace the manifest.  Readers see either the old manifest or a
@@ -205,7 +326,7 @@ class ActDataset:
     def __init__(self, root: str, chunk_size: int = 25,
                  include_failures: bool = False,
                  image_stat_samples: int = 1000,
-                 split: str = "train"):
+                 split: str = "train", camera_views=None):
         self.root = Path(root)
         self.chunk_size = int(chunk_size)
         self.image_stat_samples = max(1, int(image_stat_samples))
@@ -229,6 +350,20 @@ class ActDataset:
             and str(record.get("split", "")) == str(split)
             and (include_failures or bool(record.get("success", False)))
         ]
+        if self.records:
+            inferred = tuple(_record_image_paths(self.records[0]))
+            self.camera_views = tuple(camera_views) if camera_views is not None else inferred
+            missing = [record.get("episode_id", "<missing>") for record in self.records
+                       if not set(self.camera_views).issubset(
+                           _record_image_paths(record)
+                       )]
+            if missing:
+                raise ValueError(
+                    "ACT dataset records are missing configured image views: "
+                    f"{missing[:5]}"
+                )
+        else:
+            self.camera_views = tuple(camera_views or ())
         self.index = []
         for rec in self.records:
             with np.load(self.root / rec["arrays"], mmap_mode="r") as arrays:
@@ -304,7 +439,7 @@ class ActDataset:
         """
         sums = {
             key: np.zeros(3, dtype=np.float64)
-            for key in ("observation.images.overhead", "observation.images.wrist")
+            for key in (f"observation.images.{view}" for view in self.camera_views)
         }
         sums_sq = {key: value.copy() for key, value in sums.items()}
         mins = {key: np.full(3, np.inf, dtype=np.float64) for key in sums}
@@ -326,13 +461,12 @@ class ActDataset:
             frame_ids = frame_ids[::stride][:remaining]
             selected_count += len(frame_ids)
             for frame_id in frame_ids:
-                for key, manifest_key in (
-                    ("observation.images.overhead", "overhead"),
-                    ("observation.images.wrist", "wrist"),
-                ):
+                image_paths = _record_image_paths(record)
+                for view in self.camera_views:
+                    key = f"observation.images.{view}"
                     from PIL import Image
 
-                    with Image.open(self.root / record[manifest_key][int(frame_id)]) as pil_image:
+                    with Image.open(self.root / image_paths[view][int(frame_id)]) as pil_image:
                         image = np.asarray(
                             pil_image.convert("RGB"), dtype=np.float32
                         ).transpose(2, 0, 1) / 255.0
@@ -400,10 +534,13 @@ class ActDataset:
         # training loop converts them to [0, 1] before LeRobot's official
         # normalizer runs.  Returning float32 here would preserve 0-255
         # values and make MEAN_STD image normalization numerically wrong.
-        with Image.open(self.root / rec["overhead"][i]) as overhead_image:
-            overhead = np.asarray(overhead_image.convert("RGB"), dtype=np.uint8)
-        with Image.open(self.root / rec["wrist"][i]) as wrist_image:
-            wrist = np.asarray(wrist_image.convert("RGB"), dtype=np.uint8)
+        image_paths = _record_image_paths(rec)
+        images = {}
+        for view in self.camera_views:
+            with Image.open(self.root / image_paths[view][i]) as image:
+                images[f"observation.images.{view}"] = np.transpose(
+                    np.asarray(image.convert("RGB"), dtype=np.uint8), (2, 0, 1)
+                )
         with np.load(self.root / rec["arrays"]) as arrays:
             state = np.asarray(arrays["state"][i], dtype=np.float32)
             environment_state = np.asarray(
@@ -416,14 +553,14 @@ class ActDataset:
         if pad > 0:
             actions = np.concatenate((actions, np.repeat(actions[-1:], pad, axis=0)), axis=0)
             valid = np.concatenate((valid, np.zeros(pad, dtype=bool)))
-        return {
+        sample = {
             # Keep uint8 at the dataset boundary, matching LeRobot's dataset
             # contract.  The official training loop converts camera values to
             # [0, 1] before the policy preprocessor applies dataset stats.
-            "observation.images.overhead": np.transpose(overhead, (2, 0, 1)),
-            "observation.images.wrist": np.transpose(wrist, (2, 0, 1)),
             "observation.state": state,
             "observation.environment_state": environment_state,
             "action": actions,
             "action_is_pad": ~valid,
         }
+        sample.update(images)
+        return sample

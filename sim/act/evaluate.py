@@ -21,6 +21,7 @@ from .rollout import (
     ActRolloutResult,
     CollectionTerminationTracker,
     _force_loop,
+    _overforce_relief_loop,
     collection_goal_status,
     collection_step_status,
 )
@@ -124,15 +125,19 @@ def _inference_dataset_stats(cfg, resolved_model_path: str | None):
 
 
 def _contact_z_command(cfg, admittance, z_nominal: float,
-                       measured_force: float) -> float:
+                       measured_force: float, relief=None) -> float:
     """Compute contact Z from admittance plus the upward over-force reflex."""
-    z = float(z_nominal) + float(admittance.step(
-        float(cfg.controller.desired_force), float(measured_force)))
-    excess = max(0.0, float(measured_force)
-                 - float(cfg.controller.desired_force))
-    relief = min(float(cfg.controller.get("overforce_relief_limit", 0.001)),
-                 float(cfg.controller.get("overforce_relief_gain", 0.0)) * excess)
-    return max(float(cfg.workspace.z_search_min), z + relief)
+    if relief is None:
+        relief = _overforce_relief_loop(cfg)
+    correction = (
+        float(admittance.step(
+            float(cfg.controller.desired_force), float(measured_force)))
+        + float(relief.step(float(measured_force)))
+    )
+    correction_limit = abs(float(cfg.controller.delta_z_limit))
+    z = float(z_nominal) + float(np.clip(
+        correction, -correction_limit, correction_limit))
+    return max(float(cfg.workspace.z_search_min), z)
 
 
 def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
@@ -141,8 +146,9 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
 
     No geometric planner, object position, target identity, or supervisor
     staging point is consulted.  ACT owns XYZ+yaw until force contact is
-    measured.  At that instant Z ownership transfers continuously to the 1 N
-    admittance loop while ACT continues to own X, Y and yaw.
+    measured. At that instant Z ownership transfers continuously to the
+    configured wrist-force admittance loop while ACT continues to own X, Y,
+    and yaw.
     """
     env = SweepEnv(cfg, seed=seed)
     env.reset(seed=seed)
@@ -167,10 +173,30 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
     policy.eval()
     if hasattr(policy, "reset"):
         policy.reset()
-    builder = ACTObservationBuilder(cfg)
+    policy_inputs = getattr(policy_cfg, "input_features", None)
+    if policy_inputs:
+        policy_views = [
+            key.removeprefix("observation.images.")
+            for key in policy_inputs
+            if key.startswith("observation.images.")
+        ]
+        policy_env_dim = int(
+            policy_inputs["observation.environment_state"].shape[0]
+        )
+    else:
+        policy_views = list(cfg.act.get(
+            "camera_views", ["overhead", "wrist"]
+        ))
+        policy_env_dim = (1 if bool(cfg.act.get(
+            "ordinary_target_count_only", False)) else 3)
+    builder = ACTObservationBuilder(
+        cfg, camera_views=policy_views,
+        environment_state_dim=policy_env_dim,
+    )
     scheduler = ActionChunkScheduler(cfg, allow_late=preview)
     scheduler.reset(env.time)
     admittance = _force_loop(cfg)
+    overforce_relief = _overforce_relief_loop(cfg)
     contact = False
     z_nominal = float(env.tcp()[2])
     last_action = np.array([*env.tcp(), env.ee.tcp_yaw()], dtype=np.float32)
@@ -286,7 +312,8 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                 measured = float(env.normal_force())
                 peak_force = max(peak_force, measured)
                 admittance_z = (_contact_z_command(
-                    cfg, admittance, z_nominal, measured) if contact else None)
+                    cfg, admittance, z_nominal, measured,
+                    relief=overforce_relief) if contact else None)
                 reference = _policy_reference_substep(
                     command_start, action, substep, substeps,
                     1.0 / float(cfg.sim.control_hz),
@@ -320,6 +347,7 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                         contact = True
                         z_nominal = float(tcp[2])
                         admittance.reset()
+                        overforce_relief.reset()
                         contact_time = float(env.time)
                         first_contact_position = np.asarray(tcp, dtype=np.float32).copy()
                 if contact:

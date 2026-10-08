@@ -21,8 +21,13 @@ from sim.act.expert import (_grid_astar, _path_capture_mask, _path_turn_count,
 from sim.act.rollout import _expert_execution_path, _force_loop
 
 
+def _menagerie_config(overrides=()):
+    """Select the legacy Menagerie profile for tests explicitly about it."""
+    return load_config(overrides=["end_effector.type=ur10e", *overrides])
+
+
 def test_ur10e_scene_uses_menagerie_structure_and_custom_brush():
-    cfg = load_config()
+    cfg = _menagerie_config()
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
     for name in ("shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
                  "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"):
@@ -34,38 +39,26 @@ def test_ur10e_scene_uses_menagerie_structure_and_custom_brush():
     assert 'name="wrist_cam"' in xml
 
 
-def test_ur10_normal_force_uses_only_the_compliant_sole_contact():
-    # The first contact is on the rigid plate (e.g. its side contacting a
-    # tray wall); only the compliant sole contributes to the scalar normal
-    # channel. Both remain available in the raw wrench diagnostic.
-    horizontal = np.eye(3)
-    vertical = np.array([[0.0, 0.0, 1.0],
-                         [1.0, 0.0, 0.0],
-                         [0.0, 1.0, 0.0]])
-    data = SimpleNamespace(
-        ncon=2,
-        contact=[
-            SimpleNamespace(geom1=1, geom2=2, frame=horizontal.ravel()),
-            SimpleNamespace(geom1=1, geom2=3, frame=vertical.ravel()),
-        ],
-    )
-
-    class FakeMujoco:
-        @staticmethod
-        def mj_contactForce(model, data, index, output):
-            output[:] = 0.0
-            output[0] = (10.0, 8.0)[index]
-
+def test_ur10_normal_force_is_tared_and_filtered_wrist_sensor_world_z():
     ee = object.__new__(UR10CB3EndEffector)
-    ee._mujoco = FakeMujoco
-    ee.model = object()
-    ee.data = data
-    ee.tip_geom_ids = [1]
-    ee.normal_geom_ids = [3]
+    ee.wrist_sign = -1.0
+    ee._wrist_ft_bias_world_z = 0.0
+    ee._normal_force_raw = 0.0
     ee._normal_force_filtered = 0.0
+    ee.cfg = SimpleNamespace(
+        controller=SimpleNamespace(force_filter_cutoff_hz=12.0))
+    sample = {"world_z": -4.0}
+    ee.wrist_ft_world = lambda: np.array([0.0, 0.0, sample["world_z"], 0, 0, 0])
 
-    # 10 N sideways is excluded; 8 N vertically is low-pass filtered at 0.15.
-    assert ee.normal_force() == 1.2
+    ee.calibrate_wrist_ft()
+    sample["world_z"] = -6.0
+    dt = 0.01
+    alpha = 1.0 - np.exp(-2.0 * np.pi * 12.0 * dt)
+    assert ee.raw_normal_force() == pytest.approx(2.0)
+    assert ee.update_normal_force(dt) == pytest.approx(2.0 * alpha)
+    # Read-only telemetry cannot advance the stateful sensor filter.
+    assert ee.normal_force_observation() == pytest.approx(2.0 * alpha)
+    assert ee.normal_force() == pytest.approx(2.0 * alpha)
 
 
 def test_brush_material_is_high_visibility_yellow():
@@ -114,7 +107,7 @@ def test_wrist_camera_is_pitched_towards_tool_contact_region():
 
 
 def test_wrist_camera_rotates_about_the_vertical_installation_axis():
-    cfg = load_config()
+    cfg = _menagerie_config()
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
     root = ET.fromstring(xml)
     camera = root.find(".//body[@name='wrist_3_link']/camera[@name='wrist_cam']")
@@ -259,7 +252,7 @@ def test_wrist_camera_is_mounted_beside_final_wrist_link():
 
 
 def test_brush_plate_is_coaxial_with_the_terminal_wrist_joint():
-    cfg = load_config()
+    cfg = _menagerie_config()
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
     root = ET.fromstring(xml)
     tool = root.find(".//body[@name='tool']")
@@ -270,7 +263,7 @@ def test_brush_plate_is_coaxial_with_the_terminal_wrist_joint():
 
 
 def test_ur10e_scene_loads_with_vendored_menagerie_assets():
-    cfg = load_config()
+    cfg = _menagerie_config()
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
     model = mujoco.MjModel.from_xml_string(xml, assets=scene_assets())
     assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base") >= 0
@@ -279,7 +272,7 @@ def test_ur10e_scene_loads_with_vendored_menagerie_assets():
 
 
 def test_ur10e_brush_width_is_transverse_to_the_sweep_direction():
-    cfg = load_config()
+    cfg = _menagerie_config()
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
     model = mujoco.MjModel.from_xml_string(xml, assets=scene_assets())
     brush_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "brush_head")
@@ -369,7 +362,7 @@ def test_screw_does_not_drift_without_external_force():
 
 
 def test_ur10e_chain_has_explicit_gravity_compensation_for_position_control():
-    cfg = load_config()
+    cfg = _menagerie_config()
     xml = build_scene_xml(cfg, sample_layout(cfg, np.random.default_rng(0)))
     root = ET.fromstring(xml)
     base = root.find("./worldbody/body[@name='base']")
@@ -386,12 +379,24 @@ def test_mujoco_reset_render_and_act_observation_contract():
         assert env.render_rgb("overhead_cam", size=(64, 48)).shape == (48, 64, 3)
         assert env.render_wrist_rgb(size=(64, 48)).shape == (48, 64, 3)
         observation = ACTObservationBuilder(cfg).observe(env)
-        assert observation["observation.images.overhead"].shape == (3, 320, 320)
-        assert observation["observation.images.wrist"].shape == (3, 320, 320)
+        image_views = {
+            key.removeprefix("observation.images.")
+            for key in observation
+            if key.startswith("observation.images.")
+        }
+        assert image_views == {
+            "corner_xminus_yminus", "corner_xminus_yplus",
+            "corner_xplus_yminus", "corner_xplus_yplus", "wrist",
+        }
+        assert all(observation[f"observation.images.{view}"].shape == (3, 320, 320)
+                   for view in image_views)
         assert observation["observation.state"].shape == (36,)
-        assert observation["observation.environment_state"].shape == (3,)
-        assert observation["observation.environment_state"][0] == 6
-        assert observation["observation.environment_state"][1] == cfg.task.target_count
+        np.testing.assert_array_equal(
+            observation["observation.environment_state"], [cfg.task.target_count]
+        )
+        np.testing.assert_array_equal(
+            observation["supervisor_state"], [6, cfg.task.target_count, 0]
+        )
     finally:
         env.close()
 
@@ -450,7 +455,7 @@ def test_ur10_rejects_unreachable_ik_and_reset_has_no_unsafe_collision():
 
 
 def test_ur10e_initial_pose_keeps_visual_links_above_table():
-    cfg = load_config()
+    cfg = _menagerie_config()
     env = SweepEnv(cfg, seed=0)
     try:
         env.reset(seed=0)
@@ -468,7 +473,7 @@ def test_ur10e_tcp_is_brush_bottom_and_contacts_at_search_height():
     from sim.controllers.hybrid import Command
     brush_id = None
 
-    cfg = load_config(overrides=["sim.real_time=false"])
+    cfg = _menagerie_config(["sim.real_time=false"])
     env = SweepEnv(cfg, seed=0)
     try:
         env.reset(seed=0)
@@ -585,16 +590,21 @@ def test_act_contact_latch_does_not_teleport_tcp_to_table_height():
     assert first_contact["command"][2] >= first_contact["tcp"][2] - 0.005
 
 
-def test_act_contact_latch_requires_measured_brush_contact():
+def test_expert_touchdown_is_geometric_then_wrist_sensor_admittance_takes_over():
     from sim.act.rollout import run_expert_episode
 
     cfg = load_config(overrides=["sim.real_time=false", "components.count=1"])
     result = run_expert_episode(cfg, seed=12345, collect_observations=False)
     first_contact = next(row for row in result.trace if row["contact"])
-    # Entering the search-height command band is not itself contact.  The
-    # force loop must latch only after the brush has produced a real measured
-    # load, otherwise the subsequent admittance hold is airborne.
-    assert first_contact["normal_force"] >= float(cfg.controller.contact_threshold)
+    # Expert data uses the calibrated TCP/table geometry for zero-preload
+    # touchdown. The next phase is still closed-loop and its Fz must come from
+    # the wrist sensor, not the geometric table-contact diagnostic.
+    assert first_contact["geometric_contact"]
+    admittance_rows = [row for row in result.trace
+                       if row["z_owner"] == "admittance"]
+    assert admittance_rows
+    assert all(np.isfinite(row["normal_force"]) for row in admittance_rows)
+    assert max(row["normal_force"] for row in admittance_rows) > 0.0
 
 
 def test_act_episode_always_starts_from_the_same_fixed_reset_pose():
@@ -810,7 +820,7 @@ def test_default_expert_reaches_contact_before_approach_dominates_episode():
 
 
 def test_ur10e_can_reach_expert_tray_lane_from_home():
-    cfg = load_config()
+    cfg = _menagerie_config()
     env = SweepEnv(cfg, seed=12345)
     try:
         env.reset(seed=12345)
@@ -823,7 +833,7 @@ def test_ur10e_can_reach_expert_tray_lane_from_home():
 
 
 def test_ur10e_ik_tracks_a_continuous_home_to_tray_path():
-    cfg = load_config()
+    cfg = _menagerie_config()
     env = SweepEnv(cfg, seed=0)
     try:
         env.reset(seed=0)

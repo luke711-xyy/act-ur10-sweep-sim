@@ -197,9 +197,21 @@ class WorkbenchState:
             frame_index = int(frame_index)
             if frame_index < 0 or frame_index >= length:
                 raise FrameNotFound(f"{episode_id}:{frame_index}")
+            image_paths = rec.get("images")
+            if not isinstance(image_paths, dict) or not image_paths:
+                image_paths = {name: rec[name] for name in ("overhead", "wrist")
+                               if name in rec}
+            images = {
+                str(view): _image(root, paths[frame_index])
+                for view, paths in image_paths.items()
+                if frame_index < len(paths) and paths[frame_index]
+            }
+            # Preserve the old response keys for clients that have not yet
+            # switched to the dynamic five-camera map.
             frame = {
-                "overhead": _image(root, rec["overhead"][frame_index]),
-                "wrist": _image(root, rec["wrist"][frame_index]),
+                "images": images,
+                "overhead": images.get("overhead") or next(iter(images.values()), None),
+                "wrist": images.get("wrist"),
                 "inspection": None,
             }
             inspection = rec.get("inspection")
@@ -223,8 +235,10 @@ class WorkbenchState:
                           if name in arrays.files else np.zeros((len(arrays["action"]), width)))
                 return [[float(item) for item in row] for row in values]
 
-            env_state = matrix("environment_state", 3)
-            return {
+            state_key = ("supervisor_state" if "supervisor_state" in arrays.files
+                         else "environment_state")
+            env_state = matrix(state_key, 3)
+            signals = {
                 "episode_id": rec["episode_id"],
                 "t": [float(value) for value in arrays["t"]],
                 "phase": [str(value) for value in arrays["phase"]],
@@ -264,6 +278,47 @@ class WorkbenchState:
                 "environment_state": env_state,
                 "fully_collected": [int(value) for value in arrays["fully_collected"]],
             }
+            if "raw_normal_force_peak" in arrays.files:
+                signals["raw_fz_peak"] = [
+                    float(value) for value in arrays["raw_normal_force_peak"]
+                ]
+                signals["raw_fz_peak_t"] = [
+                    float(value) for value in (
+                        arrays["raw_normal_force_peak_t"]
+                        if "raw_normal_force_peak_t" in arrays.files else arrays["t"]
+                    )
+                ]
+            trace_path = rec.get("control_trace")
+            if trace_path:
+                with np.load(root / trace_path, allow_pickle=False) as trace:
+                    signals.update({
+                        "control_t": [float(value) for value in trace["t"]],
+                        "control_fz": [float(value)
+                                        for value in trace["normal_force"]],
+                        "control_raw_fz_peak": [
+                            float(value) for value in trace["raw_normal_force_peak"]
+                        ],
+                        "control_raw_fz_peak_t": [
+                            float(value) for value in (
+                                trace["raw_normal_force_peak_t"]
+                                if "raw_normal_force_peak_t" in trace.files
+                                else trace["t"]
+                            )
+                        ],
+                        "control_tcp": [[float(value) for value in row]
+                                        for row in trace["tcp"]],
+                        "control_policy_z": [float(value)
+                                             for value in trace["policy_z"]],
+                        "control_applied_z": [float(value)
+                                              for value in trace["applied_z"]],
+                        "control_z_owner": [str(value)
+                                            for value in trace["z_owner"]],
+                        "control_contact": [bool(value)
+                                            for value in trace["contact"]],
+                        "control_table_contact": [bool(value)
+                                                  for value in trace["table_contact"]],
+                    })
+            return signals
 
         # Backward-compatible fallback for the one legacy preview format.
         path = root / rec["episode_id"] / "signals.json"
@@ -274,6 +329,10 @@ class WorkbenchState:
         return {"episode_id": rec["episode_id"],
                 "t": [float(value) for value in data.get("t", [])],
                 "fz": [float(value) for value in data.get("fz", [])],
+                "raw_fz_peak": [float(value) for value in data.get(
+                    "raw_fz_peak", [])],
+                "raw_fz_peak_t": [float(value) for value in data.get(
+                    "raw_fz_peak_t", data.get("t", []))],
                 "contact": [bool(value) for value in data.get("contact", [])]}
 
     def load_episode_frame_data(self, episode_id: str, frame_index: int) -> dict:
@@ -290,7 +349,9 @@ class WorkbenchState:
                 return [0.0] * width
             return [float(value) for value in np.asarray(arrays[name][index]).reshape(width)]
 
-        env_state = vector("environment_state", int(arrays["environment_state"].shape[1]))
+        state_key = ("supervisor_state" if "supervisor_state" in arrays.files
+                     else "environment_state")
+        env_state = vector(state_key, int(arrays[state_key].shape[1]))
         objects = []
         if "object_pose" in arrays.files:
             poses = np.asarray(arrays["object_pose"][index], dtype=float)
@@ -317,6 +378,14 @@ class WorkbenchState:
             "tcp_pose": vector("tcp_pose", 4),
             "wrench": vector("wrench", 6),
             "normal_force": float(arrays["normal_force"][index]) if "normal_force" in arrays.files else 0.0,
+            "raw_normal_force_peak": float(
+                arrays["raw_normal_force_peak"][index]
+                if "raw_normal_force_peak" in arrays.files else 0.0
+            ),
+            "raw_normal_force_peak_t": float(
+                arrays["raw_normal_force_peak_t"][index]
+                if "raw_normal_force_peak_t" in arrays.files else arrays["t"][index]
+            ),
             "action": vector("action", int(arrays["action"].shape[1])),
             "reference": vector("reference", 4),
             "policy_reference": vector("policy_reference", 4),
@@ -560,6 +629,13 @@ class WorkbenchState:
             "recovery_used": any(row.get("phase") == "recovery" for row in result.trace),
             "failure_reason": result.failure_reason,
             "peak_force": float(getattr(result, "peak_force", 0.0)),
+            "peak_raw_force": float(getattr(result, "peak_raw_force", 0.0)),
+            "desired_force": float(local_cfg.controller.desired_force),
+            "force_source": (
+                "wrist_ft_sensor_world_z_tared"
+                if str(local_cfg.controller.get("force_sensor", "contact")) == "wrist_ft"
+                else "simulated_contact_geometry"
+            ),
             "first_contact_position": (
                 np.asarray(result.first_contact_position, dtype=float).tolist()
                 if getattr(result, "first_contact_position", None) is not None else None
@@ -595,10 +671,15 @@ class WorkbenchState:
                     float(local_cfg.act.action_hz), 1.0),
             }
         ActDatasetWriter(str(self.preview_root)).add_episode(
-            episode_id, result.observations, result.actions, result.success, metadata)
+            episode_id, result.observations, result.actions, result.success, metadata,
+            control_trace=result.trace)
         signals = {
             "t": [float(row["t"]) for row in result.trace],
             "fz": [float(row["normal_force"]) for row in result.trace],
+            "raw_fz_peak": [float(row.get("raw_normal_force_peak", 0.0))
+                            for row in result.trace],
+            "raw_fz_peak_t": [float(row.get("raw_normal_force_peak_t", row["t"]))
+                              for row in result.trace],
             "contact": [bool(row["contact"]) for row in result.trace],
         }
         (self.preview_root / episode_id / "signals.json").write_text(

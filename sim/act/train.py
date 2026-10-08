@@ -371,7 +371,12 @@ def main(argv=None) -> int:
     elif args.small_sample_gate:
         manifest_summary = validate_small_sample_gate_manifest(dataset_root)
     else:
-        manifest_summary = validate_training_manifest(dataset_root)
+        manifest_summary = validate_training_manifest(
+            dataset_root,
+            episodes_per_target=int(cfg.act.get("training_episodes_per_target", 20)),
+            camera_views=(list(cfg.act.get("camera_views", []))
+                          if cfg.act.get("camera_views", None) is not None else None),
+        )
     dataset = ActDataset(
         dataset_root,
         chunk_size=int(cfg.act.chunk_size),
@@ -393,6 +398,25 @@ def main(argv=None) -> int:
     loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler,
                         num_workers=0, drop_last=True)
     policy, policy_cfg = build_act_policy(cfg, pretrained_path=args.resume)
+    policy_views = {
+        key.removeprefix("observation.images.")
+        for key in policy_cfg.input_features
+        if key.startswith("observation.images.")
+    }
+    if policy_views != set(dataset.camera_views):
+        raise ValueError(
+            "ACT policy and dataset camera views differ: "
+            f"policy={sorted(policy_views)}, dataset={sorted(dataset.camera_views)}"
+        )
+    dataset_env_dim = int(dataset[0]["observation.environment_state"].shape[0])
+    policy_env_dim = int(
+        policy_cfg.input_features["observation.environment_state"].shape[0]
+    )
+    if dataset_env_dim != policy_env_dim:
+        raise ValueError(
+            "ACT target-count/environment-state width mismatch: "
+            f"dataset={dataset_env_dim}, policy={policy_env_dim}"
+        )
     preprocessor, postprocessor = build_act_processors(policy_cfg, dataset_stats)
     policy.train()
     optimizer = torch.optim.AdamW(
@@ -525,8 +549,8 @@ def main(argv=None) -> int:
             except StopIteration:
                 iterator = iter(loader)
                 batch = next(iterator)
-            for key in ("observation.images.overhead", "observation.images.wrist"):
-                if key in batch and batch[key].dtype == torch.uint8:
+            for key in batch:
+                if key.startswith("observation.images.") and batch[key].dtype == torch.uint8:
                     batch[key] = batch[key].to(dtype=torch.float32) / 255.0
             batch = preprocessor(batch)
             optimizer.zero_grad(set_to_none=True)

@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..controllers.admittance import AdmittanceController1D, AdmittanceParams
+from ..controllers.admittance import (
+    AdmittanceController1D,
+    AdmittanceParams,
+    OverforceReliefController1D,
+    OverforceReliefParams,
+)
 from ..controllers.hybrid import Command
 from ..environments.sweep_env import SweepEnv
 from .expert import (ExpertPlan, expert_plan_candidates,
@@ -40,6 +45,7 @@ class ActRolloutResult:
     scheduler_timeouts: int = 0
     scheduler_late_results: int = 0
     peak_force: float = 0.0
+    peak_raw_force: float = 0.0
     sampled_frames: int = 0
     first_contact_position: np.ndarray | None = None
     planner_status: str = "unknown"
@@ -232,7 +238,39 @@ def _force_loop(cfg):
         delta_limit=float(c.delta_z_limit),
         rate_limit=float(c.delta_z_rate_limit),
         direction=-1.0,
+        upward_rate_limit=float(c.get(
+            "delta_z_upward_rate_limit", c.delta_z_rate_limit)),
+        downward_rate_limit=float(c.get(
+            "delta_z_downward_rate_limit", c.delta_z_rate_limit)),
     )
+
+
+def _overforce_relief_loop(cfg):
+    c = cfg.controller
+    p = c.get("overforce_relief", {})
+    return OverforceReliefController1D(
+        OverforceReliefParams(
+            activation_force=float(p.get("activation_force", 10.0)),
+            release_force=float(p.get("release_force", 7.0)),
+            upward_rate=float(p.get("upward_rate", 0.02)),
+            return_rate=float(p.get("return_rate", 0.10)),
+            max_offset=float(p.get("max_offset", 0.00025)),
+        ),
+        dt=1.0 / float(cfg.sim.control_hz),
+    )
+
+
+def _contact_z_command(cfg, admittance, relief, z_nominal: float,
+                       measured_force: float) -> float:
+    correction = (
+        float(admittance.step(
+            float(cfg.controller.desired_force), float(measured_force)))
+        + float(relief.step(float(measured_force)))
+    )
+    correction_limit = abs(float(cfg.controller.delta_z_limit))
+    z = float(z_nominal) + float(np.clip(
+        correction, -correction_limit, correction_limit))
+    return max(float(cfg.workspace.z_search_min), z)
 
 
 def _angle_delta(value: float, previous: float) -> float:
@@ -283,7 +321,8 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                     target_indices: np.ndarray | None = None,
                     recovery_planner=None,
                     max_recovery_rounds: int = 0,
-                    failure_mode: str = "") -> ActRolloutResult:
+                    failure_mode: str = "",
+                    contact_z_mode: str = "admittance") -> ActRolloutResult:
     """Execute expert absolute targets and record full-episode ACT labels.
 
     Approach, descent, contact build and sweep are all behavior-cloning
@@ -294,11 +333,21 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
     builder = ACTObservationBuilder(cfg)
     builder.reset()
     admittance = _force_loop(cfg)
+    overforce_relief = _overforce_relief_loop(cfg)
+    if contact_z_mode not in {"geometric", "admittance", "expert_admittance"}:
+        raise ValueError(
+            "contact_z_mode must be 'geometric', 'admittance', or 'expert_admittance'")
+    uses_admittance = contact_z_mode in {"admittance", "expert_admittance"}
+    geometry_latches_contact = contact_z_mode in {"geometric", "expert_admittance"}
+    geometric_contact_z = float(getattr(env, "table_top_z", cfg.table.top_z))
+    geometric_contact_tolerance = max(0.0, float(cfg.controller.get(
+        "expert_contact_geometry_tolerance", 0.0005)))
     observations, targets, target_valid, trace = [], [], [], []
     contact = False
     admittance_active = False
     z_nominal = None
     peak_force = 0.0
+    peak_raw_force = 0.0
     overforce_steps = 0
     contact_loss_steps = 0
     path_length = 0.0
@@ -349,13 +398,20 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             and completion_target_count == 0))
 
     def capture(action, phase: str, valid: bool):
-        nonlocal peak_force
+        nonlocal peak_force, peak_raw_force
         reference = np.asarray(action, dtype=np.float32)
         delta = policy_action_delta(
             reference, previous_reference, contact_latched=contact)
         captured_index = None
         if collect_observations:
             obs = builder.observe(env, contact_latched=contact)
+            images = {
+                view: np.clip(
+                    np.transpose(obs[f"observation.images.{view}"], (1, 2, 0)) * 255,
+                    0, 255,
+                ).astype(np.uint8)
+                for view in builder.camera_views
+            }
             wrench = np.asarray(env.wrench(), dtype=np.float32).reshape(6)
             tcp = np.asarray(env.tcp(), dtype=np.float32).reshape(3)
             joints = np.asarray(env.ee.joint_state(), dtype=np.float32).reshape(6)
@@ -364,13 +420,16 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             # changes the physical control loop relative to the screening pass.
             sampled_force = float(env.normal_force_observation())
             peak_force = max(peak_force, sampled_force)
-            observations.append({
-                "overhead": np.clip(np.transpose(obs["observation.images.overhead"], (1, 2, 0)) * 255,
-                                     0, 255).astype(np.uint8),
-                "wrist": np.clip(np.transpose(obs["observation.images.wrist"], (1, 2, 0)) * 255,
-                                  0, 255).astype(np.uint8),
+            raw_force_peak = float(
+                getattr(env, "last_raw_force_peak", None)
+                or getattr(env, "raw_normal_force", env.normal_force)()
+            )
+            peak_raw_force = max(peak_raw_force, raw_force_peak)
+            frame_observation = {
+                "images": images,
                 "state": obs["observation.state"],
                 "environment_state": obs["observation.environment_state"],
+                "supervisor_state": obs["supervisor_state"],
                 "inspection": np.asarray(env.render_rgb("inspection_cam",
                                                          size=builder.spec.image_size),
                                            dtype=np.uint8),
@@ -381,6 +440,9 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                 "tcp_pose": np.array([*tcp, float(env.ee.tcp_yaw())], dtype=np.float32),
                 "wrench": wrench,
                 "normal_force": sampled_force,
+                "raw_normal_force_peak": raw_force_peak,
+                "raw_normal_force_peak_t": float(
+                    getattr(env, "last_raw_force_peak_time", None) or env.time),
                 "contact": bool(contact),
                 "contact_latched": bool(contact),
                 "fully_collected": int(env.collected_mask().sum()),
@@ -399,7 +461,15 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                 "applied_z": float(executed_reference[2]),
                 "z_owner": "admittance" if contact else "policy",
                 "action_delta": delta,
+            }
+            # Retain the historical names for callers/tests that consume a
+            # legacy two-view observation.  The complete dynamic map is the
+            # authoritative five-view training input.
+            frame_observation.update({
+                name: images[name] for name in ("overhead", "wrist")
+                if name in images
             })
+            observations.append(frame_observation)
             captured_index = len(observations) - 1
             targets.append(delta)
             target_valid.append(bool(valid))
@@ -424,9 +494,10 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
         action, phase = execution[execution_index]
         execution_index += 1
         policy_phase = phase in {"approach", "descent", "contact_build", "sweep"}
-        if contact and not admittance_active:
+        if contact and uses_admittance and not admittance_active:
             z_nominal = float(env.tcp()[2])
             admittance.reset()
+            overforce_relief.reset()
             admittance_active = True
         valid = bool(policy_phase)
         frame_contact_at_start = bool(contact)
@@ -449,12 +520,11 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             yaw = float(command_start[3] + alpha * yaw_step)
             measured = float(env.normal_force())
             peak_force = max(peak_force, measured)
-            if contact and admittance_active:
-                z = float(z_nominal + admittance.step(float(cfg.controller.desired_force), measured))
-                excess = max(0.0, measured - float(cfg.controller.desired_force))
-                relief = min(float(cfg.controller.get("overforce_relief_limit", 0.001)),
-                             float(cfg.controller.get("overforce_relief_gain", 0.0)) * excess)
-                z += relief
+            if contact_z_mode == "geometric" and contact:
+                z = geometric_contact_z
+            elif contact and admittance_active:
+                z = _contact_z_command(
+                    cfg, admittance, overforce_relief, z_nominal, measured)
             else:
                 z = float(command_start[2] + alpha * (float(action[2]) - command_start[2]))
             if contact and phase == "sweep":
@@ -488,6 +558,8 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             applied_z_command = float(z)
             cmd = Command(x, y, z, yaw)
             env.step_control(cmd)
+            raw_force_peak = float(getattr(env, "last_raw_force_peak", None) or 0.0)
+            peak_raw_force = max(peak_raw_force, raw_force_peak)
             tcp = env.tcp()
             if contact:
                 travelled = float(np.linalg.norm(tcp[:2] - previous_xy))
@@ -505,15 +577,23 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             # measured brush load is above threshold while the TCP is near the
             # table.  Entering the action's height band alone is not contact.
             if not contact:
-                near_table = float(tcp[2]) <= float(cfg.workspace.z_search_start) + 0.025
-                if near_table and post_force >= float(cfg.controller.contact_threshold):
+                contact_band_z = (geometric_contact_z if geometry_latches_contact
+                                  else float(cfg.workspace.z_search_start))
+                near_table = float(tcp[2]) <= contact_band_z + 0.025
+                geometric_touch = (
+                    geometry_latches_contact
+                    and float(tcp[2]) <= geometric_contact_z
+                    + geometric_contact_tolerance)
+                force_touch = (
+                    contact_z_mode == "admittance"
+                    and post_force >= float(cfg.controller.contact_threshold))
+                if near_table and (geometric_touch or force_touch):
                     contact = True
-                    # The policy action is a target, not a teleport.  Starting
-                    # the admittance loop from the measured pose avoids an
-                    # artificial centimetre-scale impact on the next command.
-                    z_nominal = float(tcp[2])
-                    admittance.reset()
-                    admittance_active = True
+                    if uses_admittance:
+                        z_nominal = float(tcp[2])
+                        admittance.reset()
+                        overforce_relief.reset()
+                        admittance_active = True
                     if first_contact_position is None:
                         first_contact_position = np.asarray(
                             tcp, dtype=np.float32
@@ -527,6 +607,13 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                                       else ("transition" if contact else "policy")),
                           "phase": str(phase), "wrench": np.asarray(env.wrench()).copy(),
                           "normal_force": post_force, "contact": contact,
+                          "raw_normal_force_peak": raw_force_peak,
+                          "raw_normal_force_peak_t": float(
+                              getattr(env, "last_raw_force_peak_time", None) or env.time),
+                          "table_contact": bool(env.brush_table_contact()),
+                          "geometric_contact": (
+                              float(tcp[2]) <= geometric_contact_z
+                              + geometric_contact_tolerance),
                           "collected": int(env.collected_mask().sum())})
             if contact:
                 partial_mask = (None if failure_mode else
@@ -555,7 +642,15 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             if contact and overforce_steps >= int(cfg.controller.get("safe_force_dwell_steps", 3)):
                 failure = "normal force exceeded safety threshold"
                 break
-            if admittance_active and post_force < float(cfg.controller.release_threshold):
+            if geometry_latches_contact:
+                contact_hold_tolerance = geometric_contact_tolerance
+                if contact_z_mode == "expert_admittance":
+                    contact_hold_tolerance += abs(float(cfg.controller.delta_z_limit))
+                contact_loss_steps = (
+                    contact_loss_steps + 1
+                    if (contact and float(tcp[2]) > geometric_contact_z
+                        + contact_hold_tolerance) else 0)
+            elif admittance_active and post_force < float(cfg.controller.release_threshold):
                 contact_loss_steps += 1
             else:
                 contact_loss_steps = 0
@@ -621,16 +716,27 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                                             float(cfg.act.action_hz))))):
                 force = float(env.normal_force())
                 peak_force = max(peak_force, force)
-                z = max(float(cfg.workspace.z_search_min),
-                        float(z_nominal + admittance.step(float(cfg.controller.desired_force), force)))
+                z = (geometric_contact_z if contact_z_mode == "geometric" else
+                     _contact_z_command(
+                         cfg, admittance, overforce_relief, z_nominal, force))
                 env.step_control(Command(float(final[0]), float(final[1]), z, final_yaw))
+                raw_force_peak = float(getattr(env, "last_raw_force_peak", None) or 0.0)
+                peak_raw_force = max(peak_raw_force, raw_force_peak)
                 post_force = float(env.normal_force())
                 peak_force = max(peak_force, post_force)
                 brush_contacts = env.brush_component_contact_mask()
                 trace.append({"t": env.time, "tcp": env.tcp().copy(),
                               "command": np.array([final[0], final[1], z, final_yaw]),
                               "phase": "stability", "wrench": np.asarray(env.wrench()).copy(),
+                              "z_owner": "admittance",
                               "normal_force": post_force, "contact": contact,
+                              "raw_normal_force_peak": raw_force_peak,
+                              "raw_normal_force_peak_t": float(
+                                  getattr(env, "last_raw_force_peak_time", None) or env.time),
+                              "table_contact": bool(env.brush_table_contact()),
+                              "geometric_contact": (
+                                  float(env.tcp()[2]) <= geometric_contact_z
+                                  + geometric_contact_tolerance),
                               "collected": int(env.collected_mask().sum())})
                 if post_force > float(cfg.controller.safe_max_force):
                     overforce_steps += 1
@@ -699,6 +805,7 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                             final_collected_mask=final_mask.copy(),
                             elapsed=float(env.time), failure_mode=failure_mode,
                             peak_force=float(peak_force),
+                            peak_raw_force=float(peak_raw_force),
                             sampled_frames=int(sampled_frames),
                             first_contact_position=(
                                 np.asarray(first_contact_position, dtype=np.float32)
@@ -709,7 +816,8 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
 
 def _expert_execution_path(cfg, plan: ExpertPlan,
                            failure_mode: str = "",
-                           failure_seed: int = 0) -> tuple[np.ndarray, list[str]]:
+                           failure_seed: int = 0,
+                           table_top_z: float | None = None) -> tuple[np.ndarray, list[str]]:
     """Build the supervisor phases for one geometric expert candidate."""
     home = contact_home_xy(cfg).astype(float)
     waypoints = np.asarray(plan.waypoints, dtype=float)
@@ -759,13 +867,22 @@ def _expert_execution_path(cfg, plan: ExpertPlan,
                                yaw=first_yaw, yaw_rate=yaw_rate, accel=accel,
                                curve_radius=curve_radius)
     approach[:, 2] = float(cfg.end_effector.z_home)
-    n_descent = max(1, int(np.ceil(
-        (float(cfg.end_effector.z_home) - float(cfg.workspace.z_search_start)) /
-        max(float(cfg.controller.z_speed), 1e-6) * hz)))
-    descent = np.zeros((n_descent, 4), dtype=np.float32)
+    z_home = float(cfg.end_effector.z_home)
+    contact_z = float(cfg.table.top_z if table_top_z is None else table_top_z)
+    fast_speed = max(float(cfg.controller.z_speed), 1e-6)
+    slow_speed = max(float(cfg.controller.get("expert_contact_z_speed", 0.01)), 1e-6)
+    slow_band = max(0.0, float(cfg.controller.get("expert_contact_slow_band", 0.008)))
+    slow_start_z = contact_z + min(slow_band, max(0.0, z_home - contact_z))
+    n_fast = int(np.ceil(max(0.0, z_home - slow_start_z) / fast_speed * hz))
+    n_slow = int(np.ceil(max(0.0, slow_start_z - contact_z) / slow_speed * hz))
+    fast_descent = (np.linspace(z_home, slow_start_z, n_fast + 1)
+                    if n_fast else np.asarray([z_home], dtype=float))
+    slow_descent = (np.linspace(slow_start_z, contact_z, n_slow + 1)[1:]
+                    if n_slow else np.zeros(0, dtype=float))
+    descent_z = np.concatenate((fast_descent, slow_descent))
+    descent = np.zeros((len(descent_z), 4), dtype=np.float32)
     descent[:, 0:2] = points[1]
-    descent[:, 2] = np.linspace(float(cfg.end_effector.z_home),
-                                 float(cfg.workspace.z_search_start), n_descent)
+    descent[:, 2] = descent_z
     descent[:, 3] = first_yaw
     if len(points) >= 4:
         # Keep the final loaded push in the same continuous arc-length clock.
@@ -793,11 +910,11 @@ def _expert_execution_path(cfg, plan: ExpertPlan,
         # resolved by actual contact with its side wall rather than by a
         # post-hoc waypoint edit.
         pass
-    sweep[:, 2] = float(cfg.workspace.z_search_start)
+    sweep[:, 2] = contact_z
     build_steps = int(round(float(cfg.episode.get("contact_build_time", 0.5)) * hz))
     contact_build = np.repeat(
         np.array([[points[1, 0], points[1, 1],
-                   float(cfg.workspace.z_search_start), first_yaw]], dtype=np.float32),
+                   contact_z, first_yaw]], dtype=np.float32),
         max(1, build_steps), axis=0)
     path = np.concatenate((approach, descent, contact_build, sweep), axis=0)
     phases = (["approach"] * len(approach) + ["descent"] * len(descent)
@@ -896,13 +1013,15 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
         env.reset(seed=seed)
         try:
             path, phases = _expert_execution_path(
-                cfg, candidate, failure_mode, failure_seed=seed)
+                cfg, candidate, failure_mode, failure_seed=seed,
+                table_top_z=env.table_top_z)
             out = run_action_path(
                 env, cfg, path, collect_observations=capture_observations,
                 phases=phases,
                 target_indices=np.asarray(candidate.target_indices, dtype=int),
                 recovery_planner=None, max_recovery_rounds=0,
-                failure_mode=failure_mode)
+                failure_mode=failure_mode,
+                contact_z_mode="expert_admittance")
             out = _annotate_expert_result(out, candidate, attempt)
             if failure_mode and not out.failure_reason:
                 out.failure_reason = f"deliberate failure: {failure_mode}"

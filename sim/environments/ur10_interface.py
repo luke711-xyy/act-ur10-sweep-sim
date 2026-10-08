@@ -1,4 +1,4 @@
-"""MuJoCo end-effector adapter for the vendored UR10e Menagerie model."""
+"""MuJoCo end-effector adapters for the vendored UR10 model variants."""
 
 from __future__ import annotations
 
@@ -27,20 +27,33 @@ class UR10CB3EndEffector(CartesianEndEffector):
         self._mujoco = mujoco
         self.model, self.data, self.cfg = model, data, cfg
         self.yaw_enabled = True
+        if str(cfg.end_effector.type) == "ur10_cb3_rudra":
+            self.joint_names = tuple(f"joint_{index}" for index in range(6))
+            self.actuator_names = tuple(f"joint_{index}_act" for index in range(6))
+        else:
+            self.joint_names = self.JOINT_NAMES
+            self.actuator_names = self.ACTUATOR_NAMES
         self.jnt_ids = {n: mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n)
-                        for n in self.JOINT_NAMES}
+                        for n in self.joint_names}
         if any(v < 0 for v in self.jnt_ids.values()):
             raise RuntimeError("MuJoCo model is missing one or more UR10 joints")
         self.qpos_adr = {n: int(model.jnt_qposadr[j]) for n, j in self.jnt_ids.items()}
         self.qvel_adr = {n: int(model.jnt_dofadr[j]) for n, j in self.jnt_ids.items()}
         self.act_ids = {name: mujoco.mj_name2id(
-            model, mujoco.mjtObj.mjOBJ_ACTUATOR, name) for name in self.ACTUATOR_NAMES}
+            model, mujoco.mjtObj.mjOBJ_ACTUATOR, name) for name in self.actuator_names}
         if any(v < 0 for v in self.act_ids.values()):
-            raise RuntimeError("MuJoCo model is missing one or more UR10e actuators")
+            raise RuntimeError("MuJoCo model is missing one or more UR10 position actuators")
         self.tool_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "tool")
         self.tcp_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "tcp_site")
         self.ft_sensor_adr = self._sensor_adr("ft_force")
         self.torque_sensor_adr = self._sensor_adr("ft_torque")
+        self.ft_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "ft_site")
+        if self.ft_sensor_adr is None or self.ft_site_id < 0:
+            raise RuntimeError("MuJoCo model is missing the wrist force sensor or its site")
+        self.wrist_sign = float(cfg.controller.wrist_ft_sign)
+        self._wrist_ft_bias_world_z = 0.0
+        self._normal_force_raw = 0.0
+        self._normal_force_filtered = 0.0
         self.tip_geom_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
                              for name in ("brush_head", "brush_sole")]
         self.normal_geom_ids = [mujoco.mj_name2id(
@@ -51,16 +64,24 @@ class UR10CB3EndEffector(CartesianEndEffector):
         self._normal_force_filtered = 0.0
 
     def reset(self, tcp_target: Sequence[float]) -> None:
-        q0 = np.asarray(self.cfg.end_effector.initial_joint_positions, dtype=float)
+        if str(self.cfg.end_effector.type) == "ur10_cb3_rudra":
+            initial = self.cfg.end_effector.get(
+                "rudra_initial_joint_positions",
+                self.cfg.end_effector.initial_joint_positions,
+            )
+        else:
+            initial = self.cfg.end_effector.initial_joint_positions
+        q0 = np.asarray(initial, dtype=float)
         if q0.shape != (6,):
             raise ValueError("initial_joint_positions must contain six values")
-        for name, value in zip(self.JOINT_NAMES, q0):
+        for name, value in zip(self.joint_names, q0):
             self.data.qpos[self.qpos_adr[name]] = value
             self.data.qvel[self.qvel_adr[name]] = 0.0
-        self._normal_force_filtered = 0.0
         self._mujoco.mj_forward(self.model, self.data)
         self.set_command(float(tcp_target[0]), float(tcp_target[1]), float(tcp_target[2]), 0.0)
         self._mujoco.mj_forward(self.model, self.data)
+        self._mujoco.mj_rnePostConstraint(self.model, self.data)
+        self.calibrate_wrist_ft()
 
     def set_command(self, x: float, y: float, z: float, yaw: float = 0.0) -> None:
         target = np.array([x, y, z, yaw], dtype=float)
@@ -72,15 +93,15 @@ class UR10CB3EndEffector(CartesianEndEffector):
         # least-squares solve from selecting a visually discontinuous branch.
         max_step = float(self.cfg.end_effector.get("ik_max_joint_step", 0.04))
         q = q_current + np.clip(q_solution - q_current, -max_step, max_step)
-        for name, value in zip(self.JOINT_NAMES, q_current):
+        for name, value in zip(self.joint_names, q_current):
             self.data.qpos[self.qpos_adr[name]] = value
         self._mujoco.mj_forward(self.model, self.data)
-        for name, value in zip(self.ACTUATOR_NAMES, q):
+        for name, value in zip(self.actuator_names, q):
             self.data.ctrl[self.act_ids[name]] = float(value)
 
     def _solve_ik(self, target: np.ndarray) -> np.ndarray:
         mj = self._mujoco
-        q = np.array([self.data.qpos[self.qpos_adr[n]] for n in self.JOINT_NAMES], dtype=float)
+        q = np.array([self.data.qpos[self.qpos_adr[n]] for n in self.joint_names], dtype=float)
         jacp = np.zeros((3, self.model.nv), dtype=float)
         jacr = np.zeros((3, self.model.nv), dtype=float)
         damping = float(self.cfg.end_effector.ik_damping)
@@ -103,14 +124,14 @@ class UR10CB3EndEffector(CartesianEndEffector):
             if np.linalg.norm(error) < 1e-4:
                 break
             mj.mj_jacSite(self.model, self.data, jacp, jacr, self.tcp_site_id)
-            cols = [self.qvel_adr[n] for n in self.JOINT_NAMES]
+            cols = [self.qvel_adr[n] for n in self.joint_names]
             jac = np.vstack((jacp[:, cols], jacr[:, cols]))
             dq = jac.T @ np.linalg.solve(jac @ jac.T + damping ** 2 * np.eye(6), error)
             q += np.clip(dq, -0.12, 0.12)
-            for i, name in enumerate(self.JOINT_NAMES):
+            for i, name in enumerate(self.joint_names):
                 lo, hi = self.model.jnt_range[self.jnt_ids[name]]
                 q[i] = float(np.clip(q[i], lo, hi))
-            for i, name in enumerate(self.JOINT_NAMES):
+            for i, name in enumerate(self.joint_names):
                 self.data.qpos[self.qpos_adr[name]] = q[i]
         mj.mj_forward(self.model, self.data)
         final_pos = np.asarray(
@@ -155,8 +176,8 @@ class UR10CB3EndEffector(CartesianEndEffector):
         return float(np.arctan2(mat[1, 0], mat[0, 0]))
 
     def wrench(self) -> np.ndarray:
-        """Return the raw 6D wrist sensor for diagnostics."""
-        return self.wrist_ft()
+        """Return the raw 6D wrist sensor wrench, rotated into world axes."""
+        return self.wrist_ft_world()
 
     def _external_wrench(self) -> np.ndarray:
         """External contact wrench on the tool, expressed in world axes.
@@ -179,29 +200,35 @@ class UR10CB3EndEffector(CartesianEndEffector):
              if self.torque_sensor_adr is not None else np.zeros(3))
         return np.concatenate((f, t))
 
+    def wrist_ft_world(self) -> np.ndarray:
+        raw = self.wrist_ft()
+        rotation = np.asarray(
+            self.data.site_xmat[self.ft_site_id], dtype=float
+        ).reshape(3, 3)
+        return np.concatenate((rotation @ raw[:3], rotation @ raw[3:]))
+
+    def calibrate_wrist_ft(self) -> None:
+        """Tare world-Z at the reset pose; later Z force stays sensor-derived."""
+        self._wrist_ft_bias_world_z = float(self.wrist_ft_world()[2])
+        self._normal_force_raw = 0.0
+        self._normal_force_filtered = 0.0
+
+    def raw_normal_force(self) -> float:
+        """Unfiltered, reset-tared wrist F/T world-Z; pressing is positive."""
+        delta = float(self.wrist_ft_world()[2]) - self._wrist_ft_bias_world_z
+        return max(0.0, self.wrist_sign * delta)
+
+    def update_normal_force(self, dt: float) -> float:
+        """Sample and low-pass wrist force once per control tick."""
+        raw = float(self.raw_normal_force())
+        self._normal_force_raw = raw
+        cutoff = max(0.0, float(self.cfg.controller.force_filter_cutoff_hz))
+        alpha = 1.0 - float(np.exp(-2.0 * np.pi * cutoff * max(float(dt), 0.0)))
+        self._normal_force_filtered += alpha * (raw - self._normal_force_filtered)
+        return float(self._normal_force_filtered)
+
     def normal_force(self) -> float:
-        # A MuJoCo force sensor includes inertial reactions of the moving arm.
-        # For the policy's single-axis contact channel, sum the normal
-        # components of active contacts involving the brush.  This is the
-        # simulated wrist normal readout; ``wrench()`` remains the raw 6D
-        # sensor diagnostic.
-        total = 0.0
-        # Only the compliant sole is the single-axis normal-force channel.
-        # Lateral plate/part impulses remain present in the raw 6-D wrench but
-        # must not be mistaken for loss/excess of table-normal force.
-        brush = set(self.normal_geom_ids)
-        buffer = np.zeros(6, dtype=float)
-        for i in range(int(self.data.ncon)):
-            contact = self.data.contact[i]
-            if int(contact.geom1) not in brush and int(contact.geom2) not in brush:
-                continue
-            self._mujoco.mj_contactForce(self.model, self.data, i, buffer)
-            total += abs(float(buffer[0]))
-        # Sensor bandwidth is intentionally finite; this removes one-step
-        # contact impulses from the controller while retaining the contact
-        # load trend used by ACT observations.
-        alpha = 0.15
-        self._normal_force_filtered += alpha * (total - self._normal_force_filtered)
+        """Filtered, reset-tared wrist-sensor world-Z load; pressing is positive."""
         return float(self._normal_force_filtered)
 
     def normal_force_observation(self) -> float:
@@ -209,7 +236,7 @@ class UR10CB3EndEffector(CartesianEndEffector):
         return float(self._normal_force_filtered)
 
     def joint_state(self) -> np.ndarray:
-        return np.array([self.data.qpos[self.qpos_adr[n]] for n in self.JOINT_NAMES], dtype=float)
+        return np.array([self.data.qpos[self.qpos_adr[n]] for n in self.joint_names], dtype=float)
 
 
 class UR10eEndEffector(UR10CB3EndEffector):

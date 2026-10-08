@@ -21,18 +21,31 @@ def require_act_dependencies():
     return FeatureType, PolicyFeature, ACTConfig, ACTPolicy
 
 
-def build_act_config(cfg):
+def build_act_config(cfg, camera_views=None, environment_state_dim=None):
     FeatureType, PolicyFeature, ACTConfig, ACTPolicy = require_act_dependencies()
 
     image_shape = (3, int(cfg.act.image_size[1]), int(cfg.act.image_size[0]))
+    if camera_views is None:
+        configured_views = cfg.act.get("camera_views", None)
+        camera_views = (list(configured_views) if configured_views is not None
+                        else ["overhead", "wrist"])
+    if not camera_views or len(set(camera_views)) != len(camera_views):
+        raise ValueError("ACT camera_views must be non-empty and unique")
+    env_dim = int(environment_state_dim or (
+        1 if bool(cfg.act.get("ordinary_target_count_only", False)) else 3
+    ))
+    if env_dim not in {1, 3}:
+        raise ValueError("ACT environment_state dimension must be 1 or 3")
     inputs = {
-        "observation.images.overhead": PolicyFeature(FeatureType.VISUAL, image_shape),
-        "observation.images.wrist": PolicyFeature(FeatureType.VISUAL, image_shape),
+        f"observation.images.{view}": PolicyFeature(FeatureType.VISUAL, image_shape)
+        for view in camera_views
+    }
+    inputs.update({
         "observation.state": PolicyFeature(
             FeatureType.STATE, (int(cfg.act.state_dim),)
         ),
-        "observation.environment_state": PolicyFeature(FeatureType.ENV, (3,)),
-    }
+        "observation.environment_state": PolicyFeature(FeatureType.ENV, (env_dim,)),
+    })
     outputs = {"action": PolicyFeature(FeatureType.ACTION, (int(cfg.act.action_dim),))}
     device = str(cfg.act.get("device", "mps"))
     import torch
@@ -73,15 +86,17 @@ def build_act_policy(cfg, pretrained_path=None):
     _, _, _, ACTPolicy = require_act_dependencies()
     act_cfg = build_act_config(cfg)
     if pretrained_path:
-        # Loading through LeRobot's official API restores the saved policy
-        # config and safetensors weights instead of merely attaching a path to
-        # a freshly initialised random network.
+        # Load the serialized policy config as well as weights.  This keeps
+        # older two-view checkpoints usable while the current training config
+        # may expose five input views.
         policy = ACTPolicy.from_pretrained(
             pretrained_path,
-            config=act_cfg,
             local_files_only=True,
         )
         validate_act_policy_contract(policy.config, cfg)
+        device = str(act_cfg.device)
+        policy.config.device = device
+        policy.to(device)
         return policy, policy.config
     policy = ACTPolicy(act_cfg)
     policy.to(act_cfg.device)

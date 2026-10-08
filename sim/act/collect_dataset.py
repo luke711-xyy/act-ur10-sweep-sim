@@ -121,7 +121,8 @@ def evaluation_layout_plan(split: str, seed_base: int,
 
 
 def validate_training_manifest(root: str | Path,
-                               episodes_per_target: int = 20) -> dict:
+                               episodes_per_target: int = 20,
+                               camera_views=None) -> dict:
     """Require a balanced set of successful schema-v5 experts."""
     root = Path(root)
     episodes_per_target = int(episodes_per_target)
@@ -131,6 +132,8 @@ def validate_training_manifest(root: str | Path,
     path = root / "manifest.jsonl"
     records = [json.loads(line) for line in path.read_text(
         encoding="utf-8").splitlines() if line.strip()]
+    expected_views = (set(str(view) for view in camera_views)
+                      if camera_views is not None else None)
     invalid = [record.get("episode_id", "<missing>") for record in records if not (
         int(record.get("schema_version", 0)) == ACT_SCHEMA_VERSION
         and int(record.get("action_dim", 0)) == 4
@@ -146,6 +149,9 @@ def validate_training_manifest(root: str | Path,
         and bool(str(record.get("layout_id", "")))
         and int(record.get("seed", -1)) >= 0
         and bool(record.get("layout_fingerprint"))
+        and (expected_views is None or set(
+            str(view) for view in record.get("camera_views", [])
+        ) == expected_views)
     )]
     per_target = {
         str(target_count): sum(
@@ -540,7 +546,19 @@ def _expert_metadata(spec: EpisodeSpec, result, requested_seed: int,
         "spawn_mode": str(cfg.components.get("spawn_mode", "cluster")),
         "generation_outcome": "success",
         "failure_reason": "",
+        "desired_force": float(cfg.controller.desired_force),
         "peak_force": float(result.peak_force),
+        "peak_raw_force": float(getattr(result, "peak_raw_force", 0.0)),
+        "force_source": (
+            "wrist_ft_sensor_world_z_tared"
+            if str(cfg.controller.get("force_sensor", "contact")) == "wrist_ft"
+            else "simulated_contact_geometry"
+        ),
+        "force_processing": (
+            "world-Z projection; reset-pose tare; pressing-positive; low-pass"
+            if str(cfg.controller.get("force_sensor", "contact")) == "wrist_ft"
+            else "contact-normal projection; low-pass"
+        ),
         "first_contact_position": np.asarray(
             result.first_contact_position, dtype=float
         ).tolist(),
@@ -569,7 +587,8 @@ def _capture_training_episode(cfg, writer: ActDatasetWriter,
         spec, result, requested_seed, generation_attempt, local_cfg
     )
     writer.add_episode(
-        episode_id, result.observations, result.actions, True, metadata
+        episode_id, result.observations, result.actions, True, metadata,
+        control_trace=result.trace,
     )
     return {"episode_id": episode_id, **metadata}
 
@@ -717,9 +736,18 @@ def generate_approved_training_dataset(cfg, root: str | Path,
             "seed": int(accepted_seed),
         }), flush=True)
 
-    validation = validate_training_manifest(
-        root, episodes_per_target=episodes_per_target
-    )
+    act_config = getattr(cfg, "act", None)
+    configured_views = (act_config.get("camera_views", None)
+                        if act_config is not None else None)
+    if configured_views is None:
+        validation = validate_training_manifest(
+            root, episodes_per_target=episodes_per_target
+        )
+    else:
+        validation = validate_training_manifest(
+            root, episodes_per_target=episodes_per_target,
+            camera_views=list(configured_views),
+        )
     if episodes_per_target == 15:
         validate_preview_training_manifest(root, per_target=15)
     split_manifests = write_split_manifests(root)
@@ -877,6 +905,7 @@ def main(argv=None) -> int:
                                   "generation_outcome": (
                                       "success" if result.success else "failed"),
                                   "failure_reason": result.failure_reason},
+                control_trace=result.trace,
             )
         print(json.dumps({"split": args.split, "index": i, "seed": accepted_seed,
                           "requested_seed": seed,

@@ -75,14 +75,13 @@ def save_inference_replay(cfg, seed: int, result, root: str | Path,
             contact_latched = bool(row.get("contact", False))
             obs = builder.observe(env, contact_latched=contact_latched)
             image_size = tuple(int(value) for value in replay_cfg.act.image_size)
-            overhead = np.clip(
-                np.transpose(obs["observation.images.overhead"], (1, 2, 0)) * 255.0,
-                0, 255,
-            ).astype(np.uint8)
-            wrist = np.clip(
-                np.transpose(obs["observation.images.wrist"], (1, 2, 0)) * 255.0,
-                0, 255,
-            ).astype(np.uint8)
+            images = {
+                view: np.clip(
+                    np.transpose(obs[f"observation.images.{view}"], (1, 2, 0)) * 255.0,
+                    0, 255,
+                ).astype(np.uint8)
+                for view in builder.camera_views
+            }
             applied_reference = command.copy()
             policy_reference = np.asarray(
                 row.get("policy_reference", applied_reference), dtype=np.float32
@@ -92,13 +91,13 @@ def save_inference_replay(cfg, seed: int, result, root: str | Path,
                 contact_latched=contact_latched,
             )
             previous_policy_reference = policy_reference.copy()
-            observations.append({
-                "overhead": overhead,
-                "wrist": wrist,
+            frame_observation = {
+                "images": images,
                 "inspection": np.asarray(env.render_rgb(
                     "inspection_cam", size=image_size), dtype=np.uint8),
                 "state": obs["observation.state"],
                 "environment_state": obs["observation.environment_state"],
+                "supervisor_state": obs["supervisor_state"],
                 "t": float(env.time),
                 "phase": str(row.get("phase", "unknown")),
                 "policy_mask": str(row.get("phase", "")) in {
@@ -124,7 +123,12 @@ def save_inference_replay(cfg, seed: int, result, root: str | Path,
                 "z_owner": str(row.get(
                     "z_owner", "admittance" if contact_latched else "policy"
                 )),
+            }
+            frame_observation.update({
+                name: images[name] for name in ("overhead", "wrist")
+                if name in images
             })
+            observations.append(frame_observation)
             actions.append(delta)
     finally:
         env.close()

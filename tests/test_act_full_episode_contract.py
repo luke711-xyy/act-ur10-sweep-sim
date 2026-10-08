@@ -132,6 +132,7 @@ def test_observation_state_is_36d_and_keeps_current_and_200ms_contact_latch():
     assert second["observation.state"][17] == 1.0
     assert second["observation.state"][35] == 0.0
 
+    pytest.importorskip("torch")
     batch = builder.torch_batch(second)
     assert "contact_latched" not in batch
     assert "t" not in batch
@@ -277,7 +278,7 @@ def test_act_inference_module_has_no_astar_or_layout_dependent_staging_dependenc
 
 def test_training_reader_and_act_rollout_work_when_astar_entrypoints_raise(
         tmp_path, monkeypatch):
-    import torch
+    torch = pytest.importorskip("torch")
     import sim.act.evaluate as evaluate
     import sim.act.expert as expert
 

@@ -59,6 +59,59 @@ class AdmittanceParams:
         return float(np.sqrt(self.k / self.m)) if self.m > 0 else float("nan")
 
 
+@dataclass
+class OverforceReliefParams:
+    """Rate-limited emergency unloading parameters for the contact loop."""
+
+    activation_force: float = 10.0
+    release_force: float = 7.0
+    upward_rate: float = 0.02
+    return_rate: float = 0.10
+    max_offset: float = 0.00025
+
+    def is_valid(self) -> bool:
+        return (
+            self.activation_force > self.release_force >= 0.0
+            and self.upward_rate >= 0.0
+            and self.return_rate >= 0.0
+            and self.max_offset >= 0.0
+        )
+
+
+class OverforceReliefController1D:
+    """Hysteretic, slew-limited upward relief layered over admittance."""
+
+    def __init__(self, params: OverforceReliefParams, dt: float):
+        if dt <= 0.0:
+            raise ValueError("dt must be positive")
+        if not params.is_valid():
+            raise ValueError(f"invalid overforce relief parameters: {params}")
+        self.params = params
+        self.dt = float(dt)
+        self._offset = 0.0
+
+    def reset(self) -> None:
+        self._offset = 0.0
+
+    @property
+    def offset(self) -> float:
+        return self._offset
+
+    def step(self, force_measured: float) -> float:
+        force = max(0.0, float(force_measured))
+        if force >= self.params.activation_force:
+            self._offset = min(
+                self.params.max_offset,
+                self._offset + self.params.upward_rate * self.dt,
+            )
+        elif force < self.params.release_force:
+            self._offset = max(
+                0.0,
+                self._offset - self.params.return_rate * self.dt,
+            )
+        return self._offset
+
+
 class AdmittanceController1D:
     def __init__(
         self,
@@ -67,6 +120,8 @@ class AdmittanceController1D:
         delta_limit: float = 0.02,
         rate_limit: float = 0.05,
         direction: float = -1.0,
+        upward_rate_limit: float | None = None,
+        downward_rate_limit: float | None = None,
     ):
         if not params.is_stable():
             raise ValueError(f"non-physical admittance parameters: {params}")
@@ -76,6 +131,10 @@ class AdmittanceController1D:
         self.dt = float(dt)
         self.delta_limit = float(abs(delta_limit))
         self.rate_limit = float(abs(rate_limit))
+        self.upward_rate_limit = float(abs(
+            rate_limit if upward_rate_limit is None else upward_rate_limit))
+        self.downward_rate_limit = float(abs(
+            rate_limit if downward_rate_limit is None else downward_rate_limit))
         self.direction = float(np.sign(direction)) or -1.0
         self._w = 0.0   # correction along the inward normal
         self._dw = 0.0
@@ -106,8 +165,13 @@ class AdmittanceController1D:
         # semi-implicit (symplectic) Euler: more stable than explicit Euler for
         # stiff spring/damper pairs at 100 Hz.
         self._dw += acc * self.dt
-        w_rate_limit = self.rate_limit  # |direction| == 1, so limits carry over
-        self._dw = float(np.clip(self._dw, -w_rate_limit, w_rate_limit))
+        # Rate limits are specified in world Z, where positive is upward.
+        # Convert through ``direction`` so the same controller also supports
+        # contact normals that point along +Z.
+        z_rate = self.direction * self._dw
+        z_rate = float(np.clip(
+            z_rate, -self.downward_rate_limit, self.upward_rate_limit))
+        self._dw = self.direction * z_rate
 
         w_next = self._w + self._dw * self.dt
         w_limit = self.delta_limit

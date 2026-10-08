@@ -62,13 +62,29 @@ class ACTObservationBuilder:
 
     Object positions are intentionally absent.  Robot state is 18-D per
     sample; current and 200 ms-old samples form ``observation.state`` (36-D).
-    Physical total, target count and fully-collected count are sent once in the
-    separate 3-D ``observation.environment_state`` feature.
+    The policy receives only the requested target count in
+    ``observation.environment_state`` for the target-count-only configuration.
+    Full scene counts remain available as ``supervisor_state`` for audit and
+    replay, but are never passed to the policy.
     """
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, camera_views=None, environment_state_dim=None):
         self.cfg = cfg
         size = tuple(int(v) for v in cfg.act.image_size)
+        configured_views = cfg.act.get("camera_views", None)
+        if camera_views is None:
+            camera_views = (list(configured_views) if configured_views is not None
+                            else ["overhead", "wrist"])
+        self.camera_views = tuple(str(view) for view in camera_views)
+        if not self.camera_views or len(set(self.camera_views)) != len(self.camera_views):
+            raise ValueError("ACT camera_views must be non-empty and unique")
+        configured_env_dim = (1 if bool(cfg.act.get(
+            "ordinary_target_count_only", False)) else 3)
+        self.environment_state_dim = int(
+            environment_state_dim or configured_env_dim
+        )
+        if self.environment_state_dim not in {1, 3}:
+            raise ValueError("ACT environment_state dimension must be 1 or 3")
         self.spec = ACTObservationSpec(
             image_size=(size[0], size[1]),
             action_dim=int(cfg.act.action_dim),
@@ -141,26 +157,38 @@ class ACTObservationBuilder:
 
     def observe(self, env, contact_latched: bool = False,
                 include_images: bool = True) -> dict[str, Any]:
-        environment_state = np.array([
-            len(env.layout),
-            int(np.clip(int(self.cfg.get_path("task.target_count", len(env.layout))),
-                        1, max(1, len(env.layout)))),
-            int(env.collected_mask().sum()),
+        target_count = int(np.clip(
+            int(self.cfg.get_path("task.target_count", len(env.layout))),
+            1, max(1, len(env.layout))))
+        supervisor_state = np.array([
+            len(env.layout), target_count, int(env.collected_mask().sum()),
         ], dtype=np.float32)
+        environment_state = (
+            np.asarray([target_count], dtype=np.float32)
+            if self.environment_state_dim == 1 else supervisor_state.copy()
+        )
         observation = {
             "observation.state": self._state(env, contact_latched=contact_latched),
             "observation.environment_state": environment_state,
+            "supervisor_state": supervisor_state,
             "contact_latched": bool(contact_latched),
             "t": float(env.time),
         }
         if include_images:
             size = self.spec.image_size
-            overhead = _resize_rgb(env.render_rgb("overhead_cam", size=size), size)
-            wrist = _resize_rgb(env.render_wrist_rgb(size=size), size)
-            observation.update({
-                "observation.images.overhead": np.transpose(overhead, (2, 0, 1)).astype(np.float32) / 255.0,
-                "observation.images.wrist": np.transpose(wrist, (2, 0, 1)).astype(np.float32) / 255.0,
-            })
+            for view in self.camera_views:
+                if view in {"wrist", "wrist_cam"}:
+                    image = env.render_wrist_rgb(size=size)
+                else:
+                    camera_name = {
+                        "overhead": "overhead_cam",
+                        "inspection": "inspection_cam",
+                    }.get(view, view)
+                    image = env.render_rgb(camera_name, size=size)
+                image = _resize_rgb(image, size)
+                observation[f"observation.images.{view}"] = (
+                    np.transpose(image, (2, 0, 1)).astype(np.float32) / 255.0
+                )
         return observation
 
     @staticmethod
@@ -172,7 +200,7 @@ class ACTObservationBuilder:
             # Timestamp and the convenience scalar are executor metadata.
             # contact_latched is already encoded in the 36-D current/history
             # state and must not become an undeclared extra LeRobot feature.
-            if key in {"t", "contact_latched"}:
+            if key in {"t", "contact_latched", "supervisor_state"}:
                 continue
             # Leave batching, device placement and normalization to the
             # official LeRobot ACT preprocessor.  This method now only turns

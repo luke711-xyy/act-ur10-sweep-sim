@@ -36,11 +36,16 @@ class SweepEnv:
         self._seg_renderer = None
         self._depth_renderer = None
         self.decimation = max(1, int(round((1.0 / float(cfg.sim.control_hz)) / float(cfg.sim.physics_dt))))
+        self.record_raw_force_peaks = bool(
+            cfg.get_path("act.record_raw_force_peaks", True))
+        self.last_raw_force_peak: float | None = None
+        self.last_raw_force_peak_time: float | None = None
         self.component_body_ids: List[int] = []
         self.component_geom_ids: List[List[int]] = []
         self.geom_to_component: Dict[int, int] = {}
         self.robot_geom_ids: set[int] = set()
         self.brush_geom_ids: set[int] = set()
+        self.table_geom_id = -1
 
     # ------------------------------------------------------------------ setup
     def reset(self, seed: Optional[int] = None):
@@ -49,6 +54,8 @@ class SweepEnv:
         if seed is not None:
             self.seed = int(seed)
         self.rng = np.random.default_rng(self.seed)
+        self.last_raw_force_peak = None
+        self.last_raw_force_peak_time = None
 
         cfg = self.cfg.copy()
         jitter = float(cfg.table.height_perturb_std)
@@ -63,6 +70,8 @@ class SweepEnv:
         self.xml = build_scene_xml(cfg, self.layout)
         self.model = mujoco.MjModel.from_xml_string(self.xml, assets=scene_assets())
         self.data = mujoco.MjData(self.model)
+        self.table_geom_id = int(mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_GEOM, "table"))
         self._close_renderers()
 
         self.ee = build_end_effector(self.model, self.data, cfg)
@@ -107,6 +116,9 @@ class SweepEnv:
         # so every episode starts from the same task-space state.
         self.ee.reset([0.42, 0.0, float(cfg.end_effector.z_home)])
         mujoco.mj_forward(self.model, self.data)
+        if hasattr(self.ee, "calibrate_wrist_ft"):
+            mujoco.mj_rnePostConstraint(self.model, self.data)
+            self.ee.calibrate_wrist_ft()
         self.initial_positions = self.component_positions().copy()
         return self.observation()
 
@@ -171,10 +183,33 @@ class SweepEnv:
         import mujoco
 
         self.ee.set_command(cmd.x, cmd.y, cmd.z, cmd.yaw)
+        raw_force_peak = 0.0
+        raw_force_peak_time = float(self.data.time)
+        raw_force_sampled = False
         for _ in range(self.decimation):
             mujoco.mj_step(self.model, self.data)
+            if (self.record_raw_force_peaks
+                    and hasattr(self.ee, "raw_normal_force")):
+                mujoco.mj_rnePostConstraint(self.model, self.data)
+                raw_sample = float(self.ee.raw_normal_force())
+                if not raw_force_sampled or raw_sample > raw_force_peak:
+                    raw_force_peak = raw_sample
+                    raw_force_peak_time = float(self.data.time)
+                raw_force_sampled = True
         # cfrc_ext / force sensors need the post-constraint RNE pass.
         mujoco.mj_rnePostConstraint(self.model, self.data)
+        if hasattr(self.ee, "update_normal_force"):
+            self.ee.update_normal_force(self.control_dt)
+        if self.record_raw_force_peaks and hasattr(self.ee, "raw_normal_force"):
+            raw_sample = float(self.ee.raw_normal_force())
+            if raw_sample > raw_force_peak:
+                raw_force_peak = raw_sample
+                raw_force_peak_time = float(self.data.time)
+            self.last_raw_force_peak = raw_force_peak
+            self.last_raw_force_peak_time = raw_force_peak_time
+        else:
+            self.last_raw_force_peak = None
+            self.last_raw_force_peak_time = None
 
     # ----------------------------------------------------------- measurements
     def tcp(self) -> np.ndarray:
@@ -188,6 +223,11 @@ class SweepEnv:
 
     def normal_force_observation(self) -> float:
         return float(self.ee.normal_force_observation())
+
+    def raw_normal_force(self) -> float:
+        if hasattr(self.ee, "raw_normal_force"):
+            return float(self.ee.raw_normal_force())
+        return float(self.ee.normal_force())
 
     def wrench(self) -> np.ndarray:
         return self.ee.wrench()
@@ -294,6 +334,18 @@ class SweepEnv:
             if component is not None:
                 mask[int(component)] = True
         return mask
+
+    def brush_table_contact(self) -> bool:
+        """Whether a brush collision geom is touching the tabletop (diagnostic)."""
+        if self.data is None or self.table_geom_id < 0:
+            return False
+        for index in range(int(self.data.ncon)):
+            contact = self.data.contact[index]
+            g1, g2 = int(contact.geom1), int(contact.geom2)
+            if ((g1 == self.table_geom_id and g2 in self.brush_geom_ids)
+                    or (g2 == self.table_geom_id and g1 in self.brush_geom_ids)):
+                return True
+        return False
 
     def unsafe_robot_collision(self) -> bool:
         """Return whether a non-brush robot geometry hit the scene.

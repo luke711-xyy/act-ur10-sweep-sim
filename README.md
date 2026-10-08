@@ -5,11 +5,11 @@ its **fixed brush directly as a pusher** to collect small industrial components
 (nuts, screws, bolts, washers) from a flat table into a fixed shallow tray at the table
 edge.
 
-There is no WAM and no grasping DOF. The scene uses the vendored MuJoCo Menagerie UR10e
-six-joint model, a fixed brush, an overhead camera, a tool-mounted wrist camera, and a
-separate observation-only oblique camera. The project
-keeps the original Cartesian pusher/planner implementation as a legacy diagnostic path;
-the default ACT path is the UR10 brush scene.
+There is no WAM and no active grasping DOF. The brush is held by a fixed Robotiq 2F-85
+gripper. This five-view branch defaults to the imported Rudra UR10 CB3 six-joint model;
+the Menagerie UR10e profile remains selectable for comparisons. Robot-model variants are documented in the branch guide. The project keeps the original
+Cartesian pusher/planner implementation as a legacy diagnostic path; the default ACT path
+is the UR10 brush scene.
 
 The first version focuses on five things:
 
@@ -22,6 +22,12 @@ The first version focuses on five things:
 No Isaac Sim, no MoveIt. Python MuJoCo + NumPy + Matplotlib (SciPy for image labelling).
 
 ---
+
+## Branch guide
+
+This repository has several experiment branches with different policy and robot-model
+contracts. See [the branch guide](docs/branch-guide.md) before switching branches; it
+records each branch's purpose and the ordinary-ACT versus goal-token distinction.
 
 ## Quick start
 
@@ -52,7 +58,7 @@ python -m sim.run_experiment --planners fixed global_sweep visual_greedy \
 python -m sim.run_force_sweep --forces 1 2 3 5 8 12 \
     --geometries washer hex_nut bolt --episodes 5
 
-# 3d. record a two-camera video of one episode
+# 3d. record a synchronized multi-camera video of one episode
 python -m sim.record_video --planner visual_greedy --num-components 5 --seed 0
 python -m sim.record_video --compare fixed global_sweep visual_greedy \
     --num-components 5 --seed 0        # same layout, one video per planner
@@ -63,7 +69,7 @@ python -m sim.visualize_results --run runs/experiment-*
 # 5. export demonstrations for later ACT training (no training happens here)
 python -m sim.export_dataset --planner visual_greedy --episodes 200
 
-# 6. schema-v4 UR10 + ACT full-episode pipeline
+# 6. schema-v5 five-view UR10 + ACT full-episode pipeline
 uv pip install -e '.[act,web]'
 # First generate one common layout with exact goals 1..6 for visual approval.
 python -m sim.act.generate_preview_batch --seed-base 4100 \
@@ -73,7 +79,7 @@ python -m sim.act.collect_dataset --out runs/act_dataset \
     --promote-preview runs/workbench_previews
 python -m sim.act.collect_dataset --out runs/act_dataset \
     --approved-plan --seed-base 4100 --max-attempts-per-episode 64
-# Formal training validates exactly 120 successful expert records before it starts.
+# Formal training validates the configured 300 successful experts before it starts.
 python -m sim.act.train --config configs/default.yaml
 python -m sim.act.evaluate --config configs/default.yaml --model runs/act_model
 python -m sim.web.run --config configs/default.yaml
@@ -94,10 +100,10 @@ python -m sim.web.run --config configs/default.yaml
 
 It contains five connected areas: live simulation views, saved/preview expert
 episode playback, local ACT training jobs, MuJoCo inference jobs, and a bounded
-parameter editor. The simulation shows the fixed perception overhead camera,
-the ACT wrist camera, and a third **inspection-only** oblique-front-above
-camera. The third camera is rendered and stored for human review but is never
-included in `act.observation_keys` or passed to the ACT policy.
+parameter editor. Every policy observation contains five synchronized RGB
+images: four fixed cameras outside the tabletop corners, each aimed toward the
+table centre, plus the wrist camera. A separate oblique whole-scene inspection
+camera is rendered for human review only and never enters the ACT input.
 
 "Generate expert preview" runs the force-controlled expert and stores the
 accepted rollout under `runs/workbench_previews/`; a failed layout is retried
@@ -144,12 +150,15 @@ The UR10 preview uses a continuous task-space-to-joint adapter. Its IK solve is
 performed in scratch state, the physical joint state is restored before stepping,
 and `end_effector.ik_max_joint_step` bounds each joint target update. This keeps
 near-singular least-squares solves from causing a visible branch jump. Demo
-playback takes over the same three top-row image panes and pauses the periodic
-live refresh, so all three cameras remain synchronized with the episode slider.
+playback takes over the five ACT image panes and pauses periodic live refresh,
+so the policy views remain synchronized with the episode slider; inspection
+stays in its separate human-only pane.
 The full-run Fz chart and the selectable TCP/action/wrench/joint/count plots use
 the same frame cursor; the frame table includes the exact values and all six
-object poses. The normal-force target remains 1 N, while 20 N is the independent
-transient safety ceiling.
+object poses. The current wrist-sensor force target is 0.1 N; 20 N remains the
+independent transient safety ceiling. The workbench records both the filtered
+Fz signal and the per-physics-step raw peak from the wrist F/T sensor, timestamped
+at the actual physics substep where that peak occurred.
 
 The current exact-target expert uses a single contact pass. It lets the A*
 expert choose a feasible exact-cardinality subset, searches a lattice of brush
@@ -171,24 +180,25 @@ input. Recovery phases are not appended to expert demonstrations.
 
 ACT starts at the same fixed UR10 reset pose for every goal. A* is imported
 only by expert generation; training and learned inference never request an
-expert staging point, target index, or object pose. The policy observes the two
+expert staging point, target index, or object pose. The policy observes five
 320×320 RGB views, a 36-value state consisting of current and exactly 200 ms
-prior 18-value robot/contact records, and a separate three-value task state
-`[initial_count, target_count, fully_collected_count]`. The robot state no
-longer duplicates task counts. It predicts fixed-table frame
+prior 18-value robot/contact records, and only the requested target count as
+its one-value task state. Total and collected counts remain supervisor-only.
+The robot state no longer duplicates task counts. It predicts fixed-table frame
 `[Δx, Δy, Δz, Δyaw]` chunks at 5 Hz; references execute at 25 Hz with
 100 Hz substep interpolation, speed limiting, IK residual validation, and
 non-brush robot collision checks.
 
 Before measured contact, ACT owns all four action dimensions. The force latch
-then transfers physical Z continuously to the 1 N admittance controller; ACT's
+then transfers physical Z continuously to wrist-sensor admittance at the
+configured 0.1 N target; ACT's
 post-contact Z is retained for audit but not executed, and its training `Δz`
 label is zero. The workbench plots policy Z, applied Z, ownership, force, and
 the first measured contact position. Stability/unload frames remain viewable
 but are masked from behavior cloning.
 
-The rebuilt training set is schema v5 and contains exactly 120 successful
-experts, 20 for each exact target count. Every record uses its own randomized
+The configured new training set is schema v5 and targets 300 successful
+experts, 50 for each exact target count. Every record uses its own randomized
 six-part layout; the group centre remains concentrated, while the parts are
 slightly more dispersed than in the preview batch. The six reviewed previews
 remain separate. Training allocates 35% of samples to approach/descent and 65%
@@ -303,63 +313,63 @@ z_command = z_nominal + Δz
 where `w` is the correction **along the inward contact normal** (positive = press deeper)
 and `Δz = −w` because the table normal is `+Z`. Both forces use the same
 *pressing-positive* convention, so `controller.desired_force` is a small **positive**
-value (default 1 N), never zero. Writing the ODE in the inward-normal frame is what keeps
+value (0.1 N in the current pilot), never zero. Writing the ODE in the inward-normal frame is what keeps
 the signs unambiguous; see the module docstring in `sim/controllers/admittance.py`.
 
-`z_nominal` is latched only after a post-step brush contact load is measured, and it uses
-the actual TCP height at that instant rather than a guessed or teleported command. The
-admittance state is **reset at the start of every sweep**. The default search height is
-0.13 mm below the table reference (`workspace.z_search_start=-0.00013`), a small controlled
-preload that gives MuJoCo a real contact constraint instead of relying on an exact
-zero-gap equilibrium.
+For ACT inference, `z_nominal` is latched only after the wrist F/T sensor crosses the
+contact threshold, using the actual TCP height rather than a guessed or teleported
+command. Expert collection reaches the calibrated geometric TCP/table height without
+intentional preload, then enables the same wrist-sensor admittance so tracking error can
+be corrected. The admittance state resets at each contact handoff.
 
 Implemented safeguards:
 
-* simulated F/T sensing at the fingertip frame (two backends, see below)
-* first-order low-pass filter on the normal force (`force_filter_cutoff_hz`)
-* force-target slew-rate ramping, up **and** down (`force_ramp_rate`)
+* reset-tared wrist F/T sensing rotated into world axes; filtered Fz drives control
+* the 100 Hz control trace records filtered wrist Fz and raw sensor peaks separately
 * force-target saturation (`max_force`) and a hard measured-force abort (`safe_max_force`)
-  (`safe_max_force=20 N` is the current user-approved normal operating ceiling)
+  (`safe_max_force=20 N` is the current independent safety ceiling)
 * transient-force dwell (`safe_force_dwell_steps`) before the hard abort is declared
 * `Δz` saturation (`delta_z_limit`) and `dΔz/dt` limit (`delta_z_rate_limit`), both with
   anti-windup
-* contact-detection threshold with a dwell counter (rejects single-sample spikes)
+* sensor-threshold contact detection for inference; geometry-calibrated touchdown
+  followed by the same sensor-driven admittance for expert collection
 * contact-loss accounting during the sweep
 * optional actuation delay and force-sensor noise
 * controller rate `sim.control_hz` (default 100 Hz), physics timestep
   `sim.physics_dt` (default 1 ms) — the physics step is always smaller than the control
   period, and the runtime asserts it.
 
-The contact command is also projected onto the unilateral table constraint: once the
-brush TCP is at the table plane, the admittance loop cannot command it below the plane.
-This prevents a lost component from being replaced by artificial brush/table
-penetration while retaining measured normal force and genuine sideways slip.
+Expert descent targets the calibrated TCP/table geometry without intentional preload.
+At touchdown, admittance is enabled so real tracking error can still be corrected;
+ACT inference instead hands off when measured wrist Fz crosses the contact threshold.
+Both modes use only wrist F/T for force feedback. Geometry contact remains a separate
+diagnostic, not a force estimate.
 
 ### Controller tuning — the one non-obvious point
 
-The admittance sees the environment *in series*: the closed-loop stiffness is
-`k_d + k_actuator ≈ 60 + 3000 ≈ 3060 N/m`, not `k_d`. Sizing `b_d` against `k_d` alone
-(`ζ = b_d / 2√(k_d·m_d)`) looks safely overdamped and is in fact badly **under**damped
-once contact closes the loop, producing 40–50 % force overshoot. The defaults size the
-damping against the closed-loop stiffness instead:
+The current Rudra profile starts from `m_d=0.5`, `b_d=70`, `k_d=100` in SI units.
+These values are pilot settings, not a claim of perfectly tracking 0.1 N. They must be
+judged from the synchronized wrist-sensor trace, including touchdown peaks and force
+error during the sweep:
 
 ```
-ω_n = √((k_d + k_act)/m_d) ≈ 55 rad/s      b_d = 2·ζ·ω_n·m_d ≈ 110–120 N·s/m
+F_error = F_desired − Fz_wrist
+Δz = admittance(F_error), with rate and displacement bounds
 ```
 
-The remaining steady-state error is inherent to a non-zero `k_d`:
-`F_ss = F_desired · k_act/(k_act + k_d)` ≈ 2.96 N for a 3.0 N target. Lower `k_d` for a
-smaller offset, at the cost of a softer response to table-height error.
+The bounded upward relief begins at its configured force threshold; the independent
+20 N dwell-protected stop remains authoritative. Parameters should be tuned from
+fixed-layout A/B traces rather than inferred from the geometric contact proxy.
 
-### Force sensing backends
+### Force sensing provenance
 
-| `controller.force_sensor` | Source | Notes |
+| Signal | Source | Notes |
 |---|---|---|
-| `contact` *(default)* | `data.cfrc_ext` on the tool body | total external contact force on the fingertip body; sign is unambiguous |
-| `wrist_ft` | MuJoCo `force`/`torque` sensor at `ft_site` | a simulated wrist F/T sensor; `controller.wrist_ft_sign` maps its Z to pressing-positive |
+| Control Fz and plotted normal force | wrist `force` sensor at `ft_site` | reset-tared world-Z, filtered at the control rate, pressing-positive |
+| Six-axis wrench | wrist `force` and `torque` sensors at `ft_site` | rotated into world axes; retained for diagnostics |
 
-`python -m sim.smoke_test` prints both and cross-checks them, so you can confirm the sign
-convention on your MuJoCo version in one command.
+Brush/table geometric contact is logged separately for diagnostics and is never
+substituted for wrist-sensor force.
 
 ### The wrench is mandatory, not optional
 
