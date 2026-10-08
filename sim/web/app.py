@@ -107,6 +107,18 @@ def _png_bytes(image):
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _encode_frame_images(frame):
+    """PNG-encode each view while preserving legacy single-view aliases."""
+    encoded = {}
+    for key, value in frame.items():
+        if key == "images" and isinstance(value, dict):
+            encoded[key] = {view: _png_bytes(image)
+                            for view, image in value.items()}
+        else:
+            encoded[key] = _png_bytes(value)
+    return encoded
+
+
 def create_app(cfg):
     try:
         from fastapi import FastAPI, HTTPException
@@ -222,8 +234,8 @@ def create_app(cfg):
     @app.get("/api/episodes/{episode_id}/frame/{frame_index}")
     def episode_frame(episode_id: str, frame_index: int):
         try:
-            return {key: _png_bytes(value) for key, value in
-                    app.state.workbench.load_episode_frame(episode_id, frame_index).items()}
+            frame = app.state.workbench.load_episode_frame(episode_id, frame_index)
+            return _encode_frame_images(frame)
         except (EpisodeNotFound, FrameNotFound, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -257,8 +269,8 @@ def create_app(cfg):
             metadata = app.state.workbench.episode_metadata(preview_id)
             if not metadata.get("preview"):
                 raise EpisodeNotFound(preview_id)
-            return {key: _png_bytes(value) for key, value in
-                    app.state.workbench.load_episode_frame(preview_id, frame_index).items()}
+            frame = app.state.workbench.load_episode_frame(preview_id, frame_index)
+            return _encode_frame_images(frame)
         except (EpisodeNotFound, FrameNotFound, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

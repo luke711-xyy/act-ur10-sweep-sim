@@ -46,6 +46,46 @@ def test_workbench_lists_episode_and_loads_only_requested_views(tmp_path):
     assert "inspection" not in frame
 
 
+def test_five_camera_frame_routes_encode_each_nested_view(tmp_path):
+    preview_root = tmp_path / "previews"
+    view_names = (
+        "corner_xminus_yminus", "corner_xminus_yplus",
+        "corner_xplus_yminus", "corner_xplus_yplus", "wrist",
+    )
+    images = {
+        name: np.full((12, 12, 3), index, dtype=np.uint8)
+        for index, name in enumerate(view_names)
+    }
+    ActDatasetWriter(str(preview_root)).add_episode(
+        "five_view_preview", [{"images": images,
+                               "state": np.zeros(36, dtype=np.float32),
+                               "environment_state": np.zeros(3, dtype=np.float32),
+                               "phase": "sweep"}],
+        np.zeros((1, 4), dtype=np.float32), True,
+        {"preview": True, "seed": 4, "target_count": 2,
+         "total_count": 6, "fps": 25.0, "failure_reason": "",
+         "episode_kind": "expert_preview", "split": "pilot"},
+    )
+
+    cfg = load_config(overrides=["sim.real_time=false"])
+    app = create_app(cfg)
+    app.state.workbench = WorkbenchState(
+        cfg, dataset_root=tmp_path / "dataset", preview_root=preview_root)
+
+    for route_path in (
+        "/api/episodes/{episode_id}/frame/{frame_index}",
+        "/api/preview/{preview_id}/frame/{frame_index}",
+    ):
+        route = next(route for route in app.routes
+                     if getattr(route, "path", None) == route_path)
+        payload = route.endpoint("five_view_preview", 0)
+        assert set(payload["images"]) == set(view_names)
+        assert all(isinstance(payload["images"][name], str)
+                   for name in view_names)
+        assert payload["overhead"] == payload["images"][view_names[0]]
+        assert payload["wrist"] == payload["images"]["wrist"]
+
+
 def test_workbench_rejects_unknown_episode(tmp_path):
     state = WorkbenchState(load_config(), dataset_root=tmp_path,
                            preview_root=tmp_path / "previews")
