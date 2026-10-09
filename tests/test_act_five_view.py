@@ -1,4 +1,6 @@
 import json
+import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,6 +18,67 @@ VIEWS = (
     "corner_xplus_yplus",
     "wrist",
 )
+
+
+def test_writer_encodes_views_concurrently_without_changing_pixels_or_paths(
+    tmp_path, monkeypatch,
+):
+    from PIL import Image
+
+    root = tmp_path / "parallel_writer"
+    views = ("corner_a", "corner_b", "corner_c", "corner_d", "wrist")
+    expected = {
+        (frame, view): np.full((12, 12, 3), frame * 20 + index, dtype=np.uint8)
+        for frame in range(2)
+        for index, view in enumerate(views)
+    }
+    observations = [{
+        "images": {view: expected[(frame, view)] for view in views},
+        "state": np.zeros(36, dtype=np.float32),
+        "environment_state": np.array([2.0], dtype=np.float32),
+    } for frame in range(2)]
+
+    original_save = Image.Image.save
+    barrier = threading.Barrier(2)
+    active_saves = 0
+    max_active_saves = 0
+    active_lock = threading.Lock()
+
+    def observe_parallel_save(image, path, *args, **kwargs):
+        nonlocal active_saves, max_active_saves
+        with active_lock:
+            active_saves += 1
+            max_active_saves = max(max_active_saves, active_saves)
+        try:
+            try:
+                barrier.wait(timeout=0.5)
+            except threading.BrokenBarrierError:
+                pass
+            return original_save(image, path, *args, **kwargs)
+        finally:
+            with active_lock:
+                active_saves -= 1
+
+    monkeypatch.setattr(Image.Image, "save", observe_parallel_save)
+    ActDatasetWriter(str(root), image_format="webp-lossless").add_episode(
+        "parallel_episode", observations, np.zeros((2, 4), dtype=np.float32),
+        True, {"episode_kind": "expert", "target_count": 2},
+    )
+
+    assert max_active_saves >= 2
+    record = json.loads((root / "manifest.jsonl").read_text().splitlines()[0])
+    assert record["frame_count"] == 2
+    assert set(record["images"]) == set(views)
+    for view in views:
+        paths = record["images"][view]
+        assert [Path(path).name for path in paths] == [
+            f"image_{view}_00000.webp", f"image_{view}_00001.webp",
+        ]
+        for frame, relative_path in enumerate(paths):
+            with Image.open(root / relative_path) as saved:
+                np.testing.assert_array_equal(
+                    np.asarray(saved.convert("RGB")), expected[(frame, view)]
+                )
 
 
 class _FakeEE:

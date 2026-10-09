@@ -1476,6 +1476,109 @@ def test_corner_capture_mask_accepts_planar_vectors_on_numpy_two():
     assert result == 0
 
 
+def test_vectorized_corner_capture_mask_matches_segment_reference():
+    """Batched arc checks must preserve the exact swept-segment mask."""
+    from sim.act.expert import (
+        _rounded_corner_capture_mask_vectorized,
+        _segment_capture_mask,
+    )
+
+    def reference(previous, corner, following, positions, radii,
+                  brush_width, brush_depth, margin, forward_cos_min,
+                  corner_radius):
+        incoming = np.asarray(corner, dtype=float) - np.asarray(previous, dtype=float)
+        outgoing = np.asarray(following, dtype=float) - np.asarray(corner, dtype=float)
+        incoming_len = float(np.linalg.norm(incoming))
+        outgoing_len = float(np.linalg.norm(outgoing))
+        if incoming_len < 1e-9 or outgoing_len < 1e-9:
+            return 0
+        before = incoming / incoming_len
+        after = outgoing / outgoing_len
+        angle = abs(float(np.arctan2(
+            before[0] * after[1] - before[1] * after[0],
+            np.dot(before, after),
+        )))
+        if angle < np.deg2rad(2.0) or angle > np.deg2rad(175.0):
+            return 0
+        tangent = float(np.tan(angle / 2.0))
+        trim = max(0.0, float(corner_radius)) * tangent
+        if trim < 1e-6 or tangent < 1e-8:
+            return 0
+        entry = np.asarray(corner, dtype=float) - before * trim
+        exit = np.asarray(corner, dtype=float) + after * trim
+        samples = max(8, int(np.ceil(2.0 * trim / 0.0015)))
+        local = [entry]
+        for step in range(1, samples + 1):
+            t = step / samples
+            local.append((1.0 - t) ** 2 * entry
+                         + 2.0 * (1.0 - t) * t * np.asarray(corner, dtype=float)
+                         + t ** 2 * exit)
+        mask = 0
+        for start, end in zip(local[:-1], local[1:]):
+            hit = _segment_capture_mask(
+                start, end, positions, radii,
+                brush_width, brush_depth, margin,
+            )
+            if not hit:
+                continue
+            delta = end - start
+            forward_cos = -float(delta[0]) / max(float(np.linalg.norm(delta)), 1e-9)
+            if forward_cos < float(forward_cos_min):
+                return -1
+            mask |= hit
+        return mask
+
+    rng = np.random.default_rng(929)
+    corners = [
+        (np.array([0.0, 0.0]), np.array([0.1, 0.0]), np.array([0.1, 0.1])),
+        (np.array([0.1, -0.1]), np.array([0.0, 0.0]), np.array([-0.1, 0.1])),
+        (np.array([0.2, 0.0]), np.array([0.1, 0.0]), np.array([0.0, -0.1])),
+    ]
+    cases = list(corners)
+    for _ in range(24):
+        corner = rng.uniform(-0.2, 0.2, size=2)
+        incoming_angle = rng.uniform(-np.pi, np.pi)
+        turn = rng.uniform(np.deg2rad(8.0), np.deg2rad(170.0))
+        if rng.random() < 0.5:
+            turn = -turn
+        incoming = np.array([np.cos(incoming_angle), np.sin(incoming_angle)])
+        outgoing_angle = incoming_angle + turn
+        outgoing = np.array([np.cos(outgoing_angle), np.sin(outgoing_angle)])
+        cases.append((corner - incoming * 0.1, corner,
+                      corner + outgoing * 0.1))
+
+    for previous, corner, following in cases:
+        positions = rng.uniform(-0.03, 0.03, size=(6, 2)) + corner
+        radii = rng.uniform(0.004, 0.016, size=6)
+        args = (previous, corner, following, positions, radii,
+                0.12, 0.02, 0.04, 0.0, 0.025)
+        assert _rounded_corner_capture_mask_vectorized(*args) == reference(*args)
+
+    capture_args = (
+        np.array([0.2, 0.0]), np.array([0.1, 0.0]), np.array([0.1, 0.1]),
+        np.array([[0.12, 0.005]]), np.array([0.01]),
+        0.12, 0.02, 0.04, 0.0, 0.025,
+    )
+    capture_mask = _rounded_corner_capture_mask_vectorized(*capture_args)
+    assert capture_mask == reference(*capture_args)
+    assert capture_mask == 1
+
+    away_args = (
+        np.array([0.0, 0.0]), np.array([0.1, 0.0]), np.array([0.1, 0.1]),
+        np.array([[0.08, 0.0]]), np.array([0.01]),
+        0.12, 0.02, 0.04, 0.0, 0.025,
+    )
+    away_mask = _rounded_corner_capture_mask_vectorized(*away_args)
+    assert away_mask == reference(*away_args)
+    assert away_mask == -1
+
+    empty_args = (
+        np.array([0.0, 0.0]), np.array([0.1, 0.0]), np.array([0.1, 0.1]),
+        np.empty((0, 2)), np.empty((0,)), 0.12, 0.02, 0.01, 0.0, 0.02,
+    )
+    assert _rounded_corner_capture_mask_vectorized(*empty_args) == 0
+
+
 def test_curve_astar_keeps_alternative_full_count_routes_for_physics_screening():
     """Do not stop at one geometric route when the physics may reject it."""
     from sim.act.expert import _coverage_astar_candidates

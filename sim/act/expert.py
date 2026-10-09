@@ -858,13 +858,12 @@ def _capture_preserving_rounded_path(path: np.ndarray, radius: float,
     return path, raw_mask
 
 
-def _rounded_corner_capture_mask(previous: np.ndarray, corner: np.ndarray,
-                                 following: np.ndarray, positions: np.ndarray,
-                                 radii: np.ndarray, brush_width: float,
-                                 brush_depth: float, margin: float,
-                                 forward_cos_min: float,
-                                 corner_radius: float) -> int:
-    """Check the actual fillet around one grid turn, not just its edges."""
+def _rounded_corner_capture_mask_vectorized(
+        previous: np.ndarray, corner: np.ndarray, following: np.ndarray,
+        positions: np.ndarray, radii: np.ndarray, brush_width: float,
+        brush_depth: float, margin: float, forward_cos_min: float,
+        corner_radius: float) -> int:
+    """Check all segments of a sampled fillet with one batched object pass."""
     incoming = np.asarray(corner, dtype=float) - np.asarray(previous, dtype=float)
     outgoing = np.asarray(following, dtype=float) - np.asarray(corner, dtype=float)
     incoming_len = float(np.linalg.norm(incoming))
@@ -893,18 +892,53 @@ def _rounded_corner_capture_mask(previous: np.ndarray, corner: np.ndarray,
                       + 2.0 * (1.0 - t) * t * np.asarray(corner, dtype=float)
                       + t ** 2 * exit))
     local = np.asarray(local, dtype=float)
+
+    positions = np.asarray(positions, dtype=float).reshape(-1, 2)
+    radii = np.asarray(radii, dtype=float).reshape(-1)
+    if not len(positions):
+        return 0
+
+    deltas = np.diff(local, axis=0)
+    lengths = np.linalg.norm(deltas, axis=1)
+    valid_segments = lengths > 1e-9
+    tangents = np.zeros_like(deltas)
+    tangents[valid_segments] = deltas[valid_segments] / lengths[valid_segments, None]
+    normals = np.stack((-tangents[:, 1], tangents[:, 0]), axis=1)
+    relative = positions[None, :, :] - local[:-1, None, :]
+    along = (relative[:, :, 0] * tangents[:, None, 0]
+             + relative[:, :, 1] * tangents[:, None, 1])
+    across = np.abs(relative[:, :, 0] * normals[:, None, 0]
+                    + relative[:, :, 1] * normals[:, None, 1])
+    longitudinal_reach = radii + float(brush_depth) / 2.0
+    transverse_reach = np.maximum(
+        float(brush_width) / 2.0 + radii - float(margin), 0.0)
+    hit = (
+        valid_segments[:, None]
+        & (along >= -longitudinal_reach[None, :])
+        & (along <= lengths[:, None] + longitudinal_reach[None, :])
+        & (across <= transverse_reach[None, :])
+    )
+    forward_cos = -deltas[:, 0] / np.maximum(lengths, 1e-9)
+    if np.any(hit & (forward_cos[:, None] < float(forward_cos_min))):
+        return -1
+
     mask = 0
-    for start, end in zip(local[:-1], local[1:]):
-        hit = _segment_capture_mask(
-            start, end, positions, radii, brush_width, brush_depth, margin)
-        if not hit:
-            continue
-        delta = end - start
-        forward_cos = -float(delta[0]) / max(float(np.linalg.norm(delta)), 1e-9)
-        if forward_cos < float(forward_cos_min):
-            return -1
-        mask |= hit
+    for index in np.flatnonzero(np.any(hit, axis=0)):
+        mask |= 1 << int(index)
     return mask
+
+
+def _rounded_corner_capture_mask(previous: np.ndarray, corner: np.ndarray,
+                                 following: np.ndarray, positions: np.ndarray,
+                                 radii: np.ndarray, brush_width: float,
+                                 brush_depth: float, margin: float,
+                                 forward_cos_min: float,
+                                 corner_radius: float) -> int:
+    """Check the actual fillet around one grid turn, not just its edges."""
+    return _rounded_corner_capture_mask_vectorized(
+        previous, corner, following, positions, radii, brush_width,
+        brush_depth, margin, forward_cos_min, corner_radius,
+    )
 
 
 def _coverage_astar_heuristic_table(grid_points: np.ndarray,

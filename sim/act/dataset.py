@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable
 
@@ -109,39 +110,50 @@ class ActDatasetWriter:
         try:
             image_views = {}
             expected_views = None
-            for i, obs in enumerate(observations):
-                frame_images = _observation_images(obs)
-                if not frame_images:
-                    raise ValueError("each ACT frame must contain at least one policy image")
-                views = tuple(frame_images)
-                if expected_views is None:
-                    expected_views = views
-                    image_views = {view: [] for view in views}
-                elif set(views) != set(expected_views):
-                    raise ValueError(
-                        "all frames in an episode must contain the same ACT views"
-                    )
-                for view in expected_views:
-                    safe_view = "".join(
-                        character if character.isalnum() or character in "-_" else "_"
-                        for character in view
-                    )
-                    image_name = (
-                        f"image_{safe_view}_{i:05d}{self._image_extension}"
-                    )
-                    image_path = temporary_dir / image_name
-                    image = frame_images[view]
-                    if image.ndim != 3 or image.shape[-1] != 3:
+            def save_image(image, image_path):
+                Image.fromarray(image).save(
+                    image_path, format=self._pillow_image_format,
+                    **self._image_save_options,
+                )
+
+            with ThreadPoolExecutor(max_workers=4) as image_pool:
+                for i, obs in enumerate(observations):
+                    frame_images = _observation_images(obs)
+                    if not frame_images:
                         raise ValueError(
-                            f"ACT view {view!r} must be HxWx3 RGB, got {image.shape}"
+                            "each ACT frame must contain at least one policy image"
                         )
-                    Image.fromarray(image).save(
-                        image_path, format=self._pillow_image_format,
-                        **self._image_save_options,
-                    )
-                    image_views[view].append(str(
-                        (episode_dir / image_name).relative_to(self.root)
-                    ))
+                    views = tuple(frame_images)
+                    if expected_views is None:
+                        expected_views = views
+                        image_views = {view: [] for view in views}
+                    elif set(views) != set(expected_views):
+                        raise ValueError(
+                            "all frames in an episode must contain the same ACT views"
+                        )
+                    frame_writes = []
+                    for view in expected_views:
+                        safe_view = "".join(
+                            character if character.isalnum() or character in "-_" else "_"
+                            for character in view
+                        )
+                        image_name = (
+                            f"image_{safe_view}_{i:05d}{self._image_extension}"
+                        )
+                        image_path = temporary_dir / image_name
+                        image = frame_images[view]
+                        if image.ndim != 3 or image.shape[-1] != 3:
+                            raise ValueError(
+                                f"ACT view {view!r} must be HxWx3 RGB, got {image.shape}"
+                            )
+                        frame_writes.append(image_pool.submit(
+                            save_image, image, image_path
+                        ))
+                        image_views[view].append(str(
+                            (episode_dir / image_name).relative_to(self.root)
+                        ))
+                    for image_write in frame_writes:
+                        image_write.result()
             states = state_values
             env_states = np.stack([o["environment_state"] for o in observations]).astype(np.float32)
             n_frames = len(observations)
