@@ -403,14 +403,15 @@ act:
   action_dim: 4
   state_dim: 36
   device: mps
-  batch_size: 4
+  batch_size: 2
   image_stat_samples: 100
   max_steps: 200000
   checkpoint_start_step: 100000
   checkpoint_every_steps: 100000
   keep_checkpoints: 2
-  # Five-view MPS benchmark is about 30 optimizer steps/min at batch 4.
-  # Allow the full requested run (estimated ~4.7 days) to reach step 200k.
+  # Short full ACT forward/backward + optimizer benchmark on five views/MPS:
+  # batch 2 was fastest at about 73.5 optimizer steps/min (1/4/8: 54.8/45.2/21.1).
+  # Keep a generous wall-clock budget; longer-run throughput may differ.
   train_hours: 192
   training_episodes_per_target: 50
   # Keep the reviewed preview records separate from the clean randomized
