@@ -74,6 +74,13 @@ def build_arg_parser():
         help="Save a resumable checkpoint every N optimizer steps (0 disables periodic saves)",
     )
     parser.add_argument(
+        "--checkpoint-extra-steps",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Additional completed optimizer steps to save without changing the periodic schedule",
+    )
+    parser.add_argument(
         "--keep-checkpoints",
         type=int,
         default=None,
@@ -295,13 +302,14 @@ def _checkpoint_dir(out_root: Path, step: int) -> Path:
 
 
 def checkpoint_due(completed_steps: int, first_step: int,
-                   interval: int) -> bool:
-    """Return whether a periodic checkpoint is due at this completed step."""
+                   interval: int, *, extra_steps=()) -> bool:
+    """Return whether a periodic or additional checkpoint is due."""
     completed_steps = int(completed_steps)
     first_step = int(first_step)
     interval = int(interval)
-    return (interval > 0 and first_step > 0 and completed_steps >= first_step
-            and (completed_steps - first_step) % interval == 0)
+    return (completed_steps in extra_steps
+            or (interval > 0 and first_step > 0 and completed_steps >= first_step
+                and (completed_steps - first_step) % interval == 0))
 
 
 def _prune_checkpoints(out_root: Path, keep_checkpoints: int) -> None:
@@ -438,6 +446,12 @@ def main(argv=None) -> int:
         cfg.act.get("checkpoint_every_steps", 500)
         if args.checkpoint_every is None else args.checkpoint_every
     )
+    checkpoint_extra_steps = tuple(int(step) for step in (
+        cfg.act.get("checkpoint_extra_steps", [])
+        if args.checkpoint_extra_steps is None else args.checkpoint_extra_steps
+    ))
+    if any(step <= 0 for step in checkpoint_extra_steps):
+        raise ValueError("checkpoint-extra-steps must be positive")
     keep_checkpoints = int(
         cfg.act.get("keep_checkpoints", 3)
         if args.keep_checkpoints is None else args.keep_checkpoints
@@ -514,6 +528,7 @@ def main(argv=None) -> int:
             "max_steps": max_steps,
             "checkpoint_start_step": checkpoint_start,
             "checkpoint_every_steps": checkpoint_every,
+            "checkpoint_extra_steps": list(checkpoint_extra_steps),
             "keep_checkpoints": keep_checkpoints,
             "tracking_sync_interval_seconds": tracking_sync_interval,
             "resume_step": start_step,
@@ -573,7 +588,8 @@ def main(argv=None) -> int:
             elapsed_seconds = (
                 elapsed_before_resume + time.monotonic() - started
             )
-            if checkpoint_due(completed_steps, checkpoint_start, checkpoint_every):
+            if checkpoint_due(completed_steps, checkpoint_start, checkpoint_every,
+                              extra_steps=checkpoint_extra_steps):
                 checkpoint_root = save_checkpoint(
                     policy, preprocessor, postprocessor, optimizer, out_root,
                     completed_steps, dataset_root, str(policy_cfg.device),
@@ -629,7 +645,8 @@ def main(argv=None) -> int:
                     "event": "trackio_final_sync_skipped",
                     "reason": "previous static sync is still running",
                 }), flush=True)
-        if stop_request.requested and checkpoint_every > 0 and completed_steps > start_step:
+        if (stop_request.requested and (checkpoint_every > 0 or checkpoint_extra_steps)
+                and completed_steps > start_step):
             try:
                 checkpoint_root = save_checkpoint(
                     policy, preprocessor, postprocessor, optimizer, out_root,
@@ -658,6 +675,7 @@ def main(argv=None) -> int:
             "steps": completed_steps,
             "interrupted": bool(stop_request.requested),
             "checkpoint_every_steps": checkpoint_every,
+            "checkpoint_extra_steps": list(checkpoint_extra_steps),
             "checkpoint_start_step": checkpoint_start,
             "keep_checkpoints": keep_checkpoints,
             "dataset": str(dataset_root),

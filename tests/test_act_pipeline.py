@@ -66,6 +66,49 @@ def test_act_dataset_exposes_lerobot_compatible_feature_stats(tmp_path):
     assert np.all(stats["action"]["std"] > 0)
 
 
+def test_act_dataset_stats_opens_each_episode_archive_once(tmp_path, monkeypatch):
+    import sim.act.dataset as dataset_module
+
+    _write_dataset(tmp_path)
+    dataset = ActDataset(str(tmp_path), chunk_size=2)
+    original_load = np.load
+    opened_archives = []
+
+    def count_archive_opens(file, *args, **kwargs):
+        if str(file).endswith(".npz"):
+            opened_archives.append(str(file))
+        return original_load(file, *args, **kwargs)
+
+    monkeypatch.setattr(dataset_module.np, "load", count_archive_opens)
+    stats = dataset.stats
+
+    assert stats["observation.state"]["count"].tolist() == [2]
+    assert opened_archives == [
+        str(tmp_path / dataset.records[0]["arrays"]),
+        str(tmp_path / dataset.records[0]["arrays"]),
+    ]
+
+
+def test_phase_sampling_weights_opens_each_episode_archive_once(tmp_path, monkeypatch):
+    import sim.act.dataset as dataset_module
+
+    _write_dataset(tmp_path)
+    dataset = ActDataset(str(tmp_path), chunk_size=2)
+    original_load = np.load
+    opened_archives = []
+
+    def count_archive_opens(file, *args, **kwargs):
+        if str(file).endswith(".npz"):
+            opened_archives.append(str(file))
+        return original_load(file, *args, **kwargs)
+
+    monkeypatch.setattr(dataset_module.np, "load", count_archive_opens)
+    weights = dataset.phase_sampling_weights(0.35)
+
+    np.testing.assert_allclose(weights, [0.35, 0.65])
+    assert opened_archives == [str(tmp_path / dataset.records[0]["arrays"])]
+
+
 def test_writer_removes_partial_episode_when_image_write_fails(tmp_path, monkeypatch):
     from PIL import Image
 

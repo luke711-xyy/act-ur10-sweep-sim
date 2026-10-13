@@ -28,7 +28,8 @@ def build_train_argv(project_root, config, dataset, out, steps=None,
 
 
 def build_inference_argv(project_root, config, seed, model=None, target_count=None,
-                         replay_root="runs/workbench_previews", preview=False):
+                         replay_root="runs/workbench_previews", preview=False,
+                         video_root="runs/inference_videos"):
     argv = [sys.executable, "-m", "sim.act.evaluate", "--config", str(config),
             "--seed", str(int(seed))]
     if model:
@@ -38,6 +39,7 @@ def build_inference_argv(project_root, config, seed, model=None, target_count=No
     if preview:
         argv.append("--preview")
     argv.extend(["--record-replay", "--replay-root", str(replay_root)])
+    argv.extend(["--video-root", str(video_root)])
     return argv
 
 

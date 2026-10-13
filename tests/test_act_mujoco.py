@@ -704,12 +704,28 @@ def test_expert_delivery_endpoint_is_deep_inside_the_tray():
     )
 
 
+def _legacy_expert_config(overrides=None):
+    """Seed-specific regression fixtures for the pre-landing-region protocol.
+
+    New-default coverage/landing requirements have their own six-goal tests.
+    Historical lane/yaw fixtures must explicitly select their frozen rules.
+    """
+    return load_config(overrides=[
+        "components.spawn.x_min=-0.08", "components.cluster.max_radius=0.16",
+        "components.cluster.max_lateral_radius=0.16",
+        "planner.expert_planning_mode=mixed", "task.expert_landing_x_min=null",
+        "task.expert_landing_clearance=null",
+        *(overrides or []),
+    ])
+
+
 def test_expert_final_push_has_no_artificial_long_hold():
-    cfg = load_config()
+    cfg = load_config(overrides=['task.expert_landing_clearance=null',
+                                 'task.expert_landing_x_min=.36'])
     plan = ExpertPlan(
         target_indices=np.array([0]),
         waypoints=np.array([
-            [0.42, 0.0], [0.20, 0.0], [-0.32, 0.0], [-0.40, 0.0],
+            [0.42, 0.0], [0.36, 0.0], [0.20, 0.0], [-0.32, 0.0], [-0.40, 0.0],
         ]),
         feasible=True,
     )
@@ -721,11 +737,12 @@ def test_expert_final_push_has_no_artificial_long_hold():
 
 
 def test_expert_final_push_uses_one_continuous_speed_profile():
-    cfg = load_config()
+    cfg = load_config(overrides=['task.expert_landing_clearance=null',
+                                 'task.expert_landing_x_min=.36'])
     plan = ExpertPlan(
         target_indices=np.array([0]),
         waypoints=np.array([
-            [0.42, 0.0], [0.20, 0.0], [-0.32, 0.0], [-0.40, 0.0],
+            [0.42, 0.0], [0.36, 0.0], [0.20, 0.0], [-0.32, 0.0], [-0.40, 0.0],
         ]),
         feasible=True,
     )
@@ -796,7 +813,7 @@ def test_expert_tray_entry_has_room_to_align_before_the_mouth():
 
 
 def test_expert_execution_path_preserves_symmetric_yaw_branch():
-    cfg = load_config()
+    cfg = _legacy_expert_config()
     waypoints = np.asarray([
         [0.42, 0.0], [0.20, -0.04], [0.08, 0.02], [-0.32, 0.04],
     ])
@@ -941,7 +958,7 @@ def test_expert_continues_to_tray_depth_after_exact_count_is_reached():
 def test_expert_screening_and_recording_have_identical_physics_for_same_seed():
     from sim.act.rollout import run_expert_episode
 
-    cfg = load_config(overrides=[
+    cfg = _legacy_expert_config(overrides=[
         "sim.real_time=false", "components.count=6", "task.target_count=2",
     ])
     screened = run_expert_episode(cfg, seed=419472, collect_observations=False)
@@ -961,7 +978,7 @@ def test_official_expert_does_not_recover_a_missed_component():
     """Success must come from one exact capture pass, never a recovery sweep."""
     from sim.act.rollout import run_expert_episode
 
-    cfg = load_config(overrides=[
+    cfg = _legacy_expert_config(overrides=[
         "sim.real_time=false", "components.count=6", "task.target_count=5",
     ])
     result = run_expert_episode(cfg, seed=1434202624, collect_observations=False)
@@ -1045,6 +1062,7 @@ def test_expert_uses_one_pass_astar_to_collect_exactly_three_of_six():
     cfg = load_config(overrides=[
         "sim.real_time=false", "components.count=6",
         "components.spawn_mode=uniform", "task.target_count=3",
+        "planner.expert_target_subset_mode=any",  # this fixture tests legacy arbitrary-subset routing
     ])
     result = run_expert_episode(cfg, seed=3010, collect_observations=False)
     assert result.success
@@ -1171,6 +1189,8 @@ def test_expert_prefers_connected_exact_count_sweep_for_a_clustered_target_set()
     cfg = load_config(overrides=[
         "sim.real_time=false", "components.count=6",
         "components.spawn_mode=uniform", "task.target_count=3",
+        # This fixed scene characterizes legacy continuous routing, not Y-edge eligibility.
+        "planner.expert_target_subset_mode=any",
     ])
     env = SweepEnv(cfg, seed=4102)
     try:
@@ -1229,11 +1249,12 @@ def test_stall_failure_biases_the_tray_entry_without_driving_the_brush_into_wall
     """Side-wall failures bias the final object lane, not the tool body."""
     cfg = load_config(overrides=[
         "sim.real_time=false", "components.count=6", "task.target_count=4",
+        "task.expert_landing_clearance=null", "task.expert_landing_x_min=.36",
     ])
     plan = ExpertPlan(
         target_indices=np.array([0, 1, 2, 3]),
             waypoints=np.array([
-                [0.42, 0.0], [0.12, 0.04], [-0.02, 0.04],
+                [0.42, 0.0], [0.36, 0.04], [0.12, 0.04], [-0.02, 0.04],
                     [-0.32, 0.09], [-0.40, 0.09],
             ]),
         feasible=True,
@@ -1258,7 +1279,7 @@ def test_stall_failure_biases_the_tray_entry_without_driving_the_brush_into_wall
 
 def test_stall_planner_uses_a_virtual_lateral_tray_lane():
     """The wrong lane must be selected before execution, not patched after A*."""
-    base = load_config(overrides=[
+    base = _legacy_expert_config(overrides=[
         "sim.real_time=false", "components.count=6", "task.target_count=4",
         "components.spawn_mode=cluster",
     ])
@@ -1663,7 +1684,7 @@ def test_expert_planner_returns_both_symmetric_brush_yaw_branches(monkeypatch):
     """Try every low-rotation branch before the symmetric fallback branch."""
     import sim.act.expert as expert
 
-    cfg = load_config(overrides=[
+    cfg = _legacy_expert_config(overrides=[
         "sim.real_time=false", "components.count=6", "task.target_count=1",
     ])
     env = SimpleNamespace(
@@ -1753,7 +1774,7 @@ def test_expert_retries_next_candidate_after_physical_failure(monkeypatch):
     """A failed physical candidate must not veto the next candidate."""
     import sim.act.rollout as rollout
 
-    cfg = load_config(overrides=[
+    cfg = _legacy_expert_config(overrides=[
         "sim.real_time=false", "components.count=6",
         "components.spawn_mode=cluster", "task.target_count=1",
         "planner.expert_validation_workers=1",
@@ -1797,6 +1818,10 @@ def test_expert_retries_next_candidate_after_physical_failure(monkeypatch):
             target_indices=kwargs["target_indices"].tolist(),
             target_collected=1,
             unexpected_collected=0,
+            initial_object_positions=np.array([
+                [.2, -.15, .02], [.2, .15, .02], [.2, -.09, .02],
+                [.2, -.03, .02], [.2, .03, .02], [.2, .09, .02]]),
+            final_collected_mask=np.isin(np.arange(6), selected),
         )
 
     monkeypatch.setattr(rollout, "SweepEnv", FakeEnv)
@@ -1823,7 +1848,7 @@ def test_parallel_expert_screening_uses_best_ranked_success(monkeypatch):
     import time
     import sim.act.rollout as rollout
 
-    cfg = load_config(overrides=[
+    cfg = _legacy_expert_config(overrides=[
         "sim.real_time=false", "components.count=6",
         "components.spawn_mode=cluster", "task.target_count=1",
         "planner.expert_validation_workers=2",
@@ -1865,6 +1890,10 @@ def test_parallel_expert_screening_uses_best_ranked_success(monkeypatch):
             target_indices=selected,
             target_collected=1,
             unexpected_collected=0,
+            initial_object_positions=np.array([
+                [.2, -.15, .02], [.2, .15, .02], [.2, -.09, .02],
+                [.2, -.03, .02], [.2, .03, .02], [.2, .09, .02]]),
+            final_collected_mask=np.isin(np.arange(6), selected),
         )
 
     def fake_process_worker(payload):
@@ -1888,6 +1917,10 @@ def test_parallel_expert_screening_uses_best_ranked_success(monkeypatch):
             target_indices=selected,
             target_collected=1,
             unexpected_collected=0,
+            initial_object_positions=np.array([
+                [.2, -.15, .02], [.2, .15, .02], [.2, -.09, .02],
+                [.2, -.03, .02], [.2, .03, .02], [.2, .09, .02]]),
+            final_collected_mask=np.isin(np.arange(6), selected),
         )
         return plan, attempt, result
 
@@ -1919,7 +1952,7 @@ def test_expert_falls_back_to_original_tray_entry_after_aligned_routes_fail(
     """Longer pre-alignment is preferred, but cannot veto a proven baseline route."""
     import sim.act.rollout as rollout
 
-    cfg = load_config(overrides=[
+    cfg = _legacy_expert_config(overrides=[
         "sim.real_time=false", "components.count=6", "task.target_count=6",
         "planner.expert_validation_workers=1",
     ])
@@ -1961,6 +1994,10 @@ def test_expert_falls_back_to_original_tray_entry_after_aligned_routes_fail(
             total=6, target_count=6, collected=6 if success else 0,
             target_indices=kwargs["target_indices"].tolist(),
             target_collected=6 if success else 0,
+            initial_object_positions=np.array([
+                [.2, -.15, .02], [.2, -.09, .02], [.2, -.03, .02],
+                [.2, .03, .02], [.2, .09, .02], [.2, .15, .02]]),
+            final_collected_mask=np.full(6, success, dtype=bool),
         )
 
     monkeypatch.setattr(rollout, "SweepEnv", FakeEnv)

@@ -8,6 +8,7 @@ meaningful.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import List
 
 import numpy as np
@@ -122,15 +123,55 @@ def sample_layout(cfg, rng: np.random.Generator) -> List[dict]:
 def _sample_cluster(cfg, rng: np.random.Generator):
     """Sample a reproducible, random-but-concentrated cluster centre.
 
-    The individual component offsets remain random.  The centre distribution
-    is deliberately narrower than the full spawn box so the policy sees a
-    useful range of initial layouts without having to learn a large global
-    translation.  ``center_x``/``center_y`` remain a backwards-compatible
-    uniform fallback for older configuration files.
+    ``uniform_disk`` directly samples the latent centre uniformly in area,
+    independently of legacy centre bounds and offset-radius reservations.
+    Individual part constraints can change the resulting part centroid.
+    Absent an explicit distribution, retain the legacy draws unchanged so
+    frozen configurations and seeds still reproduce their original layouts.
     """
     comp_cfg = cfg.components
     cluster = comp_cfg.cluster
     spawn = comp_cfg.spawn
+    distribution = str(cluster.get("center_distribution", "legacy"))
+    if distribution == "uniform_disk":
+        disk = cluster.get("center_disk")
+        if not isinstance(disk, Mapping):
+            raise ValueError("components.cluster.center_disk must specify center and radius")
+        try:
+            origin = np.asarray(disk.get("center", []), dtype=float)
+            radius = float(disk.get("radius", float("nan")))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("components.cluster.center_disk requires numeric center and radius") from exc
+        if (origin.shape != (2,) or not np.all(np.isfinite(origin))
+                or not np.isfinite(radius) or radius <= 0.0):
+            raise ValueError("components.cluster.center_disk requires a finite XY center and positive finite radius")
+        # Check the whole configured disk against actual domains; never clip
+        # it or reserve the individual offsets' radius around its centre.
+        spawn_bounds = np.array([
+            [float(spawn.x_min), float(spawn.x_max)],
+            [float(spawn.y_min), float(spawn.y_max)],
+        ])
+        half_size = np.asarray(cfg.table.half_size, dtype=float)
+        if (half_size.ndim != 1 or half_size.size < 2
+                or not np.all(np.isfinite(half_size[:2]))
+                or np.any(half_size[:2] <= 0.0)):
+            raise ValueError("components.cluster.center_disk requires finite positive table XY half_size")
+        # Accept exact tangencies despite roundoff (e.g. 0.05 + 0.10).
+        # This tolerance only validates; it never moves or resizes the disk.
+        tolerance = 8 * np.finfo(float).eps * max(1.0, radius, float(np.max(np.abs(origin))))
+        if (not np.all(np.isfinite(spawn_bounds))
+                or np.any(origin - radius < spawn_bounds[:, 0] - tolerance)
+                or np.any(origin + radius > spawn_bounds[:, 1] + tolerance)
+                or np.any(np.abs(origin) + radius > half_size[:2] + tolerance)):
+            raise ValueError("components.cluster.center_disk must fit inside the actual spawn box and table")
+        theta = float(rng.uniform(0.0, 2.0 * np.pi))
+        radial_distance = radius * np.sqrt(rng.uniform(0.0, 1.0))
+        centre = origin + radial_distance * np.array([np.cos(theta), np.sin(theta)])
+        spread = float(rng.uniform(cluster.spread_std.min, cluster.spread_std.max))
+        return centre, spread
+    if distribution != "legacy":
+        raise ValueError(f"unknown components.cluster.center_distribution {distribution!r}")
+
     pad = float(cluster.get("max_radius", 0.12))
     safe_bounds = np.array([
         [float(spawn.x_min) + pad * 0.5, float(spawn.x_max) - pad * 0.5],

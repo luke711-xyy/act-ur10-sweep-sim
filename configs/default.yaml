@@ -190,20 +190,26 @@ components:
   size_scale: 1.0
   mass: {min: 0.004, max: 0.012}
   friction: {min: 0.40, max: 0.80}
-  spawn: {x_min: -0.08, x_max: 0.36, y_min: -0.26, y_max: 0.26}
+  # No artificial -8 cm cut: use the natural table edge. Actual centre support
+  # from the centre disk and 14 cm offset is only [-0.19, 0.29] m in X.
+  spawn: {x_min: -0.50, x_max: 0.36, y_min: -0.26, y_max: 0.26}
   spawn_mode: cluster
   # Exact N<6 demonstrations still keep all six parts, but use the same
   # concentrated cluster as the six-part task so the preview matches the
   # intended continuous-sweep scene.
   exact_partial_spawn_mode: cluster
   cluster:                   # only used when spawn_mode == cluster
-    # Randomize the group centre more broadly, while shifting it 6 cm toward
-    # the tray (negative X) relative to the previous [0.20, 0.00] mean.
+    # Direct, area-uniform latent centre: radius 10 cm, centred 5 cm along +X
+    # from the table's world-XY centre (0, 0).  No legacy bounds/safe crop.
+    center_distribution: uniform_disk
+    center_disk:
+      center: [0.05, 0.0]
+      radius: 0.10
+    # Legacy-only settings: ignored by uniform_disk.  Old frozen configs
+    # without center_distribution keep the original branch and RNG order.
     center_mean: [0.14, 0.00]
     center_std: [0.055, 0.045]
-    center_bounds: {x_min: 0.015, x_max: 0.265, y_min: -0.16, y_max: 0.16}
-    # Legacy broad bounds are retained for older override files.  New runs
-    # use center_mean/center_std/center_bounds above.
+    center_bounds: {x_min: 0.015, x_max: 0.18, y_min: -0.16, y_max: 0.16}
     center_x: {min: 0.02, max: 0.34}
     center_y: {min: -0.16, max: 0.16}
     # Keep roughly 2x the previous mean pair spacing while sampling a genuine
@@ -211,9 +217,9 @@ components:
     # the expert coverage planner must route laterally when the random layout
     # needs it.
     spread_std: {min: 0.065, max: 0.085}
-    max_radius: 0.16
+    max_radius: 0.14
     lateral_spread_ratio: 1.0
-    max_lateral_radius: 0.16
+    max_lateral_radius: 0.14
   min_separation: 0.070
   randomize_orientation: true
   target_clearance: 0.05
@@ -256,6 +262,7 @@ planner:
   # ACT model) namespace so changing the policy configuration cannot silently
   # alter expert geometry.
   expert_grid_resolution: 0.01
+  expert_planning_mode: coverage_astar_only  # no capture-lane candidates for any N
   expert_obstacle_margin: 0.008
   expert_staging_margin: 0.018
   expert_target_edge_limit: 0.16
@@ -266,6 +273,7 @@ planner:
   expert_robustness_margin: 0.010  # [m] clearance reserve against distractor carry
   expert_clearance_score_weight: 0.20
   expert_candidate_limit: 12  # shortlist for optional MuJoCo-in-the-loop validation
+  expert_target_subset_mode: y_edge_contiguous  # partial N: lowest or highest N initial Y ranks only
   expert_validation_workers: 4  # isolated MuJoCo processes per candidate batch
   expert_capture_exit_margin: 0.02  # [m] clear selected parts before changing lanes
   expert_corner_radius: 0.025  # [m] smooth contact turns; yaw limit slows XY by curvature
@@ -430,21 +438,33 @@ task:
   target_count: 3
   target_mode: exact
   contact_start_xy: [0.42, 0.0]
+  # Land at the first A* crossing of this settled layout's dynamic X boundary:
+  # rightmost collision surface + 7cm net gap + brush X half-extent.
+  # Y comes from the crossing, not a fixed point; sweeps may continue left.
+  expert_landing_clearance: 0.07
+  expert_landing_selection: path_intersection
+  expert_landing_x_min: null  # old explicit fixed-boundary profiles only
+  expert_landing_yaw: 0.0  # during descent; brush width along world Y
 
 web:
   host: 127.0.0.1
   port: 8765
   refresh_hz: 5.0
+  # Local workbench artifact destination; does not change policy/training inputs.
+  inference_video_dir: /Users/huazhi_luke/Documents/Codex/2026-09-08/zhe/exports
 
 episode:
+  # Expert-only height guard ends after the exact count is fully collected.
+  # Tray delivery, stable count and force/collision safety remain mandatory.
+  expert_height_guard_until_exact_count: true
   max_time: 45.0
   max_frames: 1200        # 48 s at 25 Hz; allows physically rate-limited curved expert sweeps
   max_contact_path: 3.0
   contact_build_time: 1.0   # supervisor hold before ACT receives XY+yaw control
-  stable_time: 1.0  # expert-data confirmation hold; inference uses its own timers below
+  stable_time: 1.0  # expert-data confirmation hold; not used for ACT inference
   brush_inside_target_timeout: 1.0  # expert-data brush-depth failure condition only
-  inference_target_hold_time: 2.0  # ACT keeps issuing actions after reaching >=N
-  inference_collection_stall_timeout: 3.0  # stop after no new full entry
+  # ACT inference stops at an exact goal or two simulated seconds after the
+  # first full entry; its fixed deadline never resets on later entries/exits.
   # Official demonstrations are a single continuous contact pass.  Recovery
   # utilities remain available for separate experiments, but are not appended
   # to an expert label.

@@ -18,6 +18,7 @@ from ..act.dataset import ActDatasetWriter
 from ..act.interface import ACT_SCHEMA_VERSION
 from ..act.rollout import run_expert_episode, stall_failure_sidewall_ok
 from ..act.naming import next_demo_name
+from ..act.expert import expert_generation_protocol
 
 
 class EpisodeNotFound(LookupError):
@@ -86,6 +87,14 @@ def _image(root: Path, relative: str):
     return np.asarray(Image.open(root / relative).convert("RGB"), dtype=np.uint8)
 
 
+def _collection_summary(record: dict) -> str | None:
+    if record.get("counting_mode") != "peak_simultaneous_full_entry":
+        return None
+    return (f"最高同时入区 {int(record['peak_collected'])}/{int(record['target_count'])}"
+            f" · 最终留区 {int(record['final_collected'])}/"
+            f"{int(record.get('total_count', record.get('count', 6)))}")
+
+
 class WorkbenchState:
     """Expose saved demonstrations and isolated expert previews."""
 
@@ -99,6 +108,16 @@ class WorkbenchState:
         # from observing a half-committed episode.
         self._io_lock = RLock()
         self._preview_records: dict[str, dict] = {}
+        self._video_reader = None
+        self._video_path = None
+
+    def close(self):
+        """Release the bounded MP4 decoder owned by this workbench."""
+        with self._io_lock:
+            if self._video_reader is not None:
+                self._video_reader.close()
+            self._video_reader = None
+            self._video_path = None
 
     def _records(self) -> list[tuple[Path, dict, bool]]:
         with self._io_lock:
@@ -118,12 +137,19 @@ class WorkbenchState:
             for root, rec, preview in self._records():
                 output.append({
                     "episode_id": rec["episode_id"],
+                    "playback_id": f"{'preview' if preview else 'dataset'}:{rec['episode_id']}",
                     "success": bool(rec.get("success", False)),
                     "seed": rec.get("seed"),
                     "count": rec.get("total_count", rec.get("count")),
                     "total_count": rec.get("total_count", rec.get("count")),
                     "target_count": rec.get("target_count"),
                     "collected": rec.get("collected"),
+                    "peak_collected": rec.get("peak_collected"),
+                    "final_collected": rec.get("final_collected"),
+                    "counting_mode": rec.get("counting_mode"),
+                    "first_entry_time": rec.get("first_entry_time"),
+                    "collection_window_seconds": rec.get("collection_window_seconds"),
+                    "collection_summary": _collection_summary(rec),
                     "geometry": rec.get("geometry", "unknown"),
                     "split": rec.get("split", "preview" if preview else "unknown"),
                     "fps": rec.get("fps", 25.0),
@@ -158,21 +184,32 @@ class WorkbenchState:
             return output
 
     def _find(self, episode_id: str) -> tuple[Path, dict, bool]:
+        source = None
+        if episode_id.startswith(("dataset:", "preview:")):
+            source, episode_id = episode_id.split(":", 1)
         for root, rec, preview in self._records():
-            if rec.get("episode_id") == episode_id:
+            if (rec.get("episode_id") == episode_id
+                    and (source is None or preview == (source == "preview"))):
                 return root, rec, preview
         raise EpisodeNotFound(episode_id)
+
+    def export_source(self, episode_id: str) -> tuple[Path, dict]:
+        """Capture the selected published record, not a later UI selection."""
+        with self._io_lock:
+            root, rec, _ = self._find(episode_id)
+            return root.resolve(), json.loads(json.dumps(rec))
 
     def episode_metadata(self, episode_id: str) -> dict:
         with self._io_lock:
             root, rec, preview = self._find(episode_id)
-            return {**rec, "length": _frame_count(root, rec), "preview": preview}
+            return {**rec, "length": _frame_count(root, rec), "preview": preview,
+                    "playback_id": f"{'preview' if preview else 'dataset'}:{rec['episode_id']}"}
 
     def delete_episode(self, episode_id: str) -> dict:
         """Delete exactly one episode directory and its manifest record."""
         with self._io_lock:
             root, rec, preview = self._find(episode_id)
-            episode_id = str(episode_id)
+            episode_id = str(rec["episode_id"])
             episode_dir = root / episode_id
             if episode_dir.resolve().parent != root.resolve() or not episode_dir.is_dir():
                 raise EpisodeNotFound(episode_id)
@@ -201,11 +238,23 @@ class WorkbenchState:
             if not isinstance(image_paths, dict) or not image_paths:
                 image_paths = {name: rec[name] for name in ("overhead", "wrist")
                                if name in rec}
-            images = {
-                str(view): _image(root, paths[frame_index])
-                for view, paths in image_paths.items()
-                if frame_index < len(paths) and paths[frame_index]
-            }
+            if rec.get("frame_images_deleted") and rec.get("video_path"):
+                import imageio.v2 as imageio
+                video_path = str(Path(rec["video_path"]).resolve())
+                if self._video_path != video_path:
+                    self.close()
+                    self._video_reader = imageio.get_reader(
+                        video_path, format="ffmpeg", ffmpeg_params=["-threads", "1"])
+                    self._video_path = video_path
+                composite = self._video_reader.get_data(frame_index)
+                images = {name: composite[y:y + h, x:x + w].copy()
+                          for name, (x, y, w, h) in rec["video_layout"].items()}
+            else:
+                images = {
+                    str(view): _image(root, paths[frame_index])
+                    for view, paths in image_paths.items()
+                    if frame_index < len(paths) and paths[frame_index]
+                }
             overhead = images.get("overhead")
             if overhead is None:
                 overhead = next(iter(images.values()), None)
@@ -441,9 +490,19 @@ class WorkbenchState:
             "target_indices": rec.get("target_indices", []),
         }
 
+    def _preview_generation_protocol(self, cfg):
+        """Old previews remain readable, but may not enter a new-rule collection."""
+        protocol = expert_generation_protocol(cfg)
+        bad = [r.get("episode_id", "<missing>") for r in _read_manifest(self.preview_root)
+               if r.get("expert_generation_protocol") != protocol]
+        if bad:
+            raise ValueError(f"preview generation protocol mismatch; use a fresh preview directory: {bad[:5]}")
+        return protocol
+
     def _clone_success_as_wrong_count(self, seed: int, target_count: int,
                                       failure_mode: str,
-                                      source_slot: int | None = None) -> dict:
+                                      source_slot: int | None = None,
+                                      generation_cfg=None) -> dict:
         """Reuse an adjacent exact-success rollout under a different goal.
 
         This is the intended wrong-count construction: a trajectory that
@@ -452,6 +511,8 @@ class WorkbenchState:
         failure for goal ``n``.  Only the task-count channels are relabelled;
         images, object poses, force trace and actions stay exactly physical.
         """
+        self._preview_generation_protocol(
+            self.cfg if generation_cfg is None else generation_cfg)
         target_count = int(target_count)
         if failure_mode == "wrong_count_over":
             if target_count >= 6:
@@ -593,6 +654,7 @@ class WorkbenchState:
                 )
         if int(max_attempts) < 1:
             raise ValueError("max_attempts must be positive")
+        protocol = self._preview_generation_protocol(local_cfg)
         outcome = str(outcome or "success").lower()
         if outcome not in {"success", "failed"}:
             raise ValueError("outcome must be success or failed")
@@ -604,7 +666,7 @@ class WorkbenchState:
             if int(local_cfg.task.target_count) > 1:
                 return self._clone_success_as_wrong_count(
                     seed, int(local_cfg.task.target_count), failure_mode,
-                    source_slot=source_slot)
+                    source_slot=source_slot, generation_cfg=local_cfg)
         requested_seed = int(seed)
         generation_attempt = 0
         while True:
@@ -624,6 +686,7 @@ class WorkbenchState:
             [self.dataset_root, self.preview_root], int(local_cfg.task.target_count))
         planner_score = float(getattr(result, "planner_score", float("inf")))
         metadata = {
+            **({"expert_generation_protocol": protocol} if protocol is not None else {}),
             "schema_version": ACT_SCHEMA_VERSION,
             "episode_kind": "expert_preview",
             "split": "pilot",
@@ -647,6 +710,8 @@ class WorkbenchState:
             "fps": float(local_cfg.act.action_hz),
             "planner": "astar_one_pass",
             "planner_status": str(getattr(result, "planner_status", "unknown")),
+            **({"expert_landing_region": result.expert_landing_region}
+               if getattr(result, "expert_landing_region", None) is not None else {}),
             "planner_failure_reason": str(
                 getattr(result, "planner_failure_reason", "")),
             "planner_strategy": str(getattr(result, "planner_strategy", "unknown")),

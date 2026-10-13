@@ -43,6 +43,51 @@ def test_training_parser_accepts_checkpoint_and_resume_options():
     assert args.resume.endswith("step_000500")
 
 
+def test_training_parser_accepts_additional_checkpoint_steps():
+    args = train.build_arg_parser().parse_args([
+        "--checkpoint-start-step", "100000",
+        "--checkpoint-every", "100000",
+        "--checkpoint-extra-steps", "50000",
+        "--keep-checkpoints", "3",
+    ])
+
+    assert args.checkpoint_extra_steps == [50000]
+    assert args.keep_checkpoints == 3
+
+
+@pytest.mark.parametrize("completed,want", [
+    (49999, False), (50000, True), (50001, False),
+    (99999, False), (100000, True), (100001, False),
+    (150000, False), (199999, False), (200000, True),
+])
+def test_extra_checkpoint_does_not_change_periodic_save_schedule(completed, want):
+    assert train.checkpoint_due(
+        completed, 100000, 100000, extra_steps=(50000,)
+    ) is want
+
+
+def test_additional_checkpoint_works_with_periodic_saving_disabled():
+    assert train.checkpoint_due(50000, 100000, 0, extra_steps=(50000,))
+    assert not train.checkpoint_due(100000, 100000, 0, extra_steps=(50000,))
+
+
+def test_checkpoint_schedule_without_extra_steps_is_unchanged():
+    assert not train.checkpoint_due(50000, 100000, 100000)
+    assert train.checkpoint_due(100000, 100000, 100000)
+    assert not train.checkpoint_due(150000, 100000, 100000)
+    assert train.checkpoint_due(200000, 100000, 100000)
+
+
+def test_retention_keeps_all_three_requested_checkpoints(tmp_path):
+    checkpoints = tmp_path / "checkpoints"
+    for name in ("step_050000", "step_100000", "step_200000"):
+        (checkpoints / name).mkdir(parents=True)
+    train._prune_checkpoints(tmp_path, keep_checkpoints=3)
+    assert sorted(p.name for p in checkpoints.iterdir()) == [
+        "step_050000", "step_100000", "step_200000",
+    ]
+
+
 def test_remote_tracking_requires_project_and_space_together():
     with pytest.raises(ValueError, match="project and space"):
         train.tracking_settings("act-ur10-sweep", None, True)

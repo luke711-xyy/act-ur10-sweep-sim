@@ -10,3 +10,4 @@ datasets/
 .DS_Store
 graphify-out/
 .worktrees/
+exports/

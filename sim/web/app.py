@@ -6,8 +6,51 @@ import base64
 import io
 import json
 import math
+from html import escape
 from pathlib import Path
 from threading import RLock
+
+
+DEFAULT_INFERENCE_MODEL = (
+    "runs/act_model_five_view_ordinary_disk14_landing7_300_200k_20261013"
+    "/checkpoints/step_050000"
+)
+
+
+def latest_inference_model(project_root: Path) -> str:
+    """Follow only this training run's fully published checkpoint pointer."""
+    fallback = Path(DEFAULT_INFERENCE_MODEL)
+    model_root = fallback.parent.parent
+    absolute_root = (project_root / model_root).resolve()
+    required = (
+        "config.json", "model.safetensors", "policy_preprocessor.json",
+        "policy_preprocessor_step_3_normalizer_processor.safetensors",
+        "policy_postprocessor.json",
+        "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
+        "training_state.pt",
+    )
+
+    def complete(path):
+        try:
+            candidate = path.resolve()
+            return (candidate.parent == absolute_root / "checkpoints"
+                    and all((candidate / name).resolve().is_relative_to(candidate)
+                            and (candidate / name).is_file()
+                            and (candidate / name).stat().st_size > 0
+                            for name in required))
+        except (OSError, ValueError):
+            return False
+
+    try:
+        published = Path((absolute_root / "latest_checkpoint.txt").read_text().strip())
+        if (published.parent == Path("checkpoints")
+                and published.name.startswith("step_")
+                and published.name[5:].isdigit()
+                and complete(absolute_root / published)):
+            return str(model_root / published)
+    except (OSError, ValueError):
+        pass
+    return DEFAULT_INFERENCE_MODEL if complete(project_root / fallback) else ""
 
 
 HTML = r"""<!doctype html>
@@ -22,7 +65,7 @@ main{max-width:1500px;margin:auto;padding:28px}header{display:flex;justify-conte
 .signal-card{margin-top:12px;background:#0e1419;border:1px solid #263742;border-radius:9px;padding:10px}.signal-header{display:flex;justify-content:space-between;gap:10px;align-items:baseline;color:#cfe1e5;font-size:12px}.signal-header span:last-child{color:var(--muted);font-size:11px}.fz-chart{display:block;width:100%;height:auto;margin-top:7px;overflow:visible}.fz-grid{stroke:#2a3d46;stroke-width:1}.fz-path{fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}.fz-raw-path{fill:none;stroke:#f3c969;stroke-width:1.5;stroke-dasharray:4 3;stroke-linecap:round;stroke-linejoin:round}.fz-cursor{stroke:#f3c969;stroke-width:1.5;stroke-dasharray:4 3}.signal-empty{fill:var(--muted);font-size:12px}.axis{display:flex;justify-content:space-between;color:#718b94;font-size:10px}
 button,select,input{font:inherit;color:var(--text);background:#23343d;border:1px solid #3d5863;border-radius:7px;padding:8px 10px}button{cursor:pointer}button:hover{border-color:var(--accent);color:#fff}button.primary{background:#237c6b;border-color:#4fc19e}button.danger{border-color:#915454;color:#ffb2b2}input,select{width:100%;margin:4px 0 9px}label{display:block;color:var(--muted);font-size:12px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:0 0 auto}.meta{background:#0e1419;border-radius:8px;padding:10px;min-height:74px;color:#a9c0c9;white-space:pre-wrap}.job{background:#0e1419;border-radius:8px;padding:9px;margin-top:10px;font-size:12px}.job strong{color:var(--accent)}.job pre{max-height:100px;overflow:auto;margin:7px 0 0;color:#b9c8ce}.status{margin-top:13px;display:flex;gap:9px;flex-wrap:wrap}.pill{border:1px solid var(--line);border-radius:99px;padding:5px 9px;color:var(--muted);font-size:12px}.ok{color:var(--accent)}.bad{color:#f08f8f}a{color:var(--accent)}
 .episode-filters{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0 10px}.episode-filters select{margin-bottom:0}.episode-list{max-height:220px;overflow:auto;margin:8px 0 12px;border:1px solid #263742;border-radius:9px;background:#0e1419}.episode-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;width:100%;border:0;border-bottom:1px solid #22323b;border-radius:0;background:transparent;text-align:left;padding:9px 10px}.episode-row:last-child{border-bottom:0}.episode-row.selected{background:#203a3a;color:#fff}.episode-row strong{display:block;overflow:hidden;text-overflow:ellipsis}.episode-row small{color:var(--muted)}.episode-row .result{align-self:center;font-size:11px;color:var(--accent)}.episode-row .result.failure{color:#f0a0a0}.generation-panel{border-top:1px solid #263742;padding-top:10px}.generation-grid{display:grid;grid-template-columns:1.1fr 1.1fr .7fr;gap:8px;align-items:end}.generation-grid select,.generation-grid input{margin-bottom:0}.generation-grid label:last-child{grid-column:1/-1}.control-grid{display:grid;grid-template-columns:1fr;gap:8px;align-items:end}.telemetry-head{display:flex;align-items:end;justify-content:space-between;gap:14px}.telemetry-head label{width:210px}.telemetry-layout{display:grid;grid-template-columns:minmax(0,2fr) minmax(280px,1fr);gap:14px}.telemetry-chart{background:#0e1419;border:1px solid #263742;border-radius:9px;padding:10px}.telemetry-chart svg{display:block;width:100%;height:auto}.telemetry-path{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.telemetry-legend{display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 0;color:var(--muted);font-size:11px}.legend-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}.frame-table{width:100%;border-collapse:collapse;font-size:12px}.frame-table th,.frame-table td{padding:7px 8px;border-bottom:1px solid #263742;text-align:left;vertical-align:top}.frame-table th{width:34%;color:var(--muted);font-weight:500}.frame-table td{font-variant-numeric:tabular-nums;word-break:break-word}.frame-table tr:last-child th,.frame-table tr:last-child td{border-bottom:0}.frame-detail{background:#0e1419;border:1px solid #263742;border-radius:9px;overflow:hidden}.phase-badge{display:inline-block;border:1px solid #3d5863;border-radius:99px;padding:2px 7px;color:#cfe1e5}.sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
-button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+button:disabled{opacity:.55;cursor:not-allowed}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
 @media(max-width:1000px){.simulation,.demonstrations,.training,.inference,.parameters{grid-column:1/-1}.telemetry-layout{grid-template-columns:1fr}}@media(max-width:650px){.views{grid-template-columns:1fr}.control-grid,.episode-filters,.generation-grid{grid-template-columns:1fr}.telemetry-head{align-items:stretch;flex-direction:column}.telemetry-head label{width:100%}}
 </style></head><body><main>
 <header><div><div class="eyebrow">local embodied-learning lab</div><h1>ACT · UR10 MuJoCo Sweep Workbench</h1><div class="muted">Observe the simulator, inspect expert trajectories, then launch reproducible local ACT jobs.</div></div><div class="row"><button onclick="resetScene()">Reset scene</button><button onclick="refreshAll()">Refresh</button></div></header>
@@ -38,7 +81,8 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 <div class="episode-filters"><label>目标数量筛选<select id="episodeTargetFilter" onchange="applyEpisodeFilters()"><option value="all">all</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option></select></label><label>结果筛选<select id="episodeStatusFilter" onchange="applyEpisodeFilters()"><option value="all">all</option><option value="success">success</option><option value="failed">failed</option></select></label></div>
 <select id="episodeSelect" class="sr-only" onchange="selectEpisode(this.value)" aria-label="Selected demonstration"></select><div id="episodeList" class="episode-list" aria-label="Demonstration episode list"></div>
 <div class="generation-panel"><div class="hint" style="margin-bottom:8px">生成示教数据 · 成功数据使用物理质量门；失败数据使用可解释的故障模式。目标 6 固定只有 6 个零件，因此错误数量只生成少扫。</div><div class="generation-grid"><label>目标数量<select id="previewTarget"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></label><label>生成结果<select id="previewOutcome" onchange="toggleFailureMode()"><option value="success">success · 成功示教</option><option value="failed">failed · 失败示教</option></select></label><label>生成条数<input id="previewCount" type="number" min="1" max="100" value="1"></label><label id="previewFailureModeWrap">失败类型<select id="previewFailureMode"><option value="">自动轮换</option><option value="stall_outside_tray">stall_outside_tray · 卡在收集区左右壁外</option><option value="wrong_count">wrong_count · 错误数量（自动多扫/少扫）</option><option value="misroute">misroute · 路径偏离</option></select></label></div><button class="primary" onclick="makePreview()">生成示教数据</button></div>
-<div class="row"><button onclick="togglePlay()" id="playButton">Play</button><button onclick="stepFrame(-1)" aria-label="Previous frame">‹</button><button onclick="stepFrame(1)" aria-label="Next frame">›</button></div>
+<div class="row"><button onclick="togglePlay()" id="playButton">Play</button><button onclick="stepFrame(-1)" aria-label="Previous frame">‹</button><button onclick="stepFrame(1)" aria-label="Next frame">›</button><button onclick="exportEpisodeVideo()" id="exportVideoButton" disabled>导出视频</button></div>
+<div id="episodeVideoStatus" class="hint" role="status" aria-live="polite" style="margin-top:8px">选择已保存记录，可导出完整五视角 MP4。</div><div id="episodeVideoLinks" class="row" style="margin-top:6px"></div>
 <div class="hint" style="margin-top:10px">Play synchronizes all five ACT input cameras.</div>
 <input id="frameSlider" type="range" min="0" max="0" value="0" oninput="seekFrame(this.value)"><div id="episodeMeta" class="meta">No episode loaded.</div>
 </section>
@@ -48,8 +92,9 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 <div class="row"><button class="primary" onclick="startTraining()">Start training job</button><button class="danger" onclick="stopLatest('train')">Stop</button></div><div id="trainJob" class="job">No training job.</div>
 </section>
 <section class="panel inference"><h2>Inference <span class="muted">· MuJoCo rollout</span></h2>
-<label>Model checkpoint<input id="inferModel" value="runs/act_model_curve_v10/checkpoints/step_100000"></label><label>Exact target count (of 6)<select id="inferTarget"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></label><label>Seed<input id="inferSeed" type="number" value="0"></label><label class="check"><input id="inferRandomize" type="checkbox" checked> Randomize layout seed on each run</label><label class="check"><input id="inferPreview" type="checkbox" checked> Simulation preview · allow late inference</label>
+<label>Model checkpoint<input id="inferModel" value="__INFERENCE_MODEL__"></label><label>Exact target count (of 6)<select id="inferTarget"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></label><label>Seed<input id="inferSeed" type="number" value="0"></label><label class="check"><input id="inferRandomize" type="checkbox" checked> Randomize layout seed on each run</label><label class="check"><input id="inferPreview" type="checkbox" checked> Simulation preview · allow late inference</label>
 <div class="row"><button class="primary" onclick="startInference()">Run inference</button><button class="danger" onclick="stopLatest('inference')">Stop</button></div><div id="inferJob" class="job">No inference job.</div>
+<div class="hint" style="margin-top:10px">五视角 MP4 自动保存到 <span id="inferVideoFolder">__INFERENCE_VIDEO_DIR__</span></div><div id="inferVideo" class="hint" style="margin-top:8px"></div>
 </section>
 <section class="panel parameters"><h2>Parameters <span class="muted">· explicit, editable knobs</span></h2>
 <div class="grid"><div style="grid-column:span 6"><label>Desired force (N)<input id="pForce" type="number" step=".05" min="0" max="5"></label><label>Sweep speed (m/s)<input id="pSpeed" type="number" step=".01" min=".01" max="1"></label><label>Target count N (six parts fixed)<input id="pTarget" type="number" min="1" max="6"></label></div><div style="grid-column:span 6"><label>Safe max force (N)<input id="pSafe" type="number" step=".05" min=".1" max="20"></label><label>Episode max time (s)<input id="pTime" type="number" step="1" min="1" max="600"></label><label>ACT batch size<input id="pBatch" type="number" min="1" max="256"></label></div></div>
@@ -58,38 +103,43 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 <section class="panel wide"><h2>Dataset tooling <span class="muted">· LeRobot-compatible export</span></h2><div class="row"><a href="https://huggingface.co/spaces/lerobot/visualize_dataset" target="_blank">Open official LeRobot Dataset Visualizer ↗</a><span class="hint">Rerun shows synchronized cameras, state and action; Foxglove adds a seekable play/pause timeline. Hub Dataset Viewer remains useful for row filtering and Parquet inspection.</span></div><div id="globalStatus" class="hint" style="margin-top:10px"></div></section>
 </div></main><script>
 const $=id=>document.getElementById(id);let episodes=[];let current=null;let selectedEpisodeId=null;let lastInferenceReplayId=null;let previewJobId=null;let previewJobHandled=null;let timer=null;let playbackBusy=false;let signalSeries=null;let currentFrameData=null;let seekSerial=0;let seekAbort=null;let signalSerial=0;let signalAbort=null;let selectionSerial=0;
+const episodeKey=e=>e?.playback_id||e?.episode_id;let videoExportJobId=null;let videoExportBusy=false;let videoExportSubmitting=false;
+function updateExportButton(){$('exportVideoButton').disabled=!current||videoExportBusy;$('exportVideoButton').textContent=videoExportBusy?'导出中…':'导出视频'}
+function renderVideoExport(j){if(!j||videoExportSubmitting)return;videoExportJobId=j.job_id;videoExportBusy=['starting','running','stopping'].includes(j.state);updateExportButton();const p=j.progress||{},status=$('episodeVideoStatus'),links=$('episodeVideoLinks'),name=p.episode_id||'所选记录';const stages={validating:'核对已保存记录',encoding:'编码',copying:'复用已验证视频',verifying:'验证完整视频'};status.className='hint';if(videoExportBusy){status.textContent=`${name} · ${stages[p.stage]||'准备导出'} · ${p.frames||0}/${p.total_frames||'?'} 帧`;links.replaceChildren()}else if(j.state==='done'&&p.video_url){status.textContent=`${name} · 导出完成 · ${p.frames} 帧 · ${(p.frames/p.fps).toFixed(2)} 秒${p.reused?' · 复用原视频':''}`;links.innerHTML=`<a href="${esc(p.video_url)}" target="_blank" rel="noopener">查看视频 ↗</a><a href="${esc(p.download_url)}" download>下载 MP4</a>`}else{status.className='bad';status.textContent=`${name} · ${j.state==='stopped'?'导出已取消':'导出失败'}：${j.output?.at(-1)||'请重试；原数据保持不变。'}`;links.replaceChildren()}}
+async function exportEpisodeVideo(){if(!current||videoExportBusy)return;const id=episodeKey(current);videoExportSubmitting=true;videoExportBusy=true;updateExportButton();$('episodeVideoStatus').className='hint';$('episodeVideoStatus').textContent=`${current.episode_id} · 准备导出完整五视角视频…`;$('episodeVideoLinks').replaceChildren();try{const j=await json('/api/jobs/video-export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({episode_id:id})});videoExportSubmitting=false;renderVideoExport(j);await refreshJobs()}catch(e){videoExportSubmitting=false;videoExportBusy=false;updateExportButton();$('episodeVideoStatus').className='bad';$('episodeVideoStatus').textContent='导出失败：'+e.message}}
 function image(id,b64){$(id).src=b64?(String(b64).startsWith('data:')?b64:'data:image/png;base64,'+b64):''}
 function renderCameraFrames(frame){const images=frame?.images||{};for(const view of ['corner_xminus_yminus','corner_xminus_yplus','corner_xplus_yminus','corner_xplus_yplus','wrist'])image(view+'Image',images[view]||(view==='wrist'?frame?.wrist:(view==='corner_xminus_yminus'?frame?.overhead:null)))}
 async function json(url,opts){const r=await fetch(url,opts);const body=await r.text();let data=null;try{data=body?JSON.parse(body):null}catch(_){if(!r.ok)throw new Error(`HTTP ${r.status}: ${body.slice(0,180)||r.statusText}`);throw new Error(`Invalid JSON from ${url}`)}if(!r.ok)throw new Error(data?.detail||data?.message||`HTTP ${r.status}: ${r.statusText}`);return data}
 function esc(value){return String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
 async function refreshAll(){try{const [h,f]=await Promise.all([json('/api/health'),json('/api/frames')]);if(!timer&&!current)renderCameraFrames(f);$('healthPills').innerHTML=`<span class="pill ok">sim ${h.time.toFixed(2)} s</span><span class="pill">full ${h.collected}/${h.components} · goal ${h.target_count}</span><span class="pill">Fz ${h.normal_force.toFixed(2)} N</span><span class="pill">${h.model}</span>`;await loadEpisodes();await refreshJobs()}catch(e){$('globalStatus').textContent='Dashboard error: '+e.message;$('globalStatus').className='bad'}}
 function filteredEpisodes(){const target=$('episodeTargetFilter')?.value||'all';const status=$('episodeStatusFilter')?.value||'all';return episodes.filter(e=>(target==='all'||String(e.target_count)===target)&&(status==='all'||(status==='success'?Boolean(e.success):!Boolean(e.success))))}
-function renderEpisodeList(){const visible=filteredEpisodes().slice().reverse();$('episodeList').innerHTML=visible.length?visible.map(e=>`<button class="episode-row ${e.episode_id===selectedEpisodeId?'selected':''}" data-episode-id="${esc(e.episode_id)}" onclick="selectEpisode('${esc(e.episode_id)}')" oncontextmenu="deleteEpisode(event,'${esc(e.episode_id)}');return false;" title="右键删除这条记录"><span><strong>${esc(e.episode_id)}</strong><small>${esc(e.split)} · exact ${e.collected??'?'} / ${e.target_count??'?'} · ${e.success?'success':'failed'}${e.failure_mode?' · '+esc(e.failure_mode):''} · ${e.length} frames · ${esc(e.planner_strategy||'legacy')} / ${esc(e.planner_status||'unknown')}</small></span><span class="result ${e.success?'':'failure'}">${e.success?'SUCCESS':'FAIL'}</span></button>`).join(''):'<div class="hint" style="padding:12px">当前筛选没有示教数据。</div>'}
+function renderEpisodeList(){const visible=filteredEpisodes().slice().reverse();$('episodeList').innerHTML=visible.length?visible.map(e=>`<button class="episode-row ${episodeKey(e)===selectedEpisodeId?'selected':''}" data-episode-id="${esc(episodeKey(e))}" onclick="selectEpisode('${esc(episodeKey(e))}')" oncontextmenu="deleteEpisode(event,'${esc(episodeKey(e))}');return false;" title="右键删除这条记录"><span><strong>${esc(e.episode_id)}</strong><small>${e.preview?'preview':'dataset'} · ${esc(e.split)} · ${e.collection_summary?esc(e.collection_summary):`exact ${e.collected??'?'} / ${e.target_count??'?'}`} · ${e.success?'success':'failed'}${e.failure_mode?' · '+esc(e.failure_mode):''} · ${e.length} frames · ${esc(e.planner_strategy||'legacy')} / ${esc(e.planner_status||'unknown')}</small></span><span class="result ${e.success?'':'failure'}">${e.success?'SUCCESS':'FAIL'}</span></button>`).join(''):'<div class="hint" style="padding:12px">当前筛选没有示教数据。</div>'}
 async function deleteEpisode(event,id){event.preventDefault();if(!confirm(`删除示教记录 ${id}？此操作不可撤销。`))return;try{if(timer){clearInterval(timer);timer=null;$('playButton').textContent='Play'}if(selectedEpisodeId===id){selectedEpisodeId=null;current=null}await json(`/api/episodes/${encodeURIComponent(id)}`,{method:'DELETE'});await loadEpisodes();$('globalStatus').textContent=`已删除示教记录 · ${id}`}catch(e){$('globalStatus').textContent='删除失败: '+e.message;$('globalStatus').className='bad'}}
-function applyEpisodeFilters(){renderEpisodeList();const visible=filteredEpisodes();if(visible.length&&!visible.some(e=>e.episode_id===selectedEpisodeId))selectEpisode(visible[visible.length-1].episode_id)}
-async function loadEpisodes(){const data=await json('/api/episodes');episodes=data;const select=$('episodeSelect');const old=select.value;select.innerHTML=data.length?data.map(e=>`<option value="${esc(e.episode_id)}">${e.preview?'preview':'dataset'} · ${esc(e.episode_id)} · ${e.success?'success':'failure'}</option>`).join(''):'<option value="">No episodes yet</option>';renderEpisodeList();const visible=filteredEpisodes();if(visible.length){const preferred=selectedEpisodeId||old;const id=visible.some(e=>e.episode_id===preferred)?preferred:visible[visible.length-1].episode_id;select.value=id;if(id!==current?.episode_id)await selectEpisode(id)}}
-async function loadSignals(id){const requestId=++signalSerial;if(signalAbort)signalAbort.abort();const controller=new AbortController();signalAbort=controller;signalSeries=null;try{const next=await json(`/api/episodes/${encodeURIComponent(id)}/signals`,{signal:controller.signal});if(requestId!==signalSerial||current?.episode_id!==id||controller.signal.aborted)return;signalSeries=next}catch(e){if(e.name==='AbortError')return;if(requestId!==signalSerial||current?.episode_id!==id)return;signalSeries=null}finally{if(signalAbort===controller)signalAbort=null}if(requestId===signalSerial&&current?.episode_id===id&&!controller.signal.aborted){renderFz(0);renderTelemetry(0)}}
+function applyEpisodeFilters(){renderEpisodeList();const visible=filteredEpisodes();if(visible.length&&!visible.some(e=>episodeKey(e)===selectedEpisodeId))selectEpisode(episodeKey(visible[visible.length-1]))}
+async function loadEpisodes(){const data=await json('/api/episodes');episodes=data;const select=$('episodeSelect');const old=select.value;select.innerHTML=data.length?data.map(e=>`<option value="${esc(episodeKey(e))}">${e.preview?'preview':'dataset'} · ${esc(e.episode_id)} · ${e.success?'success':'failure'}</option>`).join(''):'<option value="">No episodes yet</option>';renderEpisodeList();const visible=filteredEpisodes();if(visible.length){const preferred=selectedEpisodeId||old;const id=visible.some(e=>episodeKey(e)===preferred)?preferred:episodeKey(visible[visible.length-1]);select.value=id;if(id!==episodeKey(current))await selectEpisode(id)}else if(!data.length){current=null;selectedEpisodeId=null;updateExportButton()}}
+async function loadSignals(id){const requestId=++signalSerial;if(signalAbort)signalAbort.abort();const controller=new AbortController();signalAbort=controller;signalSeries=null;try{const next=await json(`/api/episodes/${encodeURIComponent(id)}/signals`,{signal:controller.signal});if(requestId!==signalSerial||episodeKey(current)!==id||controller.signal.aborted)return;signalSeries=next}catch(e){if(e.name==='AbortError')return;if(requestId!==signalSerial||episodeKey(current)!==id)return;signalSeries=null}finally{if(signalAbort===controller)signalAbort=null}if(requestId===signalSerial&&episodeKey(current)===id&&!controller.signal.aborted){renderFz(0);renderTelemetry(0)}}
 function renderFz(frameIndex=0){const path=$('fzPath'),rawPath=$('fzRawPath'),cursor=$('fzCursor'),empty=$('fzEmpty'),meta=$('fzMeta'),end=$('fzEndTime');const frameT=signalSeries?.t||[],controlT=signalSeries?.control_t||frameT,filtered=(signalSeries?.control_fz||signalSeries?.fz||[]).map(Number),raw=(signalSeries?.control_raw_fz||signalSeries?.raw_fz||signalSeries?.control_raw_fz_peak||signalSeries?.raw_fz_peak||[]).map(Number),rawT=(signalSeries?.control_raw_fz&&signalSeries?.control_t?controlT:(signalSeries?.raw_fz&&frameT.length?frameT:(signalSeries?.control_raw_fz_peak_t||signalSeries?.raw_fz_peak_t||controlT))).map(Number);const n=Math.min(controlT.length,filtered.length);if(!n){path.setAttribute('d','');rawPath.setAttribute('d','');cursor.setAttribute('x1','24');cursor.setAttribute('x2','24');empty.style.display='block';meta.textContent='No force trace saved';end.textContent='—';return}empty.style.display='none';const width=608,height=134,padX=24,padY=18,firstT=Number(controlT[0]||0),lastT=Number(controlT[n-1]||firstT),timeSpan=Math.max(lastT-firstT,1e-9);const rawN=Math.min(rawT.length,raw.length),all=[...filtered.slice(0,n),...raw.slice(0,rawN)],lo=Math.min(0,...all),hi=Math.max(0.2,...all),span=Math.max(hi-lo,1e-6);const makePath=(values,times,count)=>values.slice(0,count).map((value,i)=>{const x=padX+(Number(times[i])-firstT)/timeSpan*width;const y=padY+(hi-value)/span*height;return `${i?'L':'M'}${x.toFixed(2)},${y.toFixed(2)}`}).join(' ');path.setAttribute('d',makePath(filtered,controlT,n));rawPath.setAttribute('d',rawN?makePath(raw,rawT,rawN):'');const frameIndexSafe=Math.max(0,Math.min(Number(frameIndex),Math.max(0,frameT.length-1)));const targetTime=Number(frameT[frameIndexSafe]??controlT[0]??0);let cursorIndex=0;while(cursorIndex+1<n&&Math.abs(Number(controlT[cursorIndex+1])-targetTime)<Math.abs(Number(controlT[cursorIndex])-targetTime))cursorIndex++;const x=padX+(Number(controlT[cursorIndex])-firstT)/timeSpan*width;cursor.setAttribute('x1',x.toFixed(2));cursor.setAttribute('x2',x.toFixed(2));const filteredPeak=Math.max(...filtered.slice(0,n)),rawPeak=rawN?Math.max(...raw.slice(0,rawN)):null;meta.textContent=`${n} samples · compensated-filtered peak ${filteredPeak.toFixed(2)} N${rawPeak===null?'':` · raw ${signalSeries?.control_raw_fz||signalSeries?.raw_fz?'sample':'substep'} peak ${rawPeak.toFixed(2)} N`}`;end.textContent=`${Number(controlT[n-1]||0).toFixed(2)} s`}
 const palette=['#62d6b0','#f3c969','#7fb5ff','#ef8ba3','#b39cff','#8bd1e8'];
 function signalGroup(){const kind=$('signalGroup').value;const rows=signalSeries||{};if(kind==='tcp')return {labels:['x','y','z','yaw'],values:rows.tcp||[],unit:'m / rad'};if(kind==='action')return {labels:['dx','dy','dz','dyaw'],values:rows.action||[],unit:'m / rad per 40 ms'};if(kind==='zcontrol')return {labels:['policy z','applied z'],values:(rows.policy_z||[]).map((value,i)=>[Number(value),Number(rows.applied_z?.[i]??value)]),unit:'m'};if(kind==='wrench')return {labels:['Fx','Fy','Fz','Tx','Ty','Tz'],values:rows.wrench||[],unit:'N / Nm'};if(kind==='joints')return {labels:['q1','q2','q3','q4','q5','q6'],values:rows.joint_position||[],unit:'rad'};const env=rows.environment_state||[];return {labels:['total','target','collected','contact'],values:env.map((row,i)=>[Number(row[0]||0),Number(row[1]||0),Number(row[2]||0),rows.contact_latched?.[i]?1:0]),unit:'count / boolean'}}
 function renderTelemetry(frameIndex=0){const paths=$('telemetryPaths'),grid=$('telemetryGrid'),empty=$('telemetryEmpty'),legend=$('telemetryLegend'),cursor=$('telemetryCursor');paths.innerHTML='';grid.innerHTML='';legend.innerHTML='';const group=signalGroup(),rows=group.values||[],n=rows.length;if(!n){empty.style.display='block';$('telemetryRange').textContent='No detailed signals';$('telemetryEnd').textContent='—';return}empty.style.display='none';const width=824,height=206,x0=42,y0=18;for(let i=0;i<5;i++){const y=y0+i*height/4;const line=document.createElementNS('http://www.w3.org/2000/svg','line');line.setAttribute('x1',x0);line.setAttribute('x2',x0+width);line.setAttribute('y1',y);line.setAttribute('y2',y);line.setAttribute('class','fz-grid');grid.appendChild(line)}const flat=rows.flatMap(row=>row.map(Number)).filter(Number.isFinite);let lo=Math.min(...flat),hi=Math.max(...flat);if(lo===hi){lo-=1;hi+=1}const margin=(hi-lo)*.08;lo-=margin;hi+=margin;group.labels.forEach((label,j)=>{const values=rows.map(row=>Number(row[j]||0));const d=values.map((value,i)=>{const x=x0+i/Math.max(1,n-1)*width;const y=y0+(hi-value)/(hi-lo)*height;return `${i?'L':'M'}${x.toFixed(2)},${y.toFixed(2)}`}).join(' ');const path=document.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d',d);path.setAttribute('class','telemetry-path');path.setAttribute('stroke',palette[j%palette.length]);paths.appendChild(path);legend.insertAdjacentHTML('beforeend',`<span><i class="legend-dot" style="background:${palette[j%palette.length]}"></i>${label}</span>`)});const index=Math.max(0,Math.min(Number(frameIndex),n-1));const x=x0+index/Math.max(1,n-1)*width;cursor.setAttribute('x1',x);cursor.setAttribute('x2',x);const t=signalSeries?.t||[];$('telemetryStart').textContent=`${Number(t[0]||0).toFixed(2)} s`;$('telemetryEnd').textContent=`${Number(t[n-1]||0).toFixed(2)} s`;$('telemetryRange').textContent=`${lo.toFixed(3)} … ${hi.toFixed(3)} ${group.unit}`}
 function fmt(values,digits=4){return (values||[]).map(v=>Number(v).toFixed(digits)).join(', ')}
 function renderFrameData(data){currentFrameData=data;if(!data){$('frameData').innerHTML='<tr><th>Frame</th><td>Legacy episode: no per-frame record</td></tr>';return}const env=data.environment_state||[];const objects=(data.objects||[]).map(o=>`#${o.index+1} [${fmt(o.position,3)}]${o.collected?' ✓':''}`).join('<br>')||'legacy episode: not logged';const rawFz=data.raw_normal_force==null?'n/a':`${Number(data.raw_normal_force).toFixed(3)} N`;$('frameData').innerHTML=`<tr><th>Frame / time</th><td>${data.frame+1}/${current.length} · ${Number(data.t).toFixed(3)} s</td></tr><tr><th>Phase</th><td><span class="phase-badge">${esc(data.phase)}</span> · ${data.policy_mask?'ACT label valid':'stability / unload masked'}</td></tr><tr><th>Contact latch</th><td>${data.contact_latched?'latched':'open'} · filtered control Fz ${Number(data.normal_force).toFixed(3)} N · uncompensated tared Fz ${rawFz} · raw substep peak ${Number(data.raw_normal_force_peak||0).toFixed(3)} N</td></tr><tr><th>Count</th><td>${data.fully_collected}/${data.total_count} fully inside · exact goal ${data.target_count}</td></tr><tr><th>TCP [x,y,z,yaw]</th><td>${fmt(data.tcp_pose)}</td></tr><tr><th>ACT [dx,dy,dz,dyaw]</th><td>${fmt(data.action,5)}</td></tr><tr><th>Policy target [x,y,z,yaw]</th><td>${fmt(data.policy_reference)}</td></tr><tr><th>Applied [x,y,z,yaw]</th><td>${fmt(data.reference)}</td></tr><tr><th>Z ownership</th><td>${esc(data.z_owner)} · policy ${Number(data.policy_z).toFixed(4)} m · applied ${Number(data.applied_z).toFixed(4)} m</td></tr><tr><th>Wrench [F,T]</th><td>${fmt(data.wrench,3)}</td></tr><tr><th>Joints q1…q6</th><td>${fmt(data.joint_position,3)}</td></tr><tr><th>Objects [x,y,z]</th><td>${objects}</td></tr><tr><th>Environment</th><td>${fmt(env,0)}</td></tr>`}
-async function selectEpisode(id){if(!id)return;const selectionId=++selectionSerial;if(timer){clearInterval(timer);timer=null;$('playButton').textContent='Play'}if(seekAbort)seekAbort.abort();seekSerial++;selectedEpisodeId=id;current=episodes.find(e=>e.episode_id===id)||null;if(!current)return;$('episodeSelect').value=id;renderEpisodeList();$('frameSlider').max=Math.max(0,current.length-1);$('frameSlider').value=0;await loadSignals(id);if(selectionId!==selectionSerial||current?.episode_id!==id)return;await seekFrame(0)}
-async function seekFrame(index){if(!current)return;const episodeId=current.episode_id;const requestId=++seekSerial;if(seekAbort)seekAbort.abort();const controller=new AbortController();seekAbort=controller;index=Math.max(0,Math.min(Number(index),current.length-1));if(requestId!==seekSerial||current?.episode_id!==episodeId)return;$('frameSlider').value=index;try{const base=`/api/episodes/${encodeURIComponent(episodeId)}/frame/${index}`;const [f,d]=await Promise.all([json(base,{signal:controller.signal}),json(base+'/data',{signal:controller.signal}).catch(e=>{if(e.name==='AbortError')throw e;return null})]);if(requestId!==seekSerial||current?.episode_id!==episodeId||controller.signal.aborted)return;renderCameraFrames(f);renderFz(index);renderTelemetry(index);renderFrameData(d);const firstContact=Array.isArray(current.first_contact_position)?`\nfirst contact [x,y,z]: ${fmt(current.first_contact_position,4)}`:'';$('episodeMeta').textContent=`${episodeId}\nframe ${index+1}/${current.length} · ${Number(d?.t??index/(current.fps||25)).toFixed(2)} s · goal ${current.target_count??'?'} / 6\nseed ${current.seed??'?'} · ${current.success?'SUCCESS':'FAILURE'} · planner ${current.planner_strategy||'legacy'} / ${current.planner_status||'unknown'}${firstContact}${current.failure_reason?'\nreason: '+current.failure_reason:''}`}catch(e){if(e.name==='AbortError')return;if(requestId!==seekSerial||current?.episode_id!==episodeId)return;$('episodeMeta').textContent=e.message}finally{if(seekAbort===controller)seekAbort=null}}
+async function selectEpisode(id){if(!id)return;const selectionId=++selectionSerial;if(timer){clearInterval(timer);timer=null;$('playButton').textContent='Play'}if(seekAbort)seekAbort.abort();seekSerial++;current=episodes.find(e=>episodeKey(e)===id)||episodes.find(e=>e.episode_id===id)||null;selectedEpisodeId=episodeKey(current);updateExportButton();if(!current)return;id=selectedEpisodeId;$('episodeSelect').value=id;renderEpisodeList();$('frameSlider').max=Math.max(0,current.length-1);$('frameSlider').value=0;await loadSignals(id);if(selectionId!==selectionSerial||episodeKey(current)!==id)return;await seekFrame(0)}
+async function seekFrame(index){if(!current)return;const episodeId=episodeKey(current);const requestId=++seekSerial;if(seekAbort)seekAbort.abort();const controller=new AbortController();seekAbort=controller;index=Math.max(0,Math.min(Number(index),current.length-1));if(requestId!==seekSerial||episodeKey(current)!==episodeId)return;$('frameSlider').value=index;try{const base=`/api/episodes/${encodeURIComponent(episodeId)}/frame/${index}`;const [f,d]=await Promise.all([json(base,{signal:controller.signal}),json(base+'/data',{signal:controller.signal}).catch(e=>{if(e.name==='AbortError')throw e;return null})]);if(requestId!==seekSerial||episodeKey(current)!==episodeId||controller.signal.aborted)return;renderCameraFrames(f);renderFz(index);renderTelemetry(index);renderFrameData(d);const firstContact=Array.isArray(current.first_contact_position)?`\nfirst contact [x,y,z]: ${fmt(current.first_contact_position,4)}`:'';const collectionSummary=current.collection_summary?'\n'+current.collection_summary:'';$('episodeMeta').textContent=`${current.episode_id} · ${current.preview?'preview':'dataset'}\nframe ${index+1}/${current.length} · ${Number(d?.t??index/(current.fps||25)).toFixed(2)} s · goal ${current.target_count??'?'} / 6\nseed ${current.seed??'?'} · ${current.success?'SUCCESS':'FAILURE'} · planner ${current.planner_strategy||'legacy'} / ${current.planner_status||'unknown'}${collectionSummary}${firstContact}${current.failure_reason?'\nreason: '+current.failure_reason:''}`}catch(e){if(e.name==='AbortError')return;if(requestId!==seekSerial||episodeKey(current)!==episodeId)return;$('episodeMeta').textContent=e.message}finally{if(seekAbort===controller)seekAbort=null}}
 function stepFrame(delta){seekFrame(Number($('frameSlider').value)+delta)}
 function togglePlay(){if(timer){clearInterval(timer);timer=null;$('playButton').textContent='Play';return}if(!current)return;$('playButton').textContent='Pause';const tick=async()=>{if(playbackBusy||!timer)return;const n=Number($('frameSlider').value)+1;if(n>=current.length){clearInterval(timer);timer=null;$('playButton').textContent='Play';return}playbackBusy=true;try{await seekFrame(n)}finally{playbackBusy=false}};timer=setInterval(tick,1000/Math.max(1,current.fps||25));tick()}
 function toggleFailureMode(){const failed=$('previewOutcome').value==='failed';$('previewFailureModeWrap').style.display=failed?'block':'none'}
-async function makePreview(){try{const target=Number($('previewTarget').value),outcome=$('previewOutcome').value,count=Math.max(1,Math.min(100,Number($('previewCount').value)||1)),failure_mode=$('previewFailureMode').value;$('globalStatus').textContent=`Generating ${count} ${outcome} demonstration${count===1?'':'s'} in MuJoCo…`;const response=await json('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({seed:Date.now()%100000,target_count:target,outcome,count,failure_mode})});if(response.job_id){previewJobId=response.job_id;previewJobHandled=null;$('globalStatus').textContent=`后台生成已启动 · 0/${count} · 工作台仍可操作`;await refreshJobs();return}const records=response.records||[response];const latest=records[records.length-1];selectedEpisodeId=latest.episode_id;await loadEpisodes();$('episodeSelect').value=latest.episode_id;await selectEpisode(latest.episode_id);$('globalStatus').textContent=`Generated ${records.length} ${outcome} demonstration${records.length===1?'':'s'} · latest ${latest.episode_id} · goal ${target}/6.`}catch(e){$('globalStatus').textContent='Generation failed: '+e.message}}
+async function makePreview(){try{const target=Number($('previewTarget').value),outcome=$('previewOutcome').value,count=Math.max(1,Math.min(100,Number($('previewCount').value)||1)),failure_mode=$('previewFailureMode').value;$('globalStatus').textContent=`Generating ${count} ${outcome} demonstration${count===1?'':'s'} in MuJoCo…`;const response=await json('/api/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({seed:Date.now()%100000,target_count:target,outcome,count,failure_mode})});if(response.job_id){previewJobId=response.job_id;previewJobHandled=null;$('globalStatus').textContent=`后台生成已启动 · 0/${count} · 工作台仍可操作`;await refreshJobs();return}const records=response.records||[response];const latest=records[records.length-1];const latestKey='preview:'+latest.episode_id;selectedEpisodeId=latestKey;await loadEpisodes();$('episodeSelect').value=latestKey;await selectEpisode(latestKey);$('globalStatus').textContent=`Generated ${records.length} ${outcome} demonstration${records.length===1?'':'s'} · latest ${latest.episode_id} · goal ${target}/6.`}catch(e){$('globalStatus').textContent='Generation failed: '+e.message}}
 async function resetScene(){if(timer){clearInterval(timer);timer=null;$('playButton').textContent='Play'}await json('/api/reset',{method:'POST'});await refreshAll()}
 function fillParameters(c){$('pForce').value=c.controller.desired_force;$('pSpeed').value=c.controller.sweep_speed;$('pSafe').value=c.controller.safe_max_force;$('pTime').value=c.episode.max_time;$('pTarget').value=c.task.target_count;$('previewTarget').value=c.task.target_count;$('inferTarget').value=c.task.target_count;$('pBatch').value=c.act.batch_size}
 async function initParameters(){try{fillParameters(await json('/api/config'))}catch(e){$('parameterStatus').textContent=e.message}}
 async function applyParameters(){const values={"controller.desired_force":Number($('pForce').value),"controller.sweep_speed":Number($('pSpeed').value),"controller.safe_max_force":Number($('pSafe').value),"episode.max_time":Number($('pTime').value),"task.target_count":Number($('pTarget').value),"act.batch_size":Number($('pBatch').value)};try{await json('/api/config/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});$('parameterStatus').textContent='Applied and saved to runs/workbench/config.yaml.';await refreshAll()}catch(e){$('parameterStatus').textContent='Rejected: '+e.message}}
 async function startTraining(){try{const body={dataset:$('trainDataset').value,out:$('trainOut').value};if($('trainSteps').value)body.steps=Number($('trainSteps').value);await json('/api/jobs/train',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await refreshJobs()}catch(e){$('trainJob').textContent=e.message}}
 async function startInference(){try{let seed=Number($('inferSeed').value);if($('inferRandomize').checked){seed=Math.floor(Math.random()*1000000000);$('inferSeed').value=seed}await json('/api/jobs/inference',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:$('inferModel').value,seed,target_count:Number($('inferTarget').value),preview:$('inferPreview').checked})});await refreshJobs()}catch(e){$('inferJob').textContent=e.message}}
-function renderJob(jobNode,j){const outputNode=jobNode.querySelector('pre');const scrollTop=outputNode?.scrollTop||0;const wasAtBottom=outputNode?outputNode.scrollTop+outputNode.clientHeight>=outputNode.scrollHeight-8:true;jobNode.innerHTML=`<strong>${j.state}</strong> · ${j.job_id}<pre>${(j.output||[]).join('\n')}</pre>`;const nextOutputNode=jobNode.querySelector('pre');if(nextOutputNode)nextOutputNode.scrollTop=wasAtBottom?nextOutputNode.scrollHeight:scrollTop}
-async function refreshJobs(){const jobs=await json('/api/jobs');for(const kind of ['train','inference']){const j=jobs.find(x=>x.kind===kind);if(j){const jobNode=$(kind==='train'?'trainJob':'inferJob');renderJob(jobNode,j)}}const preview=previewJobId?jobs.find(x=>x.kind==='preview'&&x.job_id===previewJobId):jobs.find(x=>x.kind==='preview'&&['starting','running','stopping'].includes(x.state));if(preview&&!previewJobId)previewJobId=preview.job_id;if(!preview)return;const p=preview.progress||{};if(preview.state==='stopping'){$('globalStatus').textContent=`正在停止示教生成… · ${p.completed||0}/${p.total||'?'} · 请等待当前回合退出`;}else if(['starting','running'].includes(preview.state)){$('globalStatus').textContent=`后台生成示教中 · ${p.completed||0}/${p.total||'?'} · 工作台仍可操作`;}else if(previewJobHandled!==preview.job_id){previewJobHandled=preview.job_id;await loadEpisodes();if(p.latest_episode_id)await selectEpisode(p.latest_episode_id);$('globalStatus').textContent=`示教生成${preview.state==='done'?'完成':'结束'} · ${p.completed||0}/${p.total||'?'} 条已保存`}}
-async function refreshInferenceReplay(){try{const jobs=await json('/api/jobs');const j=jobs.find(x=>x.kind==='inference');if(!j||!['done','failed'].includes(j.state))return;const lines=j.output||[];for(let i=lines.length-1;i>=0;i--){try{const summary=JSON.parse(lines[i]);if(summary.replay_episode_id&&summary.replay_episode_id!==lastInferenceReplayId){lastInferenceReplayId=summary.replay_episode_id;await loadEpisodes();await selectEpisode(summary.replay_episode_id);$('globalStatus').textContent='Inference replay loaded · '+summary.replay_episode_id;}break}catch(e){}}}catch(e){}}
+function renderJob(jobNode,j){const outputNode=jobNode.querySelector('pre');const scrollTop=outputNode?.scrollTop||0;const wasAtBottom=outputNode?outputNode.scrollTop+outputNode.clientHeight>=outputNode.scrollHeight-8:true;jobNode.innerHTML=`<strong>${j.state}</strong> · ${j.job_id}<pre>${(j.output||[]).join('\n')}</pre>`;const nextOutputNode=jobNode.querySelector('pre');if(nextOutputNode)nextOutputNode.scrollTop=wasAtBottom?nextOutputNode.scrollHeight:scrollTop;if(j.kind==='inference')renderInferenceVideo(j)}
+function renderInferenceVideo(j){const node=$('inferVideo');node.replaceChildren();for(const line of [...(j.output||[])].reverse()){let summary;try{summary=JSON.parse(line)}catch(e){continue}if(summary.video_path){const name=summary.video_path.split(/[\\/]/).pop();const link=document.createElement('a');link.href='/api/inference-videos/'+encodeURIComponent(name);link.target='_blank';link.rel='noopener';link.textContent='查看五视角视频 ↗';node.append(link);const path=document.createElement('div');path.textContent=summary.video_path;path.style.overflowWrap='anywhere';node.append(path);return}if(summary.video_error){node.textContent='视频导出失败：'+summary.video_error;return}}if(['starting','running'].includes(j.state))node.textContent='推理和回放完成后自动生成视频。'}
+async function refreshJobs(){const jobs=await json('/api/jobs');const videoJob=videoExportJobId?jobs.find(x=>x.kind=== 'video_export'&&x.job_id===videoExportJobId):jobs.find(x=>x.kind==='video_export');if(videoJob)renderVideoExport(videoJob);for(const kind of ['train','inference']){const j=jobs.find(x=>x.kind===kind);if(j){const jobNode=$(kind==='train'?'trainJob':'inferJob');renderJob(jobNode,j)}}const preview=previewJobId?jobs.find(x=>x.kind==='preview'&&x.job_id===previewJobId):jobs.find(x=>x.kind==='preview'&&['starting','running','stopping'].includes(x.state));if(preview&&!previewJobId)previewJobId=preview.job_id;if(!preview)return;const p=preview.progress||{};if(preview.state==='stopping'){$('globalStatus').textContent=`正在停止示教生成… · ${p.completed||0}/${p.total||'?'} · 请等待当前回合退出`;}else if(['starting','running'].includes(preview.state)){$('globalStatus').textContent=`后台生成示教中 · ${p.completed||0}/${p.total||'?'} · 工作台仍可操作`;}else if(previewJobHandled!==preview.job_id){previewJobHandled=preview.job_id;await loadEpisodes();if(p.latest_episode_id)await selectEpisode('preview:'+p.latest_episode_id);$('globalStatus').textContent=`示教生成${preview.state==='done'?'完成':'结束'} · ${p.completed||0}/${p.total||'?'} 条已保存`}}
+async function refreshInferenceReplay(){try{const jobs=await json('/api/jobs');const j=jobs.find(x=>x.kind==='inference');if(!j||!['done','failed'].includes(j.state))return;const lines=j.output||[];for(let i=lines.length-1;i>=0;i--){try{const summary=JSON.parse(lines[i]);if(summary.replay_episode_id&&summary.replay_episode_id!==lastInferenceReplayId){lastInferenceReplayId=summary.replay_episode_id;await loadEpisodes();await selectEpisode('preview:'+summary.replay_episode_id);$('globalStatus').textContent='Inference replay loaded · '+summary.replay_episode_id;}break}catch(e){}}}catch(e){}}
 async function stopLatest(kind){const jobs=await json('/api/jobs');const j=jobs.find(x=>x.kind===kind&&['starting','running','stopping'].includes(x.state));if(j){await json(`/api/jobs/${j.job_id}/stop`,{method:'POST'});await refreshJobs()}}
 async function refreshPreviewProgress(){try{const jobs=await json('/api/jobs');const preview=previewJobId?jobs.find(x=>x.kind==='preview'&&x.job_id===previewJobId):jobs.find(x=>x.kind==='preview'&&['starting','running','stopping'].includes(x.state));if(!preview)return;const p=preview.progress||{};const retry=p.retry?` · attempt ${p.attempted||0} · retry ${p.retry}`:'';const error=p.last_error?` · ${p.last_error}`:'';if(['starting','running'].includes(preview.state))$('globalStatus').textContent=`后台生成示教中 · ${p.completed||0}/${p.total||'?'}${retry}${error}`;else if(preview.state==='stopping')$('globalStatus').textContent=`正在停止示教生成… · ${p.completed||0}/${p.total||'?'}${retry}`;}catch(e){}}
 toggleFailureMode();initParameters();refreshAll();setInterval(refreshAll,3000);setInterval(refreshInferenceReplay,3000);
@@ -122,17 +172,20 @@ def _encode_frame_images(frame):
 def create_app(cfg):
     try:
         from fastapi import FastAPI, HTTPException
-        from fastapi.responses import HTMLResponse
+        from fastapi.responses import FileResponse, HTMLResponse
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("Dashboard dependencies are missing: uv pip install -e '.[web]'") from exc
     from ..config import save_config
     from ..environments.sweep_env import SweepEnv
     from .jobs import JobRegistry, build_inference_argv, build_train_argv
     from .workbench import EpisodeNotFound, FrameNotFound, WorkbenchState
+    from ..act.video import inference_video_root
 
     project_root = Path(__file__).resolve().parents[2]
     app = FastAPI(title="ACT MuJoCo Sweep Workbench")
     app.state.cfg = cfg
+    app.state.inference_video_root = inference_video_root(cfg, project_root)
+    app.state.episode_video_root = app.state.inference_video_root / "workbench_exports"
     app.state.env = None
     app.state.env_lock = RLock()
     dataset_root = Path(str(cfg.act.dataset_dir))
@@ -142,6 +195,10 @@ def create_app(cfg):
         cfg, dataset_root=dataset_root,
         preview_root=project_root / "runs" / "workbench_previews")
     app.state.jobs = JobRegistry(project_root)
+
+    @app.on_event("shutdown")
+    def close_playback_decoder():
+        app.state.workbench.close()
 
     def env():
         if app.state.env is None:
@@ -155,7 +212,19 @@ def create_app(cfg):
         return HTML.replace(
             "100 Hz filtered / raw peak",
             "100 Hz filtered / 1 ms substep peak",
+        ).replace("__INFERENCE_VIDEO_DIR__", escape(str(app.state.inference_video_root))).replace(
+            "__INFERENCE_MODEL__", escape(latest_inference_model(project_root))
         )
+
+    @app.get("/api/inference-videos/{filename}")
+    def inference_video(filename: str):
+        root = app.state.inference_video_root
+        video = (root / filename).resolve()
+        if (filename != Path(filename).name or not filename.startswith("inference_")
+                or video.suffix != ".mp4" or video.parent != root or not video.is_file()):
+            raise HTTPException(status_code=404, detail="inference video not found")
+        return FileResponse(video, media_type="video/mp4", filename=filename,
+                            content_disposition_type="inline")
 
     @app.get("/api/config")
     def config():
@@ -163,6 +232,18 @@ def create_app(cfg):
             "controller.desired_force", "controller.sweep_speed",
             "controller.safe_max_force", "episode.max_time",
             "task.target_count", "act.batch_size"]}
+
+    @app.get("/api/episode-videos/{filename}")
+    def episode_video(filename: str, download: bool = False):
+        root = app.state.episode_video_root.resolve()
+        raw = root / filename
+        video = raw.resolve()
+        if (filename != Path(filename).name or not filename.startswith("episode_")
+                or raw.is_symlink() or video.suffix != ".mp4"
+                or video.parent != root or not video.is_file()):
+            raise HTTPException(status_code=404, detail="episode export not found")
+        return FileResponse(video, media_type="video/mp4", filename=filename,
+                            content_disposition_type="attachment" if download else "inline")
 
     @app.get("/api/health")
     def health():
@@ -428,6 +509,41 @@ def create_app(cfg):
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.post("/api/jobs/video-export")
+    def video_export(payload: dict):
+        from .video_export import export_saved_episode
+        from urllib.parse import quote
+
+        key = payload.get("episode_id")
+        if not isinstance(key, str) or not key:
+            raise HTTPException(status_code=422, detail="select a saved episode first")
+        try:
+            root, record = app.state.workbench.export_source(key)
+            metadata = app.state.workbench.episode_metadata(key)
+        except (EpisodeNotFound, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail="saved episode not found") from exc
+        identity = {"episode_id": record["episode_id"], "playback_id": metadata["playback_id"],
+                    "source": "preview" if metadata["preview"] else "dataset"}
+
+        def run_export(job):
+            progress = dict(identity)
+
+            def update(values):
+                progress.update(values)
+                if values.get("stage") == "complete":
+                    url = "/api/episode-videos/" + quote(Path(values["video_path"]).name, safe="")
+                    progress.update(video_url=url, download_url=url + "?download=true")
+                app.state.jobs.update(job.job_id, progress=progress)
+
+            update({"stage": "validating"})
+            export_saved_episode(root, record, app.state.episode_video_root,
+                                 video_root=app.state.inference_video_root,
+                                 progress=update, cancel_event=job.cancel_event)
+        try:
+            return app.state.jobs.start_callable("video_export", run_export)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/api/jobs/inference")
     def inference(payload: dict):
         try:
@@ -440,11 +556,19 @@ def create_app(cfg):
         if not 1 <= target_count <= 6:
             raise HTTPException(status_code=422,
                                 detail="target_count must be between 1 and 6")
+        model = payload.get("model")
+        if model is not None and not isinstance(model, str):
+            raise HTTPException(status_code=422, detail="model must be a checkpoint path")
+        model = (model or "").strip() or latest_inference_model(project_root)
+        if not model:
+            raise HTTPException(status_code=503,
+                                detail="No complete published checkpoint is available; select an explicit model path")
         preview = bool(payload.get("preview", True))
         argv = build_inference_argv(project_root,
                                     payload.get("config", str(app.state.cfg.get_path("_source_config"))),
-                                    payload.get("seed", app.state.cfg.seed), payload.get("model"),
-                                    target_count, preview=preview)
+                                    payload.get("seed", app.state.cfg.seed), model,
+                                    target_count, preview=preview,
+                                    video_root=app.state.inference_video_root)
         try:
             return app.state.jobs.start("inference", argv)
         except RuntimeError as exc:

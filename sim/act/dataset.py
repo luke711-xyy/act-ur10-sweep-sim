@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import gzip
+import hashlib
+import fcntl
 import os
 import shutil
 import uuid
@@ -81,9 +84,8 @@ class ActDatasetWriter:
 
     def add_episode(self, episode_id: str, observations: list[dict], actions: np.ndarray,
                     success: bool, metadata: dict,
-                    control_trace: list[dict] | None = None) -> Path:
-        from PIL import Image
-
+                    control_trace: list[dict] | None = None,
+                    causal_trace: list[dict] | None = None) -> Path:
         if len(observations) != len(actions):
             raise ValueError("one ACT action target is required per observation")
         action_values = np.asarray(actions, dtype=np.float32)
@@ -100,6 +102,24 @@ class ActDatasetWriter:
                 f"schema v{ACT_SCHEMA_VERSION} ACT state must have shape "
                 f"(frames, {ACT_STATE_DIM}), got {state_values.shape}"
             )
+        return self.add_episode_stream(
+            episode_id, zip(observations, action_values), success, metadata,
+            control_trace=control_trace, causal_trace=causal_trace,
+        )
+
+    def add_episode_stream(self, episode_id: str,
+                           frames: Iterable[tuple[dict, np.ndarray]],
+                           success: bool, metadata: dict,
+                           control_trace: list[dict] | None = None,
+                           causal_trace: list[dict] | None = None) -> Path:
+        """Write one frame at a time, retaining only small numeric telemetry.
+
+        Publication and failure cleanup are identical to the list API. Image
+        writes finish and references are released before requesting a frame.
+        """
+        from PIL import Image
+
+        observations, actions = [], []
         episode_dir = self.root / episode_id
         if episode_dir.exists():
             raise FileExistsError(f"episode directory already exists: {episode_dir}")
@@ -117,7 +137,14 @@ class ActDatasetWriter:
                 )
 
             with ThreadPoolExecutor(max_workers=4) as image_pool:
-                for i, obs in enumerate(observations):
+                i = 0
+                for obs, action in frames:
+                    state = np.asarray(obs["state"], dtype=np.float32)
+                    action = np.asarray(action, dtype=np.float32)
+                    if state.shape != (ACT_STATE_DIM,):
+                        raise ValueError(f"ACT state must have shape ({ACT_STATE_DIM},), got {state.shape}")
+                    if action.shape != (4,):
+                        raise ValueError(f"ACT action must have shape (4,), got {action.shape}")
                     frame_images = _observation_images(obs)
                     if not frame_images:
                         raise ValueError(
@@ -154,7 +181,17 @@ class ActDatasetWriter:
                         ))
                     for image_write in frame_writes:
                         image_write.result()
-            states = state_values
+                    numeric = {key: value for key, value in obs.items()
+                               if key not in {"images", *frame_images}}
+                    numeric["state"] = state.copy()
+                    observations.append(numeric)
+                    actions.append(action.copy())
+                    del obs, image, frame_images, frame_writes, image_write
+                    i += 1
+            if not observations:
+                raise ValueError("an ACT episode must contain at least one observation")
+            states = np.stack([o["state"] for o in observations]).astype(np.float32)
+            action_values = np.asarray(actions, dtype=np.float32)
             env_states = np.stack([o["environment_state"] for o in observations]).astype(np.float32)
             n_frames = len(observations)
 
@@ -314,8 +351,24 @@ class ActDatasetWriter:
                 control_trace_path = str(
                     (episode_dir / "control_trace_100hz.npz").relative_to(self.root)
                 )
+            causal_metadata = {}
+            if causal_trace is not None:
+                trace = list(causal_trace)
+                if not trace:
+                    raise ValueError("causal trace must not be empty")
+                trace_name = "causal_trace_100hz.json.gz"
+                trace_file = temporary_dir / trace_name
+                with gzip.open(trace_file, "wt", encoding="utf-8") as stream:
+                    json.dump(trace, stream, allow_nan=False,
+                              default=lambda value: np.asarray(value).tolist())
+                causal_metadata = {
+                    "causal_trace": str((episode_dir / trace_name).relative_to(self.root)),
+                    "causal_trace_required": True, "causal_trace_rows": len(trace),
+                    "causal_trace_sha256": hashlib.sha256(trace_file.read_bytes()).hexdigest(),
+                }
             metadata = {
                 **metadata,
+                **causal_metadata,
                 "schema_version": ACT_SCHEMA_VERSION,
                 "frame_count": n_frames,
                 "action_dim": 4,
@@ -336,22 +389,33 @@ class ActDatasetWriter:
                     record[legacy_view] = image_views[legacy_view]
 
             # Publish the completed episode directory first, then atomically
-            # replace the manifest.  Readers see either the old manifest or a
-            # complete new record, never a half-written episode.
+            # replace the manifest.  The lock prevents concurrent collector
+            # processes from replacing one another's read-modify-write update.
             temporary_dir.rename(episode_dir)
             final_created = True
-            manifest_contents = self.manifest.read_text(encoding="utf-8") \
-                if self.manifest.exists() else ""
-            manifest_temp = self.root / f".{self.manifest.name}.tmp-{uuid.uuid4().hex}"
-            try:
-                manifest_temp.write_text(
-                    manifest_contents + json.dumps(record, ensure_ascii=False) + "\n",
-                    encoding="utf-8",
-                )
-                manifest_temp.replace(self.manifest)
-            finally:
-                manifest_temp.unlink(missing_ok=True)
-            committed = True
+            lock_path = self.root / f".{self.manifest.name}.lock"
+            with lock_path.open("a+", encoding="utf-8") as lock_handle:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    if self.manifest.exists():
+                        manifest_contents = self.manifest.read_text(encoding="utf-8")
+                    else:
+                        manifest_contents = ""
+                    manifest_temp = self.root / (
+                        f".{self.manifest.name}.tmp-{uuid.uuid4().hex}"
+                    )
+                    try:
+                        manifest_temp.write_text(
+                            manifest_contents
+                            + json.dumps(record, ensure_ascii=False) + "\n",
+                            encoding="utf-8",
+                        )
+                        manifest_temp.replace(self.manifest)
+                    finally:
+                        manifest_temp.unlink(missing_ok=True)
+                    committed = True
+                finally:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
             return episode_dir
         finally:
             if temporary_dir.exists():
@@ -421,6 +485,14 @@ class ActDataset:
                 self.index.extend((len(self.index), rec, i)
                                   for i in np.flatnonzero(valid))
 
+    def _indexed_frames_by_episode(self):
+        frames = {}
+        for item_index, (_, record, frame_id) in enumerate(self.index):
+            frames.setdefault(record["episode_id"], []).append(
+                (item_index, frame_id)
+            )
+        return frames
+
     def phase_sampling_weights(self, approach_fraction: float = 0.35) -> np.ndarray:
         """Return normalized weights for 35/65 phase-stratified sampling.
 
@@ -434,17 +506,24 @@ class ActDataset:
         if not 0.0 < fraction < 1.0:
             raise ValueError("approach_fraction must be strictly between zero and one")
         approach_ids, contact_ids = [], []
-        for item_index, (_, record, frame_id) in enumerate(self.index):
-            with np.load(self.root / record["arrays"], mmap_mode="r") as arrays:
-                phase = str(arrays["phase"][frame_id])
-            if phase in {"approach", "descent"}:
-                approach_ids.append(item_index)
-            elif phase in {"contact_build", "sweep"}:
-                contact_ids.append(item_index)
-            else:
-                raise ValueError(
-                    f"valid ACT frame has unsupported training phase {phase!r}"
-                )
+        indexed_frames = self._indexed_frames_by_episode()
+        for record in self.records:
+            record_frames = indexed_frames.get(record["episode_id"], [])
+            if not record_frames:
+                continue
+            frame_ids = [frame_id for _, frame_id in record_frames]
+            with np.load(self.root / record["arrays"]) as arrays:
+                phases = arrays["phase"][frame_ids]
+            for (item_index, _), raw_phase in zip(record_frames, phases):
+                phase = str(raw_phase)
+                if phase in {"approach", "descent"}:
+                    approach_ids.append(item_index)
+                elif phase in {"contact_build", "sweep"}:
+                    contact_ids.append(item_index)
+                else:
+                    raise ValueError(
+                        f"valid ACT frame has unsupported training phase {phase!r}"
+                    )
         if not approach_ids or not contact_ids:
             raise ValueError("phase-balanced sampling needs both approach and contact frames")
         weights = np.zeros(len(self.index), dtype=np.float64)
@@ -548,15 +627,24 @@ class ActDataset:
         if not self.index:
             raise ValueError("ACT dataset has no valid behavior-cloning frames")
         vectors = {"observation.state": [], "observation.environment_state": [], "action": []}
-        for _, record, frame_id in self.index:
-            with np.load(self.root / record["arrays"], mmap_mode="r") as arrays:
-                vectors["observation.state"].append(np.asarray(arrays["state"][frame_id], dtype=np.float32))
-                vectors["observation.environment_state"].append(
-                    np.asarray(arrays["environment_state"][frame_id], dtype=np.float32)
-                )
-                vectors["action"].append(np.asarray(arrays["action"][frame_id], dtype=np.float32))
+        indexed_frames = self._indexed_frames_by_episode()
+        for record in self.records:
+            record_frames = indexed_frames.get(record["episode_id"], [])
+            if not record_frames:
+                continue
+            frame_ids = [frame_id for _, frame_id in record_frames]
+            with np.load(self.root / record["arrays"]) as arrays:
+                vectors["observation.state"].append(np.asarray(
+                    arrays["state"][frame_ids], dtype=np.float32
+                ))
+                vectors["observation.environment_state"].append(np.asarray(
+                    arrays["environment_state"][frame_ids], dtype=np.float32
+                ))
+                vectors["action"].append(np.asarray(
+                    arrays["action"][frame_ids], dtype=np.float32
+                ))
         self._stats = {
-            key: self._vector_stats(np.stack(values, axis=0))
+            key: self._vector_stats(np.concatenate(values, axis=0))
             for key, values in vectors.items()
         }
         self._stats.update(self._compute_image_stats(self.records))

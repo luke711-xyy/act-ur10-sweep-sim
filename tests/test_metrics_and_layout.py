@@ -5,7 +5,9 @@ import pytest
 
 from sim.config import load_config
 from sim.controllers.hybrid import ControlRecord
-from sim.environments.layout import in_safe_workspace, in_target_region, sample_layout
+from sim.environments.layout import (
+    _sample_cluster, in_safe_workspace, in_target_region, sample_layout,
+)
 from sim.metrics import aggregate, compute_episode_metrics, paired_comparison
 
 
@@ -94,8 +96,11 @@ def test_layout_is_reproducible_for_a_seed(cfg):
     assert [i["x"] for i in a] != [i["x"] for i in c]
 
 
-def test_layout_never_starts_inside_the_target(cfg):
-    cfg.set_path("components.count", 10)
+@pytest.mark.parametrize("distribution,count", [("legacy", 10), ("uniform_disk", 6)])
+def test_layout_never_starts_inside_the_target(cfg, distribution, count):
+    # Keep the historical ten-part fixture and the formal six-part ACT task.
+    cfg.set_path("components.cluster.center_distribution", distribution)
+    cfg.set_path("components.count", count)
     for seed in range(25):
         layout = sample_layout(cfg, np.random.default_rng(seed))
         xy = np.array([[i["x"], i["y"]] for i in layout])
@@ -103,8 +108,40 @@ def test_layout_never_starts_inside_the_target(cfg):
         assert in_safe_workspace(xy, cfg.workspace).all()
 
 
-def test_layout_respects_minimum_separation(cfg):
-    cfg.set_path("components.count", 10)
+def test_default_cluster_centre_stays_in_the_area_uniform_disk(cfg):
+    """Only the latent group centre is in the disk, not each part offset."""
+    centres = []
+    for seed in [988808167, *range(512)]:
+        centre, _ = _sample_cluster(cfg, np.random.default_rng(seed))
+        centres.append(centre)
+        assert np.linalg.norm(centre - [0.05, 0.0]) <= 0.10 + 1e-12
+    assert np.ptp(np.asarray(centres)[:, 0]) > 0.18
+    assert np.asarray(centres)[:, 0].min() < -0.04
+
+
+def test_default_cluster_parts_can_extend_beyond_the_cluster_centre_limit(cfg):
+    """Part offsets extend beyond centre support while respecting new bounds."""
+    extends_past_centre_limit = False
+    for seed in [988808167, *range(128)]:
+        layout = sample_layout(cfg, np.random.default_rng(seed))
+        assert layout == sample_layout(cfg, np.random.default_rng(seed))
+        xy = np.array([[item["x"], item["y"]] for item in layout])
+        assert len(layout) == 6
+        assert np.all((-0.19 <= xy[:, 0]) & (xy[:, 0] <= 0.29))
+        assert np.all((cfg.components.spawn.x_min <= xy[:, 0])
+                      & (xy[:, 0] <= cfg.components.spawn.x_max))
+        assert np.all(np.abs(xy[:, 1]) <= 0.26)
+        distances = np.linalg.norm(xy[:, None, :] - xy[None, :, :], axis=-1)
+        np.fill_diagonal(distances, np.inf)
+        assert distances.min() >= 0.07 - 1e-12
+        extends_past_centre_limit |= bool(np.any(xy[:, 0] > 0.15))
+    assert extends_past_centre_limit
+
+
+@pytest.mark.parametrize("distribution,count", [("legacy", 10), ("uniform_disk", 6)])
+def test_layout_respects_minimum_separation(cfg, distribution, count):
+    cfg.set_path("components.cluster.center_distribution", distribution)
+    cfg.set_path("components.count", count)
     layout = sample_layout(cfg, np.random.default_rng(1))
     xy = np.array([[i["x"], i["y"]] for i in layout])
     d = np.linalg.norm(xy[:, None, :] - xy[None, :, :], axis=-1)
@@ -124,7 +161,7 @@ def test_layout_randomises_mass_friction_and_orientation(cfg):
     assert len({round(i["yaw"], 6) for i in layout}) > 1
 
 
-@pytest.mark.parametrize("count", [1, 2, 3, 5, 10])
+@pytest.mark.parametrize("count", [1, 2, 3, 5, 6, 10])
 def test_all_required_component_counts_can_be_placed(cfg, count):
     cfg.set_path("components.count", count)
     assert len(sample_layout(cfg, np.random.default_rng(0))) == count

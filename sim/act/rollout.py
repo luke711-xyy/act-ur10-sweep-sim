@@ -18,6 +18,10 @@ from ..controllers.hybrid import Command
 from ..config import Config
 from ..environments.sweep_env import SweepEnv
 from .expert import (ExpertPlan, expert_plan_candidates,
+                      expert_landing_x_min, expert_validate_landing_pose,
+                      expert_validate_landing_alignment,
+                      expert_plan_landing_configuration,
+                      expert_selection_audit,
                       _tray_exit_x, contact_home_xy, expert_recovery_waypoints,
                       plan_expert_sweep, sample_polyline)
 from .interface import ACTObservationBuilder
@@ -59,50 +63,51 @@ class ActRolloutResult:
     planner_attempts: int = 0
     failure_mode: str = ""
     termination_reason: str = ""
+    # Inference achievement is the largest simultaneous full-entry count.
+    # Keep the physical terminal count separate; expert results leave these
+    # optional fields unset and retain their historical final-count contract.
+    peak_collected: int | None = None
+    final_collected: int | None = None
+    first_entry_time: float | None = None
+    collection_window_seconds: float | None = None
+    expert_landing_region: dict | None = None
 
 
 @dataclass
 class CollectionTerminationTracker:
-    """Track inference-only collection timers from full-entry transitions.
+    """Stop at an exact goal or a fixed window after the first full entry.
 
-    The tracker never inspects brush depth.  It observes only the complete
-    object-in-tray mask, so ACT keeps producing normal actions while either
-    timer is running.  The target timer takes precedence over the no-new-entry
-    timer when both become due on the same control step.
+    Later entries, exits and re-entries never reset the simulated-time window.
+    The peak is simultaneous, not a sum of historical object identities.
     """
 
     target_count: int
-    target_hold_seconds: float = 2.0
-    stall_timeout_seconds: float = 3.0
+    window_seconds: float = 2.0
     previous_mask: np.ndarray | None = field(default=None, repr=False)
-    last_entry_time: float | None = None
-    target_reached_time: float | None = None
+    first_entry_time: float | None = None
+    peak_collected: int = 0
 
-    def update(self, collected_mask: np.ndarray, now: float) -> str:
+    def update(self, collected_mask: np.ndarray, now: float,
+               partial_overlap_mask: np.ndarray | None = None) -> str:
         mask = np.asarray(collected_mask, dtype=bool).reshape(-1)
-        if self.previous_mask is None:
-            newly_entered = mask
-        else:
-            if self.previous_mask.shape != mask.shape:
-                raise ValueError("collection mask shape changed during an episode")
-            newly_entered = mask & ~self.previous_mask
-
-        if np.any(newly_entered):
-            self.last_entry_time = float(now)
+        if self.previous_mask is not None and self.previous_mask.shape != mask.shape:
+            raise ValueError("collection mask shape changed during an episode")
         collected = int(mask.sum())
-        if (collected >= int(self.target_count)
-                and self.target_reached_time is None):
-            self.target_reached_time = float(now)
+        self.peak_collected = max(self.peak_collected, collected)
+        if collected and self.first_entry_time is None:
+            self.first_entry_time = float(now)
         self.previous_mask = mask.copy()
 
-        if (self.target_reached_time is not None
-                and float(now) - self.target_reached_time
-                >= float(self.target_hold_seconds)):
-            return "target count hold elapsed"
-        if (self.last_entry_time is not None
-                and float(now) - self.last_entry_time
-                >= float(self.stall_timeout_seconds)):
-            return "collection stalled for 3 seconds"
+        exact_goal, _ = collection_goal_status(
+            mask, None, self.target_count,
+            partial_overlap_mask=partial_overlap_mask,
+        )
+        if exact_goal:
+            return "exact target count reached"
+        if (self.first_entry_time is not None
+                and float(now) - self.first_entry_time
+                >= float(self.window_seconds) - 1e-9):
+            return "2-second collection window elapsed"
         return ""
 
 
@@ -353,6 +358,10 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
     peak_raw_force = 0.0
     overforce_steps = 0
     contact_loss_steps = 0
+    release_height_guard_on_exact_count = (
+        contact_z_mode == "expert_admittance" and not failure_mode
+        and bool(cfg.get_path("episode.expert_height_guard_until_exact_count", False)))
+    height_guard_released = False
     path_length = 0.0
     previous_xy = env.tcp()[:2].copy()
     failure = ""
@@ -374,7 +383,7 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
     completion_target_count = target_count
     if failure_mode in {"wrong_count_over", "wrong_count_under"}:
         completion_target_count = len(selected_indices)
-    initial_object_positions = np.asarray(env.component_positions(), dtype=np.float32).copy()
+    initial_object_positions = np.asarray(env.component_positions(), dtype=np.float64).copy()
     max_frames = max(1, int(cfg.episode.get("max_frames", 500)))
     sampled_frames = 0
     brush_inside_time = 0.0
@@ -636,6 +645,11 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                 if hard_failure:
                     failure = hard_failure
                     break
+                # The user-reviewed expert policy releases only the geometric
+                # height check after exact full collection. Keep it latched for
+                # this episode; delivery, stability and other safety gates stay.
+                if release_height_guard_on_exact_count and goal_reached:
+                    height_guard_released = True
                 if goal_reached and failure_mode and not do_not_stop_on_goal:
                     break
             if brush_inside_timeout_reached and (not goal_reached or failure_mode):
@@ -656,7 +670,8 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                     contact_hold_tolerance += abs(float(cfg.controller.delta_z_limit))
                 contact_loss_steps = (
                     contact_loss_steps + 1
-                    if (contact and float(tcp[2]) > geometric_contact_z
+                    if (not height_guard_released and contact
+                        and float(tcp[2]) > geometric_contact_z
                         + contact_hold_tolerance) else 0)
             elif admittance_active and post_force < float(cfg.controller.release_threshold):
                 contact_loss_steps += 1
@@ -849,8 +864,10 @@ def _expert_execution_path(cfg, plan: ExpertPlan,
                            failure_seed: int = 0,
                            table_top_z: float | None = None) -> tuple[np.ndarray, list[str]]:
     """Build the supervisor phases for one geometric expert candidate."""
+    cfg = expert_plan_landing_configuration(cfg, plan)
     home = contact_home_xy(cfg).astype(float)
     waypoints = np.asarray(plan.waypoints, dtype=float)
+    landing_boundary = expert_landing_x_min(cfg)
     if (failure_mode in {"stall_outside_tray", "wrong_count_under"}
             and not len(plan.target_indices) and len(waypoints)):
         # The n=1 boundary has no positive partial target set.  Preserve a
@@ -867,13 +884,25 @@ def _expert_execution_path(cfg, plan: ExpertPlan,
         # remains reproducible while producing both route variants.
         side = -1.0 if int(failure_seed) % 2 else 1.0
         waypoints = waypoints.copy()
-        waypoints[1:, 1] = np.clip(
-            waypoints[1:, 1] + side * 0.14,
+        shift_from = (2 if landing_boundary is not None
+                      and np.allclose(waypoints[0], home) else 1)
+        waypoints[shift_from:, 1] = np.clip(
+            waypoints[shift_from:, 1] + side * 0.14,
             float(cfg.workspace.y_min) + 0.03,
             float(cfg.workspace.y_max) - 0.03,
         )
     points = (waypoints if len(waypoints) and np.allclose(waypoints[0], home)
               else np.vstack((home, waypoints)))
+    if landing_boundary is not None:
+        if len(points) < 2:
+            raise ValueError("expert candidate has no landing waypoint")
+        expert_validate_landing_pose(cfg, points[1], float(plan.yaw_offset))
+        expert_validate_landing_alignment(cfg, points[1:],
+            curve_radius=(0.0 if plan.strategy == "coverage_astar" else
+                          float(cfg.get_path("planner.expert_corner_radius", 0.025))))
+        desired_yaw = float(cfg.get_path("task.expert_landing_yaw", 0.0))
+        if abs(_angle_delta(float(plan.yaw_offset), desired_yaw)) > 1e-7:
+            raise ValueError("expert candidate does not match landing yaw")
     # Keep the brush at the reset height during the lateral transfer, then
     # descend vertically at the first sweep lane.  Building this as three
     # explicit phases prevents the contact search from sliding past the parts
@@ -921,6 +950,9 @@ def _expert_execution_path(cfg, plan: ExpertPlan,
     sweep = sample_polyline(
         points[1:], hz, float(cfg.controller.sweep_speed),
         yaw_rate=yaw_rate, initial_yaw=first_yaw, accel=accel,
+        align_initial_yaw=(cfg.get_path("task.expert_landing_clearance", None) is not None
+                           and cfg.get_path("task.expert_landing_selection", "waypoint_minimum")
+                           == "path_intersection"),
         curve_radius=curve_radius,
         terminal_speed=(
             float(cfg.controller.get("tray_entry_speed", cfg.controller.sweep_speed))
@@ -957,6 +989,8 @@ def _annotate_expert_result(result: ActRolloutResult, plan: ExpertPlan,
     result.planner_turn_count = int(plan.turn_count)
     result.planner_score = float(plan.score)
     result.planner_attempts = int(attempts)
+    result.expert_landing_region = (dict(plan.landing_region)
+                                   if plan.landing_region is not None else None)
     if not plan.feasible:
         # A safe probe must never inherit a generic count failure and look like
         # an executed expert sweep.
@@ -1140,6 +1174,15 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
                 yield screened
 
     def outcome_matches(result):
+        if not failure_mode and result.success and len(probe.layout) == 6:
+            try:
+                expert_selection_audit(result, planning_cfg, requested_target_count)
+            except RuntimeError as exc:
+                # Keep the generic exact-count success contract unchanged.
+                # Only this expert candidate is ineligible as a demonstration.
+                result.success = False
+                result.failure_reason = str(exc)
+                return False
         return (
             (not failure_mode and result.success)
             or (failure_mode == "wrong_count_over"
@@ -1168,6 +1211,7 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
                 turn_count=plan.turn_count,
                 strategy=plan.strategy,
                 yaw_offset=plan.yaw_offset,
+                landing_region=plan.landing_region,
             )
         prepared.append((plan, attempt))
 
@@ -1214,9 +1258,9 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
         for batch in screened_batches(
                 [(plan, attempt) for attempt, plan in fallback_items]):
             for plan, fallback_index, result in batch:
-                if result.success and collect_observations:
+                if outcome_matches(result) and collect_observations:
                     result = execute(plan, fallback_index, True)
-                if result.success:
+                if outcome_matches(result):
                     return result
                 key = (int(result.unexpected_collected > 0),
                        abs(int(result.target_count) - int(result.target_collected)),

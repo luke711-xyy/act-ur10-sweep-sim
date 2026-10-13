@@ -248,19 +248,14 @@ class UR10CB3EndEffector(CartesianEndEffector):
                 self.model, self.data, self._mujoco.mjtObj.mjOBJ_BODY,
                 body_id, velocity, 0)
 
-            # MuJoCo's spatial acceleration is centered at the body origin;
-            # shift its linear component to the body's inertial COM.
-            body_origin = np.asarray(self.data.xpos[body_id], dtype=float)
+            # mjOBJ_BODY acceleration/velocity are already centered at the
+            # inertial COM (xipos), unlike mjOBJ_XBODY at the body origin.
+            # Adding alpha x r or omega x (omega x r) here would count the
+            # COM's rotationally induced linear acceleration a second time.
             center = np.asarray(self.data.xipos[body_id], dtype=float)
-            center_offset = center - body_origin
             omega = velocity[:3]
             alpha = acceleration[:3]
-            center_acceleration = (
-                acceleration[3:]
-                + np.cross(alpha, center_offset)
-                + np.cross(omega, np.cross(omega, center_offset))
-            )
-            force = mass * center_acceleration
+            force = mass * acceleration[3:]
 
             inertial_frame = np.asarray(
                 self.data.ximat[body_id], dtype=float).reshape(3, 3)

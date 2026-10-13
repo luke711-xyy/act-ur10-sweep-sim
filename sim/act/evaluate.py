@@ -23,8 +23,10 @@ from .rollout import (
     _force_loop,
     _overforce_relief_loop,
     collection_goal_status,
-    collection_step_status,
 )
+
+
+INFERENCE_MAX_FRAMES = 2000
 
 
 def _resolve_model_path(model_path: str | None) -> str | None:
@@ -141,7 +143,7 @@ def _contact_z_command(cfg, admittance, z_nominal: float,
 
 
 def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
-                    preview: bool = False) -> ActRolloutResult:
+                    preview: bool = False, capture_replay: bool = False) -> ActRolloutResult:
     """Run one causal, full-episode ACT policy from the fixed reset pose.
 
     No geometric planner, object position, target identity, or supervisor
@@ -152,6 +154,14 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
     """
     env = SweepEnv(cfg, seed=seed)
     env.reset(seed=seed)
+    if capture_replay:
+        import mujoco
+        state_spec = mujoco.mjtState.mjSTATE_INTEGRATION
+        state_size = mujoco.mj_stateSize(env.model, state_spec)
+        # Separate history: audit capture must not advance the policy builder.
+        replay_builder = ACTObservationBuilder(cfg)
+        initial_object_poses = np.concatenate((
+            env.component_positions(), env.component_quats()), axis=1).astype("<f4")
     total = len(env.layout)
     if total <= 0:
         env.close()
@@ -205,24 +215,31 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
     issued_at = 0.0
     scheduler_queries = 0
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="act-inference")
-    failure = ""
     peak_force = 0.0
-    overforce_steps = 0
-    path_length = 0.0
-    previous_xy = env.tcp()[:2].copy()
-    max_frames = max(1, int(cfg.episode.get("max_frames", 500)))
+    max_frames = INFERENCE_MAX_FRAMES
     sampled_frames = 0
-    collection_tracker = CollectionTerminationTracker(
-        target_count=target_count,
-        target_hold_seconds=float(cfg.episode.get(
-            "inference_target_hold_time", 2.0)),
-        stall_timeout_seconds=float(cfg.episode.get(
-            "inference_collection_stall_timeout", 3.0)),
-    )
     termination_reason = ""
+    collection_timer = CollectionTerminationTracker(target_count=target_count)
     contact_time: float | None = None
-    contact_loss_steps = 0
     first_contact_position = None
+
+    def capture_state(row):
+        if not capture_replay:
+            return
+        state = np.empty(state_size, dtype=np.float64)
+        mujoco.mj_getState(env.model, env.data, state, state_spec)
+        row.update({
+            "replay_state": {"spec": int(state_spec), "values": state},
+            "object_collected": np.asarray(env.collected_mask(), dtype=bool).copy(),
+            "wrench": np.asarray(env.wrench(), dtype=np.float64).copy(),
+            "raw_normal_force": float(env.raw_normal_force()),
+            "compensated_normal_force_raw": float(env.compensated_normal_force_raw()),
+            "tcp_pose": np.array([*env.tcp(), env.ee.tcp_yaw()], dtype=np.float64),
+            "object_pose": np.concatenate((env.component_positions(),
+                                           env.component_quats()), axis=1),
+            "replay_observation": replay_builder.observe(
+                env, contact_latched=contact, include_images=False),
+        })
 
     def predict(observation, start_reference):
         import torch
@@ -246,10 +263,7 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
         return action_deltas_to_absolute(start_reference, deltas[0])
 
     try:
-        while env.time < float(cfg.episode.max_time):
-            if sampled_frames >= max_frames:
-                failure = "episode frame limit reached"
-                break
+        while sampled_frames < max_frames:
             if pending is None and scheduler.query_due(env.time):
                 obs = builder.observe(env, contact_latched=contact)
                 if len(observations) < 2000:
@@ -272,22 +286,30 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                     values = pending.result()
                     accepted = scheduler.accept(issued_at, values, env.time)
                     if not accepted:
-                        failure = ("ACT inference missed 200 ms deadline"
-                                   if not preview else
-                                   "ACT inference chunk expired before preview result arrived")
-                        break
-                except Exception as exc:  # surface a concise rollout failure
-                    failure = f"ACT inference failed: {exc}"
-                    break
+                        # Expired chunks are discarded; the last valid absolute
+                        # pose remains the command until a later prediction lands.
+                        pass
+                except Exception:
+                    # A policy/runtime prediction error is non-terminal. Clear
+                    # this future and keep the last valid command while the
+                    # next scheduled query is attempted.
+                    pass
                 pending = None
 
-            action = scheduler.action_for(env.time)
+            try:
+                action = scheduler.action_for(env.time)
+            except Exception:
+                action = None
             if action is None:
-                # A missed chunk is held at the latest safe absolute pose.
+                # Missing, late, or invalid policy output holds the last valid
+                # reference rather than ending the rollout.
                 action = last_action.copy()
-            action = np.asarray(action, dtype=np.float32)
-            if action.shape != (4,):
-                raise ValueError(f"executor action must have shape (4,), got {action.shape}")
+            try:
+                action = np.asarray(action, dtype=np.float32)
+            except Exception:
+                action = last_action.copy()
+            if action.shape != (4,) or not np.all(np.isfinite(action)):
+                action = last_action.copy()
             action[0] = np.clip(action[0], float(cfg.workspace.x_min), float(cfg.workspace.x_max))
             action[1] = np.clip(action[1], float(cfg.workspace.y_min), float(cfg.workspace.y_max))
             action[2] = np.clip(action[2], float(cfg.workspace.z_search_min),
@@ -335,9 +357,35 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                 x, y, z, yaw = (float(value) for value in reference)
                 try:
                     env.step_control(Command(x, y, z, yaw))
-                except (RuntimeError, ValueError) as exc:
-                    failure = f"ACT reference failed IK or collision validation: {exc}"
-                    break
+                except Exception:
+                    # Rejecting a policy reference (for example, unreachable
+                    # IK or collision validation) is also non-terminal. Hold
+                    # the measured pose; if even that command is rejected,
+                    # count the outer inference frame and try again next frame.
+                    try:
+                        tcp = np.asarray(env.tcp(), dtype=np.float32).reshape(3)
+                        hold_yaw = float(env.ee.tcp_yaw())
+                        env.step_control(Command(
+                            float(tcp[0]), float(tcp[1]), float(tcp[2]), hold_yaw
+                        ))
+                    except Exception as rejected:
+                        if capture_replay:
+                            row = {"t": env.time, "tcp": env.tcp().copy(),
+                                   "command": np.array([x, y, z, yaw], dtype=np.float32),
+                                   "policy_reference": action.copy(), "policy_z": float(action[2]),
+                                   "applied_z": float(z), "phase": phase,
+                                   "z_owner": "admittance" if frame_contact_at_start else "policy",
+                                   "normal_force": float(env.normal_force()), "contact": contact,
+                                   "collected": int(env.collected_mask().sum()),
+                                   "control_step_advanced": False,
+                                   "rejection_error": f"{type(rejected).__name__}: {rejected}"}
+                            capture_state(row)
+                            trace.append(row)
+                        final_reference = last_action.copy()
+                        continue
+                    x, y, z, yaw = (float(tcp[0]), float(tcp[1]),
+                                    float(tcp[2]), hold_yaw)
+                    reference = np.array([x, y, z, yaw], dtype=np.float32)
                 post_force = float(env.normal_force())
                 peak_force = max(peak_force, post_force)
                 tcp = env.tcp()
@@ -350,9 +398,6 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                         overforce_relief.reset()
                         contact_time = float(env.time)
                         first_contact_position = np.asarray(tcp, dtype=np.float32).copy()
-                if contact:
-                    path_length += float(np.linalg.norm(tcp[:2] - previous_xy))
-                previous_xy = tcp[:2].copy()
                 final_reference = reference.copy()
                 collected_mask = np.asarray(env.collected_mask(), dtype=bool).copy()
                 trace.append({"t": env.time, "tcp": tcp.copy(),
@@ -366,75 +411,54 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                               "normal_force": post_force, "contact": contact,
                               "collected": int(collected_mask.sum()),
                               "phase": phase})
-                if contact:
-                    collection_step_status(
-                        collected_mask, None, target_count,
-                        partial_overlap_mask=env.partial_collection_overlap_mask(),
-                        stop_on_contract_violation=False,
-                    )
-                pending_stop = collection_tracker.update(collected_mask, env.time)
-                if contact and post_force > float(cfg.controller.safe_max_force):
-                    overforce_steps += 1
-                else:
-                    overforce_steps = 0
-                if contact and overforce_steps >= int(cfg.controller.get("safe_force_dwell_steps", 3)):
-                    failure = "normal force exceeded safety threshold"
-                    break
-                if contact and post_force < float(cfg.controller.release_threshold):
-                    contact_loss_steps += 1
-                else:
-                    contact_loss_steps = 0
-                if contact_loss_steps >= max(1, int(round(
-                        0.1 * float(cfg.sim.control_hz)))):
-                    failure = "contact lost for 100 ms"
-                    break
-                if path_length > float(cfg.episode.max_contact_path):
-                    failure = "contact path exceeded limit"
-                    break
-                unsafe_collision = getattr(env, "unsafe_robot_collision", None)
-                if callable(unsafe_collision) and unsafe_collision():
-                    failure = "unsafe robot collision"
-                    break
-                if np.any(env.lost_mask()):
-                    failure = "component left the safe workspace"
-                    break
-                if pending_stop:
-                    termination_reason = pending_stop
+                capture_state(trace[-1])
+                # Observe every physical control step, not only 25 Hz image
+                # frames: a transient full entry must start the deadline and
+                # contribute to the achievement count even if it later exits.
+                termination_reason = collection_timer.update(
+                    collected_mask, float(env.time),
+                    partial_overlap_mask=env.partial_collection_overlap_mask(),
+                )
+                if termination_reason:
                     break
             # Keep the same 25 Hz state-history cadence used by expert
             # demonstrations even though ACT is queried only at 5 Hz.
             builder.advance_state_history(env, contact_latched=contact)
             last_action = final_reference.astype(np.float32, copy=True)
             sampled_frames += 1
-            if failure or termination_reason:
+
+            if termination_reason:
                 break
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        # A terminal scene can still have a running prediction. Drain it before
+        # the CLI releases its process lease; cancellation only stops queued work.
+        executor.shutdown(wait=True, cancel_futures=True)
 
-    collected = int(env.collected_mask().sum())
-    exact_goal, exact_reason = collection_goal_status(
-        env.collected_mask(), None, target_count,
+    final_mask = np.asarray(env.collected_mask(), dtype=bool).copy()
+    final_collected = int(final_mask.sum())
+    collected = int(collection_timer.peak_collected)
+    exact_goal, goal_reason = collection_goal_status(
+        final_mask, None, target_count,
         partial_overlap_mask=env.partial_collection_overlap_mask()
     )
-    if not failure and not contact:
-        failure = "contact was not established"
-    if not failure and not exact_goal:
-        failure = (f"{termination_reason}: {exact_reason}"
-                   if termination_reason and exact_reason
-                   else exact_reason or "target count was not collected")
-    if not failure and not termination_reason:
-        failure = "inference termination condition not reached"
-    result = ActRolloutResult(success=not failure and exact_goal
-                              and bool(termination_reason) and total > 0,
-                              failure_reason=failure,
+    success = bool(exact_goal and termination_reason == "exact target count reached"
+                   and total > 0)
+    failure_reason = ("" if success else
+                      f"{termination_reason}: {goal_reason}" if termination_reason else
+                      f"{max_frames}-frame timeout before task completion")
+    result = ActRolloutResult(success=success,
+                              failure_reason=failure_reason,
                               observations=observations,
                               actions=np.asarray(actions, dtype=np.float32),
                               trace=trace, collected=collected, total=total,
                               target_count=target_count,
                               target_collected=collected,
                               unexpected_collected=max(0, collected - target_count),
-                              final_collected_mask=np.asarray(
-                                  env.collected_mask(), dtype=bool).copy(),
+                              final_collected_mask=final_mask,
+                              peak_collected=collected,
+                              final_collected=final_collected,
+                              first_entry_time=collection_timer.first_entry_time,
+                              collection_window_seconds=collection_timer.window_seconds,
                               elapsed=float(env.time),
                               scheduler_queries=scheduler_queries,
                               scheduler_timeouts=int(scheduler.timeouts),
@@ -447,6 +471,8 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                                   if first_contact_position is not None
                                   else None))
     env.close()
+    if capture_replay:
+        result.initial_object_poses = initial_object_poses
     return result
 
 
@@ -460,12 +486,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--record-replay", action="store_true",
                         help="save a completed rollout for workbench playback")
     parser.add_argument("--replay-root", default="runs/workbench_previews")
+    parser.add_argument("--replay-image-format", choices=("png", "webp-lossless"),
+                        default="png", help="saved replay encoding, not policy input encoding")
+    parser.add_argument("--video-root", default=None,
+                        help="automatic MP4 directory (defaults to workbench configuration)")
+    parser.add_argument("--defer-video", action="store_true",
+                        help="publish replay for a batch media worker; retain its frame images")
     parser.add_argument("--preview", action="store_true",
                         help="allow late inference and align chunks for simulation preview")
     return parser
 
 
-def main(argv=None) -> int:
+def _run_main(argv=None) -> int:
     from ..config import load_config
 
     parser = build_arg_parser()
@@ -475,32 +507,96 @@ def main(argv=None) -> int:
     cfg = load_config(args.config)
     if args.target_count is not None:
         cfg.set_path("task.target_count", args.target_count)
-    result = run_act_episode(cfg, seed=args.seed, model_path=args.model,
-                             preview=args.preview)
+    # Snapshot latest once, before loading; a concurrent trainer can update the
+    # pointer while inference or video export is running.
+    resolved_model = _resolve_model_path(args.model)
+    if resolved_model:
+        resolved_model = str(Path(resolved_model).resolve())
+    result = run_act_episode(cfg, seed=args.seed, model_path=resolved_model,
+                             preview=args.preview, capture_replay=args.record_replay)
+    physical_summary = {"success": result.success, "reason": result.failure_reason,
+                        "collected": result.collected, "target_count": result.target_count,
+                        "peak_collected": (result.collected if getattr(
+                            result, "peak_collected", None) is None else result.peak_collected),
+                        "final_collected": (result.collected if getattr(
+                            result, "final_collected", None) is None else result.final_collected),
+                        "first_entry_time": getattr(result, "first_entry_time", None),
+                        "collection_window_seconds": getattr(
+                            result, "collection_window_seconds", None),
+                        "total": result.total, "elapsed": result.elapsed,
+                        "scheduler_actions": len(result.actions),
+                        "scheduler_queries": result.scheduler_queries,
+                        "scheduler_timeouts": result.scheduler_timeouts,
+                        "scheduler_late_results": result.scheduler_late_results,
+                        "peak_force": result.peak_force,
+                        "termination_reason": result.termination_reason,
+                        "preview": bool(args.preview),
+                        "model_checkpoint": resolved_model}
     replay_episode_id = None
     replay_error = ""
+    video_path = None
+    video_error = ""
+    frame_images_deleted = False
+    image_cleanup_error = ""
+    replay_input_path = None
     if args.record_replay:
+        # Replay uses the causal command trace, not the cached query images.
+        # Release those after inference, before rendering another five views.
+        if getattr(result, "observations", None) is not None:
+            result.observations.clear()
         try:
-            from .replay import save_inference_replay
+            from .replay import persist_replay_input, save_inference_replay
+
+            replay_input_path = str(persist_replay_input(
+                cfg, args.seed, result, args.replay_root, model=resolved_model))
+            print(json.dumps({**physical_summary, "event": "physical_result_saved",
+                              "replay_input_path": replay_input_path}, ensure_ascii=False), flush=True)
 
             replay_episode_id = save_inference_replay(
-                cfg, args.seed, result, args.replay_root, model=args.model
+                cfg, args.seed, result, args.replay_root, model=resolved_model,
+                image_format=args.replay_image_format,
             )
         except Exception as exc:  # keep the physical result visible if replay fails
             replay_error = f"{type(exc).__name__}: {exc}"
-    print(json.dumps({"success": result.success, "reason": result.failure_reason,
-                      "collected": result.collected, "target_count": result.target_count,
-                      "total": result.total, "elapsed": result.elapsed,
-                      "scheduler_actions": len(result.actions),
-                      "scheduler_queries": result.scheduler_queries,
-                      "scheduler_timeouts": result.scheduler_timeouts,
-                      "scheduler_late_results": result.scheduler_late_results,
-                      "peak_force": result.peak_force,
-                      "termination_reason": result.termination_reason,
-                      "preview": bool(args.preview),
+        if replay_episode_id:
+            # JobRegistry persists stdout as it arrives. Make the physical
+            # outcome visible even while a later encoder is running/failing.
+            print(json.dumps({**physical_summary, "event": "inference_result",
+                              "replay_episode_id": replay_episode_id,
+                              "replay_error": replay_error}, ensure_ascii=False), flush=True)
+        if replay_episode_id and not args.defer_video:
+            try:
+                from .video import export_inference_video, inference_video_root
+
+                output_root = args.video_root or inference_video_root(cfg, Path.cwd())
+                video_path = str(export_inference_video(
+                    Path(args.replay_root) / replay_episode_id, output_root))
+                from .media_retention import finalize_inference_video
+                try:
+                    finalize_inference_video(
+                        Path(args.replay_root) / replay_episode_id, video_path)
+                    frame_images_deleted = True
+                except Exception as exc:
+                    image_cleanup_error = f"{type(exc).__name__}: {exc}"
+            except Exception as exc:  # video errors must not replace rollout status
+                video_error = f"{type(exc).__name__}: {exc}"
+    print(json.dumps({**physical_summary,
                       "replay_episode_id": replay_episode_id,
-                      "replay_error": replay_error}, ensure_ascii=False))
+                      "replay_input_path": replay_input_path,
+                      "replay_error": replay_error,
+                      "video_path": video_path,
+                      "video_error": video_error,
+                      "video_deferred": bool(args.defer_video and replay_episode_id),
+                      "frame_images_deleted": frame_images_deleted,
+                      "image_cleanup_error": image_cleanup_error}, ensure_ascii=False), flush=True)
     return 0 if result.success else 1
+
+
+def main(argv=None) -> int:
+    from .inference_lock import inference_lease
+    with inference_lease(on_wait=lambda: print(json.dumps({
+            "event": "waiting_for_inference_slot"}), flush=True)):
+        return _run_main(argv)
 
 
 if __name__ == "__main__":

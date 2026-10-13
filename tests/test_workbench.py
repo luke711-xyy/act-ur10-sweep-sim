@@ -173,6 +173,7 @@ def test_job_commands_are_typed_and_use_project_modules(tmp_path):
     assert "--target-count" in infer and "4" in infer
     assert "--record-replay" in infer
     assert "--replay-root" in infer
+    assert "--video-root" in infer
     preview_infer = build_inference_argv(tmp_path, "cfg.yaml", 3, "model.pt", 4,
                                          preview=True)
     assert "--preview" in preview_infer
@@ -210,6 +211,41 @@ def test_inference_route_passes_target_count_to_job(tmp_path):
     assert "--target-count" in calls[0][1]
     assert calls[0][1][calls[0][1].index("--target-count") + 1] == "4"
     assert "--preview" in calls[0][1]
+
+
+def test_inference_route_uses_configured_automatic_video_folder(tmp_path):
+    cfg = load_config(overrides=["sim.real_time=false"])
+    cfg.set_path("web.inference_video_dir", str(tmp_path / "videos"))
+    app = create_app(cfg)
+    app.state.jobs.start = lambda kind, argv: {"kind": kind, "argv": argv}
+    route = next(route for route in app.routes
+                 if getattr(route, "path", None) == "/api/jobs/inference")
+    argv = route.endpoint({"model": "checkpoint", "seed": 7})["argv"]
+    assert "--video-root" in argv, "workbench must enable automatic video export"
+    assert argv[argv.index("--video-root") + 1] == str(tmp_path / "videos")
+    # These are the exact arguments consumed by the spawned inference process.
+    assert build_arg_parser().parse_args(argv[3:]).video_root == str(tmp_path / "videos")
+
+
+def test_video_route_serves_only_mp4_inside_the_configured_folder(tmp_path):
+    from fastapi.testclient import TestClient
+
+    video_root = tmp_path / "videos"
+    video_root.mkdir()
+    (video_root / "inference_test_five_view.mp4").write_bytes(b"test-video")
+    outside = tmp_path / "private.mp4"
+    outside.write_bytes(b"private-video")
+    (video_root / "inference_symlink.mp4").symlink_to(outside)
+    cfg = load_config(overrides=["sim.real_time=false"])
+    cfg.set_path("web.inference_video_dir", str(video_root))
+    client = TestClient(create_app(cfg))
+    response = client.get("/api/inference-videos/inference_test_five_view.mp4")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.content == b"test-video"
+    assert client.get("/api/inference-videos/inference_symlink.mp4").status_code == 404
+    assert client.get("/api/inference-videos/missing.mp4").status_code == 404
+    assert client.get("/api/inference-videos/config.yaml").status_code == 404
 
 
 def test_job_registry_captures_a_local_job_and_rejects_duplicate_kind(tmp_path):
@@ -337,7 +373,9 @@ def test_stopping_callable_keeps_kind_occupied_until_worker_exits(tmp_path):
     assert current["state"] == "stopped"
 
 
-def test_workbench_html_has_five_operational_areas():
+def test_workbench_html_has_five_operational_areas(monkeypatch):
+    monkeypatch.setattr("sim.web.app.latest_inference_model", lambda root:
+                        "runs/act_model_five_view_ordinary_disk14_landing7_300_200k_20261013/checkpoints/step_050000")
     app = create_app(load_config(overrides=["sim.real_time=false"]))
     index = next(route for route in app.routes if getattr(route, "path", None) == "/")
     html = index.endpoint()
@@ -348,7 +386,7 @@ def test_workbench_html_has_five_operational_areas():
     assert "inspection-only" not in html
     assert 'id="inspectionImage"' not in html
     assert ('id="inferModel" '
-            'value="runs/act_model_curve_v10/checkpoints/step_100000"') in html
+            'value="runs/act_model_five_view_ordinary_disk14_landing7_300_200k_20261013/checkpoints/step_050000"') in html
     for element_id in ("episodeTargetFilter", "episodeStatusFilter", "previewOutcome",
                        "previewCount", "previewFailureMode", "inferTarget",
                        "inferRandomize"):
@@ -514,7 +552,8 @@ def test_wrong_count_clones_use_distinct_success_sources(tmp_path):
              "episode_kind": "expert_preview", "split": "pilot"},
         )
 
-    state = WorkbenchState(load_config(), dataset_root=tmp_path / "dataset",
+    state = WorkbenchState(load_config(overrides=['task.expert_landing_clearance=null',
+                          'episode.expert_height_guard_until_exact_count=false']), dataset_root=tmp_path / "dataset",
                            preview_root=preview_root)
     first = state._clone_success_as_wrong_count(
         seed=10, target_count=1, failure_mode="wrong_count_over", source_slot=0)
@@ -569,7 +608,7 @@ def test_workbench_discards_stale_async_frame_and_signal_responses():
     assert "AbortController" in html
     assert "seekSerial" in html
     assert "signalSerial" in html
-    assert "current?.episode_id!==episodeId" in html
+    assert "episodeKey(current)!==episodeId" in html
     assert "if(!timer&&!current)" in html
 
 

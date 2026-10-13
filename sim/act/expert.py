@@ -44,6 +44,8 @@ class ExpertPlan:
     turn_count: int = 0
     strategy: str = "infeasible"
     yaw_offset: float = 0.0
+    # Frozen episode-initial surface/boundary, not a mid-sweep moving constraint.
+    landing_region: dict | None = None
 
 
 def _planner_value(cfg, name: str, default):
@@ -54,12 +56,307 @@ def _planner_value(cfg, name: str, default):
     return value
 
 
+def expert_target_subsets(positions: np.ndarray, target_count: int,
+                         mode: str = "any") -> tuple[tuple[int, ...], ...]:
+    """Eligible identities from initial Y ranks, not from moving object poses.
+
+    A partial Y-edge group is the lowest N or highest N components. Keep the
+    legacy enumeration when the frozen config has not selected this rule.
+    """
+    positions = np.asarray(positions, dtype=float)
+    if positions.ndim != 2 or positions.shape[1] < 2 \
+            or not np.all(np.isfinite(positions[:, :2])):
+        raise ValueError("target subset positions must be finite XY coordinates")
+    count = int(target_count)
+    if not 1 <= count <= len(positions):
+        raise ValueError("target subset count must be between 1 and the number of parts")
+    if mode == "any":
+        return tuple(combinations(range(len(positions)), count))
+    if mode != "y_edge_contiguous":
+        raise ValueError(f"unknown expert target subset mode: {mode}")
+    y_order = np.argsort(positions[:, 1], kind="stable").tolist()
+    groups = (tuple(sorted(y_order[:count])), tuple(sorted(y_order[-count:])))
+    return tuple(dict.fromkeys(groups))
+
+
+def expert_target_subset_mode(cfg) -> str:
+    """Resolve the same explicit subset mode for planning and demo auditing."""
+    mode = str(_planner_value(cfg, "expert_target_subset_mode", "any"))
+    if mode not in ("any", "y_edge_contiguous"):
+        raise ValueError(f"unknown expert target subset mode: {mode}")
+    return mode
+
+
+def expert_landing_x_min(cfg) -> float | None:
+    """Landing-only half-plane boundary; absent in old frozen configurations."""
+    if (cfg.get_path("task.expert_landing_clearance", None) is not None
+            and cfg.get_path("_expert_landing_region", None) is None):
+        raise ValueError("dynamic landing boundary requires the episode layout")
+    value = cfg.get_path("task.expert_landing_x_min", None)
+    if value is None:
+        return None
+    try:
+        boundary = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expert landing boundary must be finite and in workspace") from exc
+    if (not np.isfinite(boundary) or boundary < float(cfg.workspace.x_min)
+            or boundary > float(cfg.workspace.x_max)):
+        raise ValueError("expert landing boundary must be finite and in workspace")
+    return boundary
+
+
+def _landing_clearance(cfg) -> float | None:
+    value = cfg.get_path("task.expert_landing_clearance", None)
+    if value is None:
+        return None
+    try:
+        gap = float(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("landing clearance must be finite and nonnegative") from exc
+    if not np.isfinite(gap) or gap < 0.0:
+        raise ValueError("landing clearance must be finite and nonnegative")
+    return gap
+
+
+def _landing_brush_x_extent(cfg, yaw: float) -> float:
+    return (abs(np.cos(yaw)) * float(cfg.end_effector.brush_depth)/2
+            + abs(np.sin(yaw)) * float(cfg.end_effector.brush_width)/2)
+
+
+def _landing_selection(cfg) -> str:
+    # Missing in frozen profiles: retain their original waypoint/RNG contract.
+    mode = str(cfg.get_path("task.expert_landing_selection", "waypoint_minimum"))
+    if mode not in ("waypoint_minimum", "path_intersection"):
+        raise ValueError(f"unknown expert landing selection: {mode}")
+    return mode
+
+
+class _InvalidLandingPose(ValueError):
+    """A candidate-local pose rejection, distinct from invalid configuration."""
+
+
+def expert_landing_configuration(env, cfg) -> tuple:
+    """Resolve the current settled layout without changing caller config."""
+    _landing_selection(cfg)
+    gap = _landing_clearance(cfg)
+    if gap is None:
+        return cfg, None
+    initial = cfg.get_path("_expert_landing_region", None)
+    if initial is not None:
+        # Nested planner calls share the resolved initial-layout snapshot.
+        region = initial.to_dict() if hasattr(initial, "to_dict") else dict(initial)
+        return expert_plan_landing_configuration(cfg, ExpertPlan(landing_region=region)), region
+    yaw = float(cfg.get_path("task.expert_landing_yaw", 0.0))
+    part_edge = float(env.component_collision_x_max())
+    half_extent = _landing_brush_x_extent(cfg, yaw)
+    region = {"part_x_max": part_edge, "clearance": gap,
+              "brush_x_half_extent": half_extent, "yaw": yaw,
+              "x_min": part_edge + gap + half_extent}
+    return expert_plan_landing_configuration(cfg, ExpertPlan(landing_region=region)), region
+
+
+def expert_plan_landing_configuration(cfg, plan: ExpertPlan):
+    """Use a frozen episode boundary in execution; never recompute mid-sweep."""
+    gap = _landing_clearance(cfg)
+    region = plan.landing_region
+    if gap is None:
+        if region is not None:
+            raise ValueError("dynamic landing plan does not match fixed landing configuration")
+        return cfg
+    try:
+        values = np.array([region[k] for k in
+                           ("part_x_max", "clearance", "brush_x_half_extent", "yaw", "x_min")], dtype=float)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("dynamic landing plan requires complete episode provenance") from exc
+    edge, recorded_gap, half_extent, yaw, boundary = values
+    desired_yaw = float(cfg.get_path("task.expert_landing_yaw", 0.0))
+    if (not np.all(np.isfinite(values)) or not np.isfinite(desired_yaw)
+            or abs(recorded_gap-gap) > 1e-10 or abs(yaw-desired_yaw) > 1e-10
+            or abs(half_extent-_landing_brush_x_extent(cfg,yaw)) > 1e-10
+            or abs(boundary-(edge+gap+half_extent)) > 1e-10):
+        raise ValueError("dynamic landing boundary does not preserve configured clearance")
+    local = cfg.copy()
+    local.set_path("task.expert_landing_x_min", float(boundary))
+    local.set_path("_expert_landing_region", dict(region))
+    expert_landing_x_min(local)  # validate workspace; never clamp
+    if boundary + half_extent > float(cfg.table.half_size[0]) + 1e-10:
+        raise ValueError("dynamic landing clearance cannot fit on the table")
+    return local
+
+
+def expert_validate_landing_pose(cfg, xy, yaw: float) -> np.ndarray:
+    """Check the proposed waypoint; never project a bad external plan silently."""
+    boundary = expert_landing_x_min(cfg)
+    xy = np.asarray(xy, dtype=float)
+    if xy.shape != (2,) or not np.all(np.isfinite(xy)) or not np.isfinite(yaw):
+        raise _InvalidLandingPose("expert landing requires finite XY and yaw")
+    if (_landing_clearance(cfg) is not None
+            and _landing_selection(cfg) == "path_intersection"
+            and abs(xy[0] - boundary) > 1e-9):
+        raise _InvalidLandingPose("expert landing must be at the dynamic boundary intersection")
+    low = np.array([float(cfg.workspace.x_min), float(cfg.workspace.y_min)])
+    high = np.array([float(cfg.workspace.x_max), float(cfg.workspace.y_max)])
+    half = np.asarray(cfg.table.half_size[:2], dtype=float)
+    depth, width = float(cfg.end_effector.brush_depth)/2, float(cfg.end_effector.brush_width)/2
+    extent = np.abs(np.array([[np.cos(yaw), -np.sin(yaw)],
+                             [np.sin(yaw), np.cos(yaw)]])) @ [depth, width]
+    if ((boundary is not None and xy[0] < boundary - 1e-9)
+            or np.any(xy < low) or np.any(xy > high)
+            or np.any(np.abs(xy)+extent > half)):
+        raise _InvalidLandingPose("expert landing pose/brush footprint lies outside workspace/table")
+    return xy.copy()
+
+
+def expert_validate_landing_alignment(cfg, points: np.ndarray,
+                                      curve_radius: float = 0.0) -> None:
+    """Check the stationary entry turn's exact swept rectangle envelope."""
+    if (_landing_clearance(cfg) is None
+            or _landing_selection(cfg) != "path_intersection"):
+        return
+    points = np.asarray(points, dtype=float).reshape(-1, 2)
+    prepared = _rounded_polyline(points, curve_radius)
+    lengths = np.linalg.norm(np.diff(prepared, axis=0), axis=1)
+    cumulative = np.concatenate(([0.0], np.cumsum(lengths)))
+    if cumulative[-1] < 1e-9:
+        return
+    yaw = float(cfg.get_path("task.expert_landing_yaw", 0.0))
+    # Share the sampler's resampled tangent, including sub-grid fragments.
+    _, _, curve_yaw = _polyline_arc_table(prepared, lengths, cumulative)
+    desired = float(curve_yaw[0])
+    desired += np.pi * round((yaw - desired) / np.pi)
+    low, high = sorted((yaw, desired))
+    depth, width = float(cfg.end_effector.brush_depth)/2, float(cfg.end_effector.brush_width)/2
+    angles = [low, high]
+    # Extrema of |cos(a)|*depth+|sin(a)|*width, and the swapped Y extent.
+    pivots = (np.arctan2(width, depth), np.arctan2(depth, width))
+    for k in range(int(np.floor(low/np.pi))-1, int(np.ceil(high/np.pi))+2):
+        for pivot in pivots:
+            for angle in (k*np.pi+pivot, k*np.pi-pivot):
+                if low <= angle <= high:
+                    angles.append(angle)
+    angles = np.asarray(angles)
+    extent = np.column_stack((np.abs(np.cos(angles))*depth+np.abs(np.sin(angles))*width,
+                              np.abs(np.sin(angles))*depth+np.abs(np.cos(angles))*width)).max(axis=0)
+    if np.any(np.abs(points[0])+extent > np.asarray(cfg.table.half_size[:2])+1e-12):
+        raise _InvalidLandingPose("expert landing rotation footprint lies outside table")
+
+
+def _landing_boundary_path(path: np.ndarray, cfg) -> np.ndarray | None:
+    """Choose the first boundary crossing, or retain a frozen minimum-only rule.
+
+    In intersection mode, skip the airborne prefix and retain the A* suffix
+    unchanged. Its intersection supplies Y; subsequent sweeps can cross left.
+    """
+    boundary = expert_landing_x_min(cfg)
+    if boundary is None:
+        return path
+    path = np.asarray(path, dtype=float)
+    if len(path) < 2:
+        return None
+    if (_landing_clearance(cfg) is not None
+            and _landing_selection(cfg) == "path_intersection"):
+        if path[0, 0] < boundary - 1e-12:
+            return None
+        landing = None
+        if abs(path[0, 0] - boundary) <= 1e-12:
+            landing, suffix = path[0].copy(), path[1:]
+            landing[0] = boundary
+        else:
+            for index in range(1, len(path)):
+                start, end = path[index-1], path[index]
+                if end[0] > boundary + 1e-12:
+                    continue
+                fraction = (start[0] - boundary) / (start[0] - end[0])
+                landing = start + fraction * (end - start)
+                landing[0] = boundary
+                suffix = path[index:]
+                if np.linalg.norm(landing - end) <= 1e-12:
+                    suffix = path[index+1:]
+                break
+        if landing is None:
+            return None
+        try:
+            expert_validate_landing_pose(
+                cfg, landing, float(cfg.get_path("task.expert_landing_yaw", 0.0)))
+            expert_validate_landing_alignment(cfg, np.vstack((landing, suffix)))
+        except _InvalidLandingPose:
+            return None
+        return np.vstack((path[0], landing, suffix))
+    if path[1, 0] < boundary:
+        if path[0, 0] < boundary or path[0, 0] <= path[1, 0]:
+            return None
+        fraction = (path[0, 0] - boundary) / (path[0, 0] - path[1, 0])
+        landing = path[0] + fraction * (path[1] - path[0])
+        landing[0] = boundary
+        path = np.vstack((path[0], landing, path[1:]))
+    yaw = float(cfg.get_path("task.expert_landing_yaw", 0.0))
+    expert_validate_landing_pose(cfg, path[1], yaw)
+    return path
+
+
+def expert_generation_protocol(cfg) -> dict | None:
+    """Identity for future landing-region data, without rewriting old records."""
+    gap = _landing_clearance(cfg)
+    boundary = expert_landing_x_min(cfg) if gap is None else None
+    release_height_guard = bool(cfg.get_path("episode.expert_height_guard_until_exact_count", False))
+    if gap is None and boundary is None and not release_height_guard:
+        return None
+    components = cfg.to_dict()["components"]
+    rule = ({"landing_clearance": gap,
+             "landing_surface": "settled_all_part_collision_geometries",
+             "brush_depth": float(cfg.end_effector.brush_depth),
+             "brush_width": float(cfg.end_effector.brush_width)}
+            if gap is not None else ({"landing_x_min": boundary} if boundary is not None else {}))
+    name = ("coverage_astar_layout_clearance_v2" if gap is not None
+            else "coverage_astar_landing_half_plane_v1")
+    if release_height_guard:
+        name = ("coverage_astar_layout_clearance_v3" if gap is not None else
+                "coverage_astar_landing_half_plane_v2" if boundary is not None else
+                "expert_exact_count_height_v1")
+        rule["height_guard"] = "until_exact_count"
+    if gap is not None and _landing_selection(cfg) == "path_intersection":
+        name = "coverage_astar_boundary_intersection_v1"
+        rule["landing_selection"] = "first_path_boundary_intersection"
+        rule["entry_orientation"] = "align_at_intersection_before_translation"
+    return {"name": name,
+            "planning_mode": str(_planner_value(cfg, "expert_planning_mode", "mixed")),
+            **rule,
+            "landing_yaw": float(cfg.get_path("task.expert_landing_yaw", 0.0)),
+            "components": {k: components[k] for k in
+                           ("count", "geometry", "size_scale", "spawn", "spawn_mode",
+                            "cluster", "min_separation", "target_clearance")}}
+
+
+def expert_selection_audit(result, cfg, target_count: int) -> dict | None:
+    """Audit demo-only identity eligibility, without altering physical task success."""
+    mode = expert_target_subset_mode(cfg)
+    if mode == "any":
+        return None
+    positions = np.asarray(result.initial_object_positions, dtype=float)
+    mask = np.asarray(result.final_collected_mask, dtype=bool).reshape(-1)
+    if positions.ndim != 2 or len(positions) != 6 or len(mask) != 6:
+        raise RuntimeError("Y-edge demo requires initial poses and final mask for six parts")
+    allowed = expert_target_subsets(positions, target_count, mode)
+    planned = tuple(sorted(int(i) for i in result.target_indices))
+    collected = tuple(int(i) for i in np.flatnonzero(mask))
+    if planned not in allowed or collected not in allowed:
+        raise RuntimeError(
+            f"Y-edge demo rejected: planned={planned}, collected={collected}, allowed={allowed}")
+    return {
+        "mode": mode,
+        "initial_positions": positions.tolist(),
+        "y_order": np.argsort(positions[:, 1], kind="stable").tolist(),
+        "planned_component_ids": list(planned),
+        "collected_component_ids": list(collected),
+    }
+
+
 def expert_target_indices(env, cfg) -> np.ndarray:
     """Choose a feasible exact target set for the one-pass expert.
 
     The simulator deliberately keeps all six parts physical.  When fewer than
     six are requested, the remaining parts are *distractors*, not expendable
-    objects.  We therefore score every target subset and keep only those for
+    objects.  We therefore score eligible target subsets and keep only those for
     which a brush-width-aware A* path exists around the distractors.  The
     selected set is exposed in the episode metadata so an exact-count label
     cannot be confused with an accidental collection.
@@ -838,8 +1135,14 @@ def _capture_preserving_rounded_path(path: np.ndarray, radius: float,
     """
     path = _compact_polyline(np.asarray(path, dtype=float).reshape(-1, 2))
     required = int(target_count)
+    mode = expert_target_subset_mode(cfg)
+    allowed_masks = None
+    if mode == "y_edge_contiguous":
+        groups = expert_target_subsets(env.component_positions(), required, mode)
+        allowed_masks = {sum(1 << i for i in group) for group in groups}
     raw_mask = _path_capture_mask(path, env, cfg)
-    if raw_mask < 0 or raw_mask.bit_count() != required:
+    if (raw_mask < 0 or raw_mask.bit_count() != required
+            or (allowed_masks is not None and raw_mask not in allowed_masks)):
         return None
 
     corner_indices = tuple(range(1, max(1, len(path) - 1)))
@@ -848,7 +1151,8 @@ def _capture_preserving_rounded_path(path: np.ndarray, radius: float,
         for sharp in combinations(corner_indices, sharp_count):
             rounded = _rounded_polyline(path, radius, set(sharp))
             mask = _path_capture_mask(rounded, env, cfg)
-            if mask < 0 or mask.bit_count() != required:
+            if (mask < 0 or mask.bit_count() != required
+                    or (allowed_masks is not None and mask not in allowed_masks)):
                 continue
             length = float(np.linalg.norm(np.diff(rounded, axis=0), axis=1).sum())
             valid.append((length, sharp, rounded, mask))
@@ -994,9 +1298,14 @@ def _coverage_astar_candidates(env, cfg, target_count: int
     route that geometrically captures more than the requested exact count.
     Each found route is subsequently screened by the real MuJoCo rollout.
     """
+    cfg, _ = expert_landing_configuration(env, cfg)
     positions = np.asarray(env.component_positions(), dtype=float)[:, :2]
     if not len(positions) or not 1 <= int(target_count) <= len(positions):
         return []
+    subset_mode = expert_target_subset_mode(cfg)
+    eligible = expert_target_subsets(positions, target_count, subset_mode)
+    allowed_masks = (tuple(sum(1 << i for i in group) for group in eligible)
+                     if subset_mode == "y_edge_contiguous" else None)
     radii = np.asarray([float(item["nominal_radius"]) for item in env.layout])
     x_min, x_max = float(cfg.workspace.x_min), float(cfg.workspace.x_max)
     y_min, y_max = float(cfg.workspace.y_min), float(cfg.workspace.y_max)
@@ -1079,6 +1388,7 @@ def _coverage_astar_candidates(env, cfg, target_count: int
         cost_so_far = {start_state: 0.0}
         came_from = {start_state: None}
         found = []
+        validated_paths = {}
         round_candidates = []
         found_by_goal = {node: 0 for node in goal_nodes}
         solutions_per_goal = max(
@@ -1087,6 +1397,19 @@ def _coverage_astar_candidates(env, cfg, target_count: int
 
         def heuristic(node, mask):
             return float(heuristic_table[int(mask), int(node[0]), int(node[1])])
+
+        def reconstruct_path(found_state):
+            states = []
+            current = found_state
+            while current is not None:
+                states.append((current[0], current[1]))
+                current = came_from[current]
+            states.reverse()
+            grid_path = np.asarray([to_point(node) for node in states], dtype=float)
+            grid_path[0] = start
+            goal_point, exit_point = goals[found_state[:2]]
+            grid_path[-1] = goal_point
+            return states, np.vstack((_compact_polyline(grid_path), exit_point))
 
         while frontier and expansions < expansion_budget:
             _, current_cost, current = heappop(frontier)
@@ -1102,7 +1425,16 @@ def _coverage_astar_candidates(env, cfg, target_count: int
                     goal_point, exit_point, positions, radii,
                     brush_width, brush_depth, capture_margin)
                 if (final_mask.bit_count() == int(target_count)
+                        and (allowed_masks is None or final_mask in allowed_masks)
                         and found_by_goal[current_node] < solutions_per_goal):
+                    if allowed_masks is not None and int(target_count) < len(positions):
+                        states, raw_path = reconstruct_path(current)
+                        rounded_result = _capture_preserving_rounded_path(
+                            raw_path, corner_radius, env, cfg, int(target_count))
+                        if rounded_result is None:
+                            # Invalid smoothing must not consume a goal's quota.
+                            continue
+                        validated_paths[current] = (states, raw_path, rounded_result)
                     found.append(current)
                     found_by_goal[current_node] += 1
                     # The brush has reached the terminal delivery lane.  Keep
@@ -1167,6 +1499,11 @@ def _coverage_astar_candidates(env, cfg, target_count: int
                 captured = int(next_mask.bit_count())
                 if captured > int(target_count):
                     continue
+                # Once a distractor is captured, no later edge can undo it.
+                # Prune masks that cannot grow into either allowed Y extreme.
+                if allowed_masks is not None and not any(
+                        next_mask & allowed == next_mask for allowed in allowed_masks):
+                    continue
                 angle_cost = 0.0
                 if previous_direction != no_direction:
                     angle = turn_angles[previous_direction, direction_index]
@@ -1196,26 +1533,18 @@ def _coverage_astar_candidates(env, cfg, target_count: int
                                     new_cost, next_state))
 
         for found_state in found:
-            states = []
-            current = found_state
-            while current is not None:
-                states.append((current[0], current[1]))
-                current = came_from[current]
-            states.reverse()
-            grid_path = np.asarray([to_point(node) for node in states], dtype=float)
-            grid_path[0] = start
-            goal_point, exit_point = goals[found_state[:2]]
-            grid_path[-1] = goal_point
-            compact = _compact_polyline(grid_path)
-            raw_path = np.vstack((compact, exit_point))
-            rounded_result = _capture_preserving_rounded_path(
-                raw_path,
-                float(_planner_value(cfg, "expert_corner_radius", 0.025)),
-                env, cfg, int(target_count),
-            )
+            goal_point, _ = goals[found_state[:2]]
+            if found_state in validated_paths:
+                states, raw_path, rounded_result = validated_paths[found_state]
+            else:
+                states, raw_path = reconstruct_path(found_state)
+                rounded_result = _capture_preserving_rounded_path(
+                    raw_path, corner_radius, env, cfg, int(target_count))
             if rounded_result is None:
                 continue
             rounded, mask = rounded_result
+            if allowed_masks is not None and mask not in allowed_masks:
+                continue
             signature = tuple(np.round(
                 rounded[::max(1, len(rounded) // 30)], 3).ravel())
             if signature in seen_paths:
@@ -1227,9 +1556,12 @@ def _coverage_astar_candidates(env, cfg, target_count: int
             # Use the same robustness objective as oriented capture lanes.
             # Length-only ranking systematically promoted short grazing paths
             # that satisfy the geometric mask but lose objects in MuJoCo.
-            score, _ = _score_capture_plan(env, cfg, selected, rounded)
-            score += _route_motion_penalty(cfg, rounded, 0.0)
-            candidates.append((float(score), rounded, selected, turns))
+            execution_path = _landing_boundary_path(rounded, cfg)
+            if execution_path is None:
+                continue
+            score, _ = _score_capture_plan(env, cfg, selected, execution_path)
+            score += _route_motion_penalty(cfg, execution_path, 0.0)
+            candidates.append((float(score), execution_path, selected, turns))
             round_candidates.append((float(score), states))
 
         # Each cost variant contributes one best route to the next search's
@@ -1380,19 +1712,33 @@ def expert_plan_candidates(env, cfg, max_candidates: int | None = None) -> list[
     offsets and A* connectors; it is deliberately independent of any one
     seed or target count.  A caller may physically validate the returned
     shortlist and retry the next candidate without changing the task label.
-    Every geometric route is returned in both equivalent brush yaw branches:
-    the thin rectangular plate has the same XY footprint after a 180-degree
-    rotation, while the corresponding UR10 joint configurations can differ
-    substantially in reachability and tracking quality.
+    The new default uses coverage A* and the configured descent yaw. Frozen
+    legacy profiles can still return both equivalent brush yaw branches: the
+    plate has the same XY footprint after a 180-degree rotation, but the UR10
+    joint configurations can differ in reachability and tracking quality.
     """
+    cfg, landing_region = expert_landing_configuration(env, cfg)
     positions = np.asarray(env.component_positions(), dtype=float)[:, :2]
     if positions.size == 0:
         return []
     target_count = int(np.clip(int(cfg.get_path("task.target_count", len(positions))),
                                1, len(positions)))
+    eligible = expert_target_subsets(
+        positions, target_count,
+        expert_target_subset_mode(cfg))
+    mode = str(_planner_value(cfg, "expert_planning_mode", "mixed"))
+    if mode not in ("mixed", "coverage_astar_only"):
+        raise ValueError(f"unknown expert planning mode: {mode}")
+    if _landing_clearance(cfg) is not None and mode != "coverage_astar_only":
+        raise ValueError("dynamic landing requires coverage_astar_only; legacy lanes need a frozen profile")
+    boundary = expert_landing_x_min(cfg)
+    if mode == "coverage_astar_only" and boundary is None:
+        raise ValueError("coverage_astar_only requires an explicit landing boundary")
+    fixed_yaw = (float(cfg.get_path("task.expert_landing_yaw", 0.0))
+                 if boundary is not None else None)
     lane_candidates: list[ExpertPlan] = []
     curved_candidates: list[ExpertPlan] = []
-    for candidate in combinations(range(len(positions)), int(target_count)):
+    for candidate in (eligible if mode == "mixed" else ()):
         # Right-to-left gives each selected object a chance to be captured
         # before final -X delivery, while A* handles lateral detours.
         order = tuple(sorted(candidate, key=lambda index: positions[index, 0], reverse=True))
@@ -1411,12 +1757,14 @@ def expert_plan_candidates(env, cfg, max_candidates: int | None = None) -> list[
     # of object-centre visits; real MuJoCo rollout is the final authority.
     for score, path, selected, turns in _coverage_astar_candidates(
             env, cfg, int(target_count)):
+        if tuple(sorted(selected)) not in eligible:
+            continue
         curved_candidates.append(ExpertPlan(
             target_indices=np.asarray(selected, dtype=int),
             waypoints=np.asarray(path, dtype=float),
             feasible=True, score=float(score),
             turn_count=int(turns),
-            strategy="coverage_astar"))
+            strategy="coverage_astar", landing_region=landing_region))
     if not lane_candidates and not curved_candidates:
         return []
 
@@ -1431,7 +1779,7 @@ def expert_plan_candidates(env, cfg, max_candidates: int | None = None) -> list[
     if limit == 1:
         selected = sorted(lane_candidates + curved_candidates, key=key)[:1]
         return _add_symmetric_yaw_branches(
-            selected, _current_brush_yaw(env))
+            selected, _current_brush_yaw(env), fixed_yaw=fixed_yaw)
 
     # Reserve shortlist capacity for both straight capture strips and global
     # curved coverage routes so a short strip cannot crowd out all turns.
@@ -1444,7 +1792,7 @@ def expert_plan_candidates(env, cfg, max_candidates: int | None = None) -> list[
                      if id(item) not in already]
         selected.extend(remaining[:limit - len(selected)])
     return _add_symmetric_yaw_branches(
-        sorted(selected, key=key), _current_brush_yaw(env))
+        sorted(selected, key=key), _current_brush_yaw(env), fixed_yaw=fixed_yaw)
 
 
 def _current_brush_yaw(env) -> float:
@@ -1455,11 +1803,12 @@ def _current_brush_yaw(env) -> float:
 
 
 def _add_symmetric_yaw_branches(plans: list[ExpertPlan],
-                                current_yaw: float = 0.0) -> list[ExpertPlan]:
+                                current_yaw: float = 0.0, *,
+                                fixed_yaw: float | None = None) -> list[ExpertPlan]:
     """Try all low-rotation brush-yaw branches before larger reset turns."""
     branched = []
     for plan in plans:
-        for yaw_offset in (0.0, float(np.pi)):
+        for yaw_offset in ((0.0, float(np.pi)) if fixed_yaw is None else (fixed_yaw,)):
             branched.append(ExpertPlan(
                 target_indices=plan.target_indices.copy(),
                 waypoints=plan.waypoints.copy(),
@@ -1469,6 +1818,7 @@ def _add_symmetric_yaw_branches(plans: list[ExpertPlan],
                 turn_count=plan.turn_count,
                 strategy=plan.strategy,
                 yaw_offset=yaw_offset,
+                landing_region=(dict(plan.landing_region) if plan.landing_region is not None else None),
             ))
     # Branches are physically equivalent for the symmetric plate, but not
     # necessarily equivalent for the arm's IK or gripper assembly. Exhaust
@@ -1496,9 +1846,15 @@ def _best_target_sweep_plan(env, cfg, target_count: int):
 def _safe_contact_failure_path(cfg) -> np.ndarray:
     """Return a short contact-only path for an infeasible expert layout."""
     start = contact_home_xy(cfg).astype(float)
-    # A bounded 2 cm probe preserves approach/contact observations while
-    # guaranteeing that a planning failure does not become a guessed sweep.
-    return np.asarray([start, start + np.array([-0.02, 0.0])], dtype=float)
+    # Frozen profiles retain their bounded 2 cm probe. Intersection profiles
+    # transfer airborne to the boundary and descend without a guessed sweep.
+    landing = start + np.array([-0.02, 0.0])
+    boundary = expert_landing_x_min(cfg)
+    if boundary is not None:
+        landing[0] = (boundary if _landing_clearance(cfg) is not None
+                      and _landing_selection(cfg) == "path_intersection"
+                      else max(landing[0], boundary))
+    return np.asarray([start, landing], dtype=float)
 
 
 def plan_expert_sweep(env, cfg) -> ExpertPlan:
@@ -1512,6 +1868,7 @@ def plan_expert_sweep(env, cfg) -> ExpertPlan:
     plan = _best_target_sweep_plan(env, cfg, target_count)
     if plan is not None:
         return plan
+    cfg, landing_region = expert_landing_configuration(env, cfg)
 
     # Keep a deterministic attempted set for audit metadata, but never use it
     # to synthesize target-centre waypoints.  The caller can now distinguish a
@@ -1520,7 +1877,7 @@ def plan_expert_sweep(env, cfg) -> ExpertPlan:
     return ExpertPlan(target_indices=attempted,
                       waypoints=_safe_contact_failure_path(cfg),
                       feasible=False, failure_reason="astar_no_feasible_path",
-                      strategy="infeasible")
+                      strategy="infeasible", landing_region=landing_region)
 
 
 def contact_home_xy(cfg) -> np.ndarray:
@@ -1534,15 +1891,18 @@ def expert_staging_xy(env, cfg, plan: ExpertPlan | None = None) -> np.ndarray:
 
     The expert plan starts at ``contact_home_xy`` and its second waypoint is
     the first A* connector point.  The demonstration executor descends there
-    before beginning the contact pass.  ACT inference must use this same
-    supervisor-owned point; otherwise its first observation is out of the
-    training distribution whenever the component cluster changes position.
+    before beginning the contact pass. This is demonstration-only planning;
+    ACT inference retains its fixed reset and policy-owned approach/descent.
     """
     home = contact_home_xy(cfg)
     plan = plan if plan is not None else plan_expert_sweep(env, cfg)
-    waypoints = np.asarray(plan.waypoints, dtype=np.float32).reshape(-1, 2)
+    cfg = expert_plan_landing_configuration(cfg, plan)
+    boundary = expert_landing_x_min(cfg)
+    waypoints = np.asarray(plan.waypoints, dtype=float).reshape(-1, 2)
     if len(waypoints) >= 2:
-        return waypoints[1].copy()
+        if boundary is not None:
+            return expert_validate_landing_pose(cfg, waypoints[1], float(plan.yaw_offset)).astype(np.float32)
+        return waypoints[1].astype(np.float32)
     return home.copy()
 
 
@@ -1620,6 +1980,24 @@ def expert_recovery_waypoints(env, cfg) -> np.ndarray:
     return np.asarray(compact, dtype=float)
 
 
+def _polyline_arc_table(points, lengths, cumulative):
+    """Shared curve geometry for execution and entry-rotation validation."""
+    total_length = float(cumulative[-1])
+    spacing = min(0.002, max(total_length / 2000.0, 0.0005))
+    dense_count = max(2, int(np.ceil(total_length / spacing)))
+    arc = np.linspace(0.0, total_length, dense_count + 1)
+    segment_index = np.clip(np.searchsorted(cumulative, arc, side="right") - 1,
+                            0, len(lengths) - 1)
+    local = arc - cumulative[segment_index]
+    fractions = local / np.maximum(lengths[segment_index], 1e-9)
+    curve = points[segment_index] + fractions[:, None] * (
+        points[segment_index + 1] - points[segment_index])
+    tangent = np.gradient(curve, arc, axis=0, edge_order=2)
+    raw_yaw = np.arctan2(tangent[:, 1], tangent[:, 0]) - np.pi
+    curve_yaw = 0.5 * np.unwrap(2.0 * raw_yaw)
+    return arc, curve, curve_yaw
+
+
 def sample_polyline(points: np.ndarray, hz: float, speed: float,
                     yaw: float | None = None,
                     yaw_rate: float = np.deg2rad(45.0),
@@ -1627,7 +2005,8 @@ def sample_polyline(points: np.ndarray, hz: float, speed: float,
                     accel: float = 0.8,
                     curve_radius: float = 0.025,
                     terminal_speed: float | None = None,
-                    terminal_distance: float = 0.0) -> np.ndarray:
+                    terminal_distance: float = 0.0,
+                    align_initial_yaw: bool = False) -> np.ndarray:
     """Time-parameterize a rounded path without letting XY outrun brush yaw.
 
     Curvature limits the local translational speed to ``yaw_rate / |curvature|``;
@@ -1657,18 +2036,7 @@ def sample_polyline(points: np.ndarray, hz: float, speed: float,
 
     # Resolve the rounded curve into a fine arc-length table so curvature can
     # constrain speed even when the original waypoints are far apart.
-    spacing = min(0.002, max(total_length / 2000.0, 0.0005))
-    dense_count = max(2, int(np.ceil(total_length / spacing)))
-    arc = np.linspace(0.0, total_length, dense_count + 1)
-    segment_index = np.clip(np.searchsorted(cumulative, arc, side="right") - 1,
-                            0, len(lengths) - 1)
-    local = arc - cumulative[segment_index]
-    fractions = local / np.maximum(lengths[segment_index], 1e-9)
-    curve = points[segment_index] + fractions[:, None] * (
-        points[segment_index + 1] - points[segment_index])
-    tangent = np.gradient(curve, arc, axis=0, edge_order=2)
-    raw_yaw = np.arctan2(tangent[:, 1], tangent[:, 0]) - np.pi
-    curve_yaw = 0.5 * np.unwrap(2.0 * raw_yaw)
+    arc, curve, curve_yaw = _polyline_arc_table(points, lengths, cumulative)
     if yaw is not None:
         curve_yaw[:] = float(yaw)
     elif initial_yaw is not None:
@@ -1718,15 +2086,23 @@ def sample_polyline(points: np.ndarray, hz: float, speed: float,
         np.interp(sampled_arc, arc, curve[:, 1]),
     ))
     sampled_yaw = np.interp(sampled_arc, arc, curve_yaw)
-    if initial_yaw is not None and yaw is None:
-        sampled_yaw[0] = float(initial_yaw)
+    alignment = np.zeros((0, 4), dtype=float)
     max_step = max(1e-6, float(yaw_rate) * dt)
+    if initial_yaw is not None and yaw is None:
+        if align_initial_yaw:
+            steps = int(np.ceil(abs(curve_yaw[0] - float(initial_yaw)) / max_step))
+            if steps:
+                alignment = np.column_stack((np.tile(points[0], (steps, 1)),
+                    np.full(steps, .18),
+                    np.linspace(float(initial_yaw), curve_yaw[0], steps+1)[:-1]))
+        else:
+            sampled_yaw[0] = float(initial_yaw)
     for index in range(1, len(sampled_yaw)):
         delta = float(sampled_yaw[index] - sampled_yaw[index - 1])
         sampled_yaw[index] = sampled_yaw[index - 1] + float(
             np.clip(delta, -max_step, max_step))
-    return np.column_stack((sampled_xy, np.full(len(times), 0.18),
-                            sampled_yaw)).astype(np.float32)
+    sampled = np.column_stack((sampled_xy, np.full(len(times), 0.18), sampled_yaw))
+    return np.vstack((alignment, sampled)).astype(np.float32)
 
 
 def _route_motion_metrics(cfg, path: np.ndarray,

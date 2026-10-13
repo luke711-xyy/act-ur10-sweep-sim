@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
+import multiprocessing
 import shutil
 import uuid
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from ..config import load_config, save_config
+from ..config import Config, load_config, save_config
 from ..model.geometries import GEOMETRY_NAMES
 from .dataset import ActDatasetWriter
+from .expert import (expert_selection_audit as _expert_selection_audit,
+                     expert_target_subset_mode, expert_generation_protocol)
 from .interface import ACT_SCHEMA_VERSION, ACT_STATE_DIM
-from .naming import next_demo_name
+from .naming import demo_name, next_demo_name, next_demo_serial
 from .rollout import run_expert_episode
 
 
@@ -122,7 +127,8 @@ def evaluation_layout_plan(split: str, seed_base: int,
 
 def validate_training_manifest(root: str | Path,
                                episodes_per_target: int = 20,
-                               camera_views=None) -> dict:
+                               camera_views=None,
+                               target_subset_mode: str = "any") -> dict:
     """Require a balanced set of successful schema-v5 experts."""
     root = Path(root)
     episodes_per_target = int(episodes_per_target)
@@ -132,6 +138,7 @@ def validate_training_manifest(root: str | Path,
     path = root / "manifest.jsonl"
     records = [json.loads(line) for line in path.read_text(
         encoding="utf-8").splitlines() if line.strip()]
+    _validate_existing_target_selection(records, target_subset_mode)
     expected_views = (set(str(view) for view in camera_views)
                       if camera_views is not None else None)
     invalid = [record.get("episode_id", "<missing>") for record in records if not (
@@ -212,9 +219,15 @@ def _read_manifest(root: Path) -> list[dict]:
 def _append_failure_log(root: Path, payload: dict) -> None:
     """Record a rejected generation attempt without images or trajectories."""
     root.mkdir(parents=True, exist_ok=True)
-    with (root / "generation_failures.jsonl").open(
-            "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    failure_path = root / "generation_failures.jsonl"
+    with (root / ".generation_failures.lock").open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            with failure_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                handle.flush()
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def validate_preview_training_manifest(root: str | Path,
@@ -364,6 +377,53 @@ def _expert_config(cfg, target_count: int):
     return local_cfg
 
 
+def _generation_protocol_options(cfg, composition: str = "mixed") -> list[dict | None]:
+    """Compare identities of configurations actually used for six-part capture."""
+    if not hasattr(cfg, "get_path"):
+        return [None]
+    local_cfg = _expert_config(cfg, 6)
+    if expert_generation_protocol(local_cfg) is None:
+        return [None]
+    geometries = (["mixed"] if composition == "mixed" else
+                  list(GEOMETRY_NAMES) + (["mixed"] if composition == "balanced" else []))
+    protocols = []
+    for geometry in geometries:
+        local_cfg.set_path("components.geometry", geometry)
+        protocols.append(expert_generation_protocol(local_cfg))
+    return protocols
+
+
+def _validate_existing_generation_protocol(records: list[dict],
+                                           protocols: list[dict | None]) -> None:
+    """Exact identity, plus the explicit stronger v2-success -> v3 upgrade."""
+    def compatible_stricter_success(record):
+        # A previously published success with height checks throughout also
+        # satisfies the new post-count waiver. Never relabel its metadata, and
+        # never admit old previews, failures, another layout or a reverse run.
+        if (record.get("success") is not True
+                or record.get("episode_kind") != "expert"
+                or record.get("split") != "train"):
+            return False
+        for protocol in protocols:
+            if (not isinstance(protocol, dict)
+                    or protocol.get("name") != "coverage_astar_layout_clearance_v3"
+                    or protocol.get("height_guard") != "until_exact_count"):
+                continue
+            strict = {k:v for k,v in protocol.items() if k != "height_guard"}
+            strict["name"] = "coverage_astar_layout_clearance_v2"
+            if record.get("expert_generation_protocol") == strict:
+                return True
+        return False
+
+    wrong = [r.get("episode_id", "<missing>") for r in records
+             if r.get("expert_generation_protocol") not in protocols
+             and not compatible_stricter_success(r)]
+    if wrong:
+        raise ValueError("existing data has an incompatible generation protocol; "
+                         "preserve it and explicitly choose the new batch transition: "
+                         f"{wrong[:5]}")
+
+
 def screen_shared_layout(cfg, seed: int,
                          target_counts=range(1, 7)) -> tuple[bool, list[dict]]:
     """Physically screen one seed for every requested exact cardinality.
@@ -510,6 +570,34 @@ def write_split_manifests(root: str | Path,
     return output
 
 
+def _validate_existing_target_selection(records: list[dict], mode: str) -> None:
+    """Reject missing/invalid selection provenance before counting resumed slots."""
+    if mode == "any":
+        return
+    from types import SimpleNamespace
+    cfg = Config({"planner": {"expert_target_subset_mode": mode}})
+    for record in records:
+        selection = record.get("target_selection")
+        try:
+            if not isinstance(selection, dict) or selection.get("mode") != mode:
+                raise ValueError("missing or incompatible selection audit")
+            positions = np.asarray(selection["initial_positions"], dtype=float)
+            collected = selection["collected_component_ids"]
+            result = SimpleNamespace(
+                initial_object_positions=positions,
+                target_indices=selection["planned_component_ids"],
+                final_collected_mask=np.isin(np.arange(6), collected),
+            )
+            checked = _expert_selection_audit(result, cfg, int(record["target_count"]))
+            if (selection["y_order"] != checked["y_order"]
+                    or collected != checked["collected_component_ids"]):
+                raise ValueError("inconsistent selection identities or Y ranks")
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            raise ValueError(
+                f"invalid target selection for {record.get('episode_id', '<missing>')}: {exc}"
+            ) from exc
+
+
 def _expert_metadata(spec: EpisodeSpec, result, requested_seed: int,
                      generation_attempt: int, cfg) -> dict:
     planner_score = float(getattr(result, "planner_score", float("inf")))
@@ -519,7 +607,13 @@ def _expert_metadata(spec: EpisodeSpec, result, requested_seed: int,
     layout_fingerprint = hashlib.sha256(
         np.ascontiguousarray(initial_pose).tobytes()
     ).hexdigest()
+    selection = _expert_selection_audit(result, cfg, spec.target_count)
+    protocol = expert_generation_protocol(cfg)
     return {
+        **({"expert_generation_protocol": protocol} if protocol is not None else {}),
+        **({"expert_landing_region": result.expert_landing_region}
+           if getattr(result, "expert_landing_region", None) is not None else {}),
+        **({"target_selection": selection} if selection is not None else {}),
         "episode_kind": "expert",
         "split": "train",
         "seed": int(spec.seed),
@@ -573,8 +667,14 @@ def _expert_metadata(spec: EpisodeSpec, result, requested_seed: int,
 def _capture_training_episode(cfg, writer: ActDatasetWriter,
                               root: Path, spec: EpisodeSpec,
                               requested_seed: int,
-                              generation_attempt: int) -> dict:
+                              generation_attempt: int,
+                              episode_id: str | None = None,
+                              candidate_workers: int | None = None) -> dict:
     local_cfg = _expert_config(cfg, spec.target_count)
+    if candidate_workers is not None:
+        local_cfg.set_path(
+            "planner.expert_validation_workers", max(1, int(candidate_workers))
+        )
     result = run_expert_episode(
         local_cfg, seed=int(spec.seed), collect_observations=True
     )
@@ -587,7 +687,8 @@ def _capture_training_episode(cfg, writer: ActDatasetWriter,
             f"candidate={result.planner_attempts}; "
             f"frames={result.sampled_frames}"
         )
-    episode_id = next_demo_name([root], spec.target_count)
+    episode_id = (str(episode_id) if episode_id is not None
+                  else next_demo_name([root], spec.target_count))
     metadata = _expert_metadata(
         spec, result, requested_seed, generation_attempt, local_cfg
     )
@@ -596,6 +697,93 @@ def _capture_training_episode(cfg, writer: ActDatasetWriter,
         control_trace=result.trace,
     )
     return {"episode_id": episode_id, **metadata}
+
+
+def _capture_approved_training_slot(cfg, root: str, planned: EpisodeSpec,
+                                    max_attempts: int, image_format: str,
+                                    episode_id: str,
+                                    previously_failed_seeds: list[int],
+                                    candidate_workers: int) -> dict:
+    """Generate one independent layout slot, retrying only its seed window."""
+    if isinstance(cfg, dict):
+        cfg = Config(cfg)
+    root_path = Path(root)
+    writer = ActDatasetWriter(root, image_format=image_format)
+    failed_seeds = set(int(seed) for seed in previously_failed_seeds)
+    for attempt in range(1, int(max_attempts) + 1):
+        seed = int(planned.seed) + attempt - 1
+        if seed in failed_seeds:
+            continue
+        spec = EpisodeSpec(
+            split="train", target_count=planned.target_count,
+            seed=seed, layout_id=planned.layout_id,
+            layout_kind="independent",
+        )
+        print(json.dumps({
+            "event": "expert_attempt_started",
+            "target_count": int(planned.target_count),
+            "layout_id": str(planned.layout_id),
+            "attempt": attempt,
+            "seed": seed,
+            "episode_id": episode_id,
+        }, ensure_ascii=False), flush=True)
+        try:
+            episode = _capture_training_episode(
+                cfg, writer, root_path, spec, int(planned.seed), attempt,
+                episode_id=episode_id,
+                candidate_workers=candidate_workers,
+            )
+        except RuntimeError as exc:
+            failure = {
+                "layout_id": str(planned.layout_id),
+                "layout_kind": "independent",
+                "target_count": int(planned.target_count),
+                "requested_seed": int(planned.seed),
+                "seed": seed,
+                "generation_attempt": attempt,
+                "stage": "rollout",
+                "reason": str(exc),
+            }
+            _append_failure_log(root_path, failure)
+            print(json.dumps({
+                "event": "expert_attempt_failed",
+                **failure,
+            }, ensure_ascii=False), flush=True)
+            continue
+        return episode
+    raise RuntimeError(
+        f"could not record layout {planned.layout_id} for target "
+        f"{planned.target_count} after {max_attempts} seeds"
+    )
+
+
+def _reserve_episode_ids(root: Path, pending: list[EpisodeSpec]) -> dict[tuple[str, int], str]:
+    """Reserve distinct canonical names before concurrent writers start."""
+    occupied = {str(record.get("episode_id", "")) for record in _read_manifest(root)}
+    if root.is_dir():
+        occupied.update(child.name for child in root.iterdir() if child.is_dir())
+    next_serial_by_target: dict[int, int] = {}
+    episode_ids = {}
+    for planned in pending:
+        target_count = int(planned.target_count)
+        if target_count not in next_serial_by_target:
+            next_serial_by_target[target_count] = next_demo_serial(
+                [root], target_count
+            )
+        serial = next_serial_by_target[target_count]
+        while demo_name(target_count, serial) in occupied:
+            serial += 1
+        episode_id = demo_name(target_count, serial)
+        occupied.add(episode_id)
+        next_serial_by_target[target_count] = serial + 1
+        episode_ids[(planned.layout_id, planned.target_count)] = episode_id
+    return episode_ids
+
+
+def _worker_config_payload(cfg):
+    """Convert nested Config objects to spawn-safe plain mappings."""
+    to_dict = getattr(cfg, "to_dict", None)
+    return to_dict() if callable(to_dict) else cfg
 
 
 def _screen_single_layout(cfg, target_count: int, requested_seed: int,
@@ -630,7 +818,8 @@ def generate_approved_training_dataset(cfg, root: str | Path,
                                        seed_base: int = 410000,
                                        max_attempts: int = 64,
                                        episodes_per_target: int = 20,
-                                       image_format: str = "png") -> dict:
+                                       image_format: str = "png",
+                                       workers: int = 1) -> dict:
     """Generate a balanced set of successful demonstrations on unique layouts.
 
     The accepted six-record pilot remains in the preview directory and is not
@@ -652,11 +841,18 @@ def generate_approved_training_dataset(cfg, root: str | Path,
             "formal dataset root contains preview/legacy records; use a fresh "
             f"training directory instead: {incompatible[:5]}"
         )
+    _validate_existing_generation_protocol(existing, _generation_protocol_options(cfg))
+    subset_mode = (expert_target_subset_mode(cfg)
+                   if hasattr(cfg, "get_path") else "any")
+    _validate_existing_target_selection(existing, subset_mode)
     if not 1 <= int(max_attempts) < 256:
         raise ValueError("max_attempts must be between 1 and 255")
     episodes_per_target = int(episodes_per_target)
     if episodes_per_target < 1:
         raise ValueError("episodes_per_target must be positive")
+    workers = int(workers)
+    if workers < 1:
+        raise ValueError("workers must be positive")
     slots = {
         (str(record.get("layout_id", "")), int(record.get("target_count", 0)))
         for record in existing
@@ -678,81 +874,128 @@ def generate_approved_training_dataset(cfg, root: str | Path,
     writer = ActDatasetWriter(str(root), image_format=image_format)
     generated = []
     completed = len(slots)
-    for planned in training_episode_plan(seed_base, episodes_per_target):
-        slot = (planned.layout_id, planned.target_count)
-        if slot in slots:
-            continue
-        episode = None
-        accepted_seed = int(planned.seed)
-        for attempted_seeds in range(1, int(max_attempts) + 1):
-            accepted_seed = int(planned.seed) + attempted_seeds - 1
-            if accepted_seed in failed_seeds.get(slot, set()):
+    plan = training_episode_plan(seed_base, episodes_per_target)
+    pending = [planned for planned in plan
+               if (planned.layout_id, planned.target_count) not in slots]
+    if workers == 1:
+        scheduled = pending
+        for planned in scheduled:
+            slot = (planned.layout_id, planned.target_count)
+            if slot in slots:
                 continue
-            spec = EpisodeSpec(
-                split="train", target_count=planned.target_count,
-                seed=accepted_seed, layout_id=planned.layout_id,
-                layout_kind="independent",
-            )
+            episode = None
+            accepted_seed = int(planned.seed)
+            for attempted_seeds in range(1, int(max_attempts) + 1):
+                accepted_seed = int(planned.seed) + attempted_seeds - 1
+                if accepted_seed in failed_seeds.get(slot, set()):
+                    continue
+                spec = EpisodeSpec(
+                    split="train", target_count=planned.target_count,
+                    seed=accepted_seed, layout_id=planned.layout_id,
+                    layout_kind="independent",
+                )
+                print(json.dumps({
+                    "event": "expert_attempt_started",
+                    "completed": completed,
+                    "total": 6 * episodes_per_target,
+                    "target_count": int(planned.target_count),
+                    "layout_id": str(planned.layout_id),
+                    "attempt": attempted_seeds,
+                    "seed": int(accepted_seed),
+                }, ensure_ascii=False), flush=True)
+                try:
+                    episode = _capture_training_episode(
+                        cfg, writer, root, spec, planned.seed, attempted_seeds
+                    )
+                except RuntimeError as exc:
+                    failure = {
+                        "layout_id": str(planned.layout_id),
+                        "layout_kind": "independent",
+                        "target_count": int(planned.target_count),
+                        "requested_seed": int(planned.seed),
+                        "seed": int(accepted_seed),
+                        "generation_attempt": int(attempted_seeds),
+                        "stage": "rollout",
+                        "reason": str(exc),
+                    }
+                    _append_failure_log(root, failure)
+                    print(json.dumps({
+                        "event": "expert_attempt_failed",
+                        "completed": completed,
+                        **failure,
+                    }, ensure_ascii=False), flush=True)
+                    continue
+                generated.append(episode)
+                break
+            if episode is None:
+                raise RuntimeError(
+                    f"could not record layout {planned.layout_id} for target "
+                    f"{planned.target_count} after {max_attempts} seeds"
+                )
+            slots.add(slot)
+            completed += 1
             print(json.dumps({
-                "event": "expert_attempt_started",
+                "event": "expert_episode_saved",
                 "completed": completed,
                 "total": 6 * episodes_per_target,
                 "target_count": int(planned.target_count),
                 "layout_id": str(planned.layout_id),
-                "attempt": attempted_seeds,
                 "seed": int(accepted_seed),
-            }, ensure_ascii=False), flush=True)
-            try:
-                episode = _capture_training_episode(
-                    cfg, writer, root, spec, planned.seed, attempted_seeds
-                )
-            except RuntimeError as exc:
-                failure = {
-                    "layout_id": str(planned.layout_id),
-                    "layout_kind": "independent",
-                    "target_count": int(planned.target_count),
-                    "requested_seed": int(planned.seed),
-                    "seed": int(accepted_seed),
-                    "generation_attempt": int(attempted_seeds),
-                    "stage": "rollout",
-                    "reason": str(exc),
+            }), flush=True)
+    else:
+        episode_ids = _reserve_episode_ids(root, pending)
+        try:
+            candidate_worker_budget = max(1, int(
+                cfg.get_path("planner.expert_validation_workers", 1)
+            ) // workers)
+        except AttributeError:
+            candidate_worker_budget = 1
+        worker_cfg = _worker_config_payload(cfg)
+        with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=multiprocessing.get_context("spawn")) as pool:
+            # Parallelize layouts within a target, never across the 6→1 stages.
+            for target_count in range(6, 0, -1):
+                futures = {
+                    pool.submit(
+                        _capture_approved_training_slot,
+                        worker_cfg, str(root), planned, int(max_attempts), image_format,
+                        episode_ids[(planned.layout_id, planned.target_count)],
+                        sorted(failed_seeds.get(
+                            (planned.layout_id, planned.target_count), set())),
+                        candidate_worker_budget,
+                    ): planned
+                    for planned in pending if planned.target_count == target_count
                 }
-                _append_failure_log(root, failure)
-                print(json.dumps({
-                    "event": "expert_attempt_failed",
-                    "completed": completed,
-                    **failure,
-                }, ensure_ascii=False), flush=True)
-                continue
-            generated.append(episode)
-            break
-        if episode is None:
-            raise RuntimeError(
-                f"could not record layout {planned.layout_id} for target "
-                f"{planned.target_count} after {max_attempts} seeds"
-            )
-        slots.add(slot)
-        completed += 1
-        print(json.dumps({
-            "event": "expert_episode_saved",
-            "completed": completed,
-            "total": 6 * episodes_per_target,
-            "target_count": int(planned.target_count),
-            "layout_id": str(planned.layout_id),
-            "seed": int(accepted_seed),
-        }), flush=True)
+                for future in as_completed(futures):
+                    planned = futures[future]
+                    episode = future.result()
+                    generated.append(episode)
+                    slots.add((planned.layout_id, planned.target_count))
+                    completed += 1
+                    print(json.dumps({
+                        "event": "expert_episode_saved",
+                        "completed": completed,
+                        "total": 6 * episodes_per_target,
+                        "target_count": int(planned.target_count),
+                        "layout_id": str(planned.layout_id),
+                        "seed": int(episode.get("seed", planned.seed)),
+                        "episode_id": episode["episode_id"],
+                    }), flush=True)
 
     act_config = getattr(cfg, "act", None)
     configured_views = (act_config.get("camera_views", None)
                         if act_config is not None else None)
     if configured_views is None:
         validation = validate_training_manifest(
-            root, episodes_per_target=episodes_per_target
+            root, episodes_per_target=episodes_per_target,
+            **({"target_subset_mode": subset_mode} if subset_mode != "any" else {}),
         )
     else:
         validation = validate_training_manifest(
             root, episodes_per_target=episodes_per_target,
             camera_views=list(configured_views),
+            **({"target_subset_mode": subset_mode} if subset_mode != "any" else {}),
         )
     if episodes_per_target == 15:
         validate_preview_training_manifest(root, per_target=15)
@@ -800,6 +1043,10 @@ def main(argv=None) -> int:
         help="lossless image storage format; WebP reduces disk use without changing RGB pixels",
     )
     parser.add_argument(
+        "--workers", type=int, default=1,
+        help="parallel full-episode workers for --approved-plan (default: 1)",
+    )
+    parser.add_argument(
         "--write-split-manifests-only",
         action="store_true",
         help="write the frozen 60 validation and 120 test layout assignments",
@@ -817,9 +1064,20 @@ def main(argv=None) -> int:
             parser.error("--episodes-per-target must be positive")
     if args.max_attempts_per_episode < 1:
         parser.error("--max-attempts-per-episode must be positive")
+    if args.workers < 1:
+        parser.error("--workers must be positive")
+    if args.workers > 1 and not args.approved_plan:
+        parser.error("--workers greater than 1 requires --approved-plan")
     cfg = load_config(args.config, overrides=args.set)
     root = args.out or str(cfg.act.dataset_dir)
     root_path = Path(root)
+    # Reject incompatible history before saving configs, reserving names, or
+    # replacing validation/test assignments. This also covers the normal CLI.
+    if args.promote_preview is None and (args.approved_plan or not args.write_split_manifests_only):
+        _validate_existing_generation_protocol(
+            _read_manifest(root_path),
+            _generation_protocol_options(cfg, "mixed" if args.approved_plan else args.composition),
+        )
     if args.promote_preview is not None:
         promoted = promote_preview_batch(args.promote_preview, root_path)
         print(json.dumps({
@@ -844,6 +1102,7 @@ def main(argv=None) -> int:
                 else int(args.episodes_per_target)
             ),
             image_format=args.image_format,
+            workers=args.workers,
         )
         print(json.dumps(output, ensure_ascii=False))
         return 0
@@ -887,9 +1146,14 @@ def main(argv=None) -> int:
                 break
         if result.success or args.all_episodes:
             episode_id = next_demo_name([Path(root), preview_root], target_count)
+            protocol = expert_generation_protocol(local_cfg)
             writer.add_episode(
                 episode_id, result.observations, result.actions,
-                result.success, {"split": args.split, "seed": accepted_seed,
+                result.success, {**({"expert_generation_protocol": protocol}
+                                    if protocol is not None else {}),
+                                  **({"expert_landing_region": result.expert_landing_region}
+                                     if getattr(result, "expert_landing_region", None) is not None else {}),
+                                  "split": args.split, "seed": accepted_seed,
                                   "requested_seed": seed,
                                   "generation_attempt": generation_attempt,
                                   "episode_kind": "expert",

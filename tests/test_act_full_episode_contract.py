@@ -401,42 +401,35 @@ def test_exact_delivery_wins_over_contact_loss_on_same_control_substep(monkeypat
     assert result.failure_reason == ""
 
 
-def test_inference_collection_tracker_keeps_act_running_during_target_hold():
-    tracker = CollectionTerminationTracker(
-        target_count=3, target_hold_seconds=2.0, stall_timeout_seconds=3.0,
-    )
+def test_inference_collection_tracker_finishes_on_exact_target():
+    tracker = CollectionTerminationTracker(target_count=3)
     empty = np.zeros(6, dtype=bool)
     one = np.array([True, False, False, False, False, False])
     target = np.array([True, True, True, False, False, False])
 
     assert tracker.update(empty, 0.0) == ""
     assert tracker.update(one, 1.0) == ""
-    assert tracker.update(target, 2.0) == ""
-    assert tracker.update(target, 3.9) == ""
-    assert tracker.update(target, 4.0) == "target count hold elapsed"
+    assert tracker.update(target, 2.0) == "exact target count reached"
 
 
-def test_inference_collection_tracker_stops_after_three_seconds_without_new_entry():
-    tracker = CollectionTerminationTracker(
-        target_count=4, target_hold_seconds=2.0, stall_timeout_seconds=3.0,
-    )
+def test_inference_collection_tracker_does_not_reset_first_entry_deadline():
+    tracker = CollectionTerminationTracker(target_count=4)
     one = np.array([True, False, False, False, False, False])
+    two = np.array([True, True, False, False, False, False])
 
     assert tracker.update(one, 5.0) == ""
-    assert tracker.update(one, 7.99) == ""
-    assert tracker.update(one, 8.0) == "collection stalled for 3 seconds"
+    assert tracker.update(two, 6.0) == ""
+    assert tracker.update(one, 6.99) == ""
+    assert tracker.update(np.zeros(6, dtype=bool), 7.0) == "2-second collection window elapsed"
 
 
-def test_expert_and_act_inference_reference_shared_termination_helpers():
-    import inspect
-    import sim.act.evaluate as evaluate
-    import sim.act.rollout as rollout
+def test_exact_inference_goal_rejects_overcollection():
+    mask = np.array([True, True, True, False, False, False])
 
-    assert "collection_step_status" in inspect.getsource(rollout.run_action_path)
-    assert "brush_delivery_reached" in inspect.getsource(rollout.run_action_path)
-    assert "collection_step_status" in inspect.getsource(evaluate.run_act_episode)
-    assert "CollectionTerminationTracker" in inspect.getsource(evaluate.run_act_episode)
-    assert "brush_delivery_reached" not in inspect.getsource(evaluate.run_act_episode)
+    success, reason = collection_goal_status(mask, None, target_count=2)
+
+    assert not success
+    assert reason == "unexpected component entered the target region"
 
 
 def test_act_inference_module_has_no_astar_or_layout_dependent_staging_dependency():
@@ -528,14 +521,18 @@ def test_training_reader_and_act_rollout_work_when_astar_entrypoints_raise(
         lambda *args, **kwargs: (lambda value: value, lambda value: value),
     )
     cfg = load_config(overrides=[
-        "sim.real_time=false", "episode.max_frames=1",
+        "sim.real_time=false", "task.target_count=1",
+        "episode.max_time=0.01", "episode.max_frames=1",
         f"act.dataset_dir={tmp_path / 'missing'}",
         "act.image_size=[8,8]",
     ])
 
     result = evaluate.run_act_episode(cfg, seed=7, model_path=None, preview=True)
 
-    assert result.failure_reason == "episode frame limit reached"
+    assert result.success
+    assert result.failure_reason == ""
+    assert result.termination_reason == "exact target count reached"
+    assert result.sampled_frames == 1
     assert result.scheduler_queries >= 1
     assert result.first_contact_position is None
 

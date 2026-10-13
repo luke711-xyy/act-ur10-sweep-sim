@@ -254,6 +254,47 @@ class SweepEnv:
     def component_quats(self) -> np.ndarray:
         return np.array([self.data.xquat[bid] for bid in self.component_body_ids], dtype=float)
 
+    def component_collision_x_max(self) -> float:
+        """Rightmost settled surface of all parts, including compound proxies.
+
+        Uses current world geom poses rather than body centres or nominal
+        planar radii. Visual-only meshes do not enlarge the collision surface.
+        """
+        import mujoco
+        edges = []
+        for group in self.component_geom_ids:
+            for gid in group:
+                if not (self.model.geom_contype[gid] or self.model.geom_conaffinity[gid]):
+                    continue
+                kind = int(self.model.geom_type[gid])
+                size = self.model.geom_size[gid]
+                row = np.asarray(self.data.geom_xmat[gid]).reshape(3, 3)[0]
+                if kind == mujoco.mjtGeom.mjGEOM_SPHERE:
+                    extent = float(size[0])
+                elif kind == mujoco.mjtGeom.mjGEOM_BOX:
+                    extent = float(np.abs(row) @ size)
+                elif kind == mujoco.mjtGeom.mjGEOM_CYLINDER:
+                    extent = (float(size[1]) * abs(row[2])
+                              + float(size[0]) * np.sqrt(max(0.0, 1.0-row[2]**2)))
+                elif kind == mujoco.mjtGeom.mjGEOM_CAPSULE:
+                    extent = float(size[0]) + float(size[1]) * abs(row[2])
+                elif kind == mujoco.mjtGeom.mjGEOM_ELLIPSOID:
+                    extent = float(np.linalg.norm(row * size))
+                elif kind == mujoco.mjtGeom.mjGEOM_MESH:
+                    mesh = int(self.model.geom_dataid[gid])
+                    start = int(self.model.mesh_vertadr[mesh])
+                    count = int(self.model.mesh_vertnum[mesh])
+                    extent = float(np.max(self.model.mesh_vert[start:start+count] @ row))
+                else:
+                    raise ValueError(f"unsupported part collision geometry for landing: {kind}")
+                edge = float(self.data.geom_xpos[gid, 0]) + extent
+                if not np.isfinite(edge):
+                    raise ValueError("landing requires finite part collision surfaces")
+                edges.append(edge)
+        if not edges:
+            raise ValueError("landing requires a nonempty part collision layout")
+        return max(edges)
+
     def collected_mask(self) -> np.ndarray:
         """Conservative full-geometry inclusion mask for the collection tray.
 

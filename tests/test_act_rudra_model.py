@@ -252,6 +252,9 @@ def test_rudra_ur10_holds_brush_contact_across_nominal_sweep_lane():
         "end_effector.type=ur10_cb3_rudra",
         "sim.real_time=false",
         "task.target_count=6",
+        # Historical contact-calibration lane, not the new demo landing rule.
+        "task.expert_landing_x_min=null",
+        "task.expert_landing_clearance=null",
     ])
     env = SweepEnv(cfg, seed=290926)
     try:
