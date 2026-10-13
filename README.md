@@ -1,5 +1,27 @@
 # act-ur10-sweep-sim — MuJoCo UR10 ACT tabletop sweep
 
+> **当前最新开发线：`feat/act-five-view` — fine-teached ordinary ACT。**
+> 启动、训练、评测及单次 A* baseline 见 [当前运行指南](docs/fine-teached-guide.md)；
+> 历史实验与回滚锚点见 [分支导航](docs/branch-guide.md)。模型、数据、日志不随源码上传。
+
+## 当前版本一览
+
+- 六零件、目标 1–6；五路 320×320 RGB、36 维状态、1 维 float32 目标数经 Linear
+  输入（不是 goal-token embedding）、4 维动作，chunk 25 / execute 5。
+- 潜在簇中心在 `(0.05,0)` m、半径 0.10 m 圆盘内按面积均匀采样；零件最大散布
+  0.14 m，已去掉 X ≥ −0.08 m 限制。旧未选圆盘的冻结配置保留旧采样/RNG 分支。
+- 全覆盖 A*、Y 边缘连续选件、距本布局最靠 +X 零件外缘 7 cm 的动态落刷边界，
+  路径首次穿越该边界处落刷；全部目标收齐后停止专家高度阈值检查。
+- 通用 `default.yaml` 仍是 batch 2；本次正式 **batch 4、MPS、FP32、AMP 关闭**
+  的完整便携快照见 [five-view-fine-teached-300.yaml](configs/five-view-fine-teached-300.yaml)。
+  50K/100K/200K 三个保存点的 CLI 参数见运行指南。
+- 工作台刷新选择本次训练最新完整 checkpoint，显式输入优先；新推理名显示实际
+  checkpoint，seed 留在元数据；Play 旁可导出已保存示教或回放视频。
+
+本次训练按用户要求于 2026-10-14 安全中断在 **103,243 步**；额外中断点不是 200K。
+原 100K 保存点未改写，本轮 ACT 批测固定使用它。A* baseline 每布局最多一次物理执行，
+不允许候选物理筛选或失败重试。全量测试未完成，发布开发快照不表示全套测试或策略评测通过。
+
 A minimal but runnable **MuJoCo** prototype of a contact-rich sweeping task: a robot uses
 its **fixed brush directly as a pusher** to collect small industrial components
 (nuts, screws, bolts, washers) from a flat table into a fixed shallow tray at the table
@@ -30,6 +52,8 @@ contracts. See [the branch guide](docs/branch-guide.md) before switching branche
 records each branch's purpose and the ordinary-ACT versus goal-token distinction.
 
 ## Quick start
+
+下列保留旧规划器与早期示教流程；当前 fine-teached 六零件任务请优先看上方运行指南。
 
 ```bash
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
@@ -104,6 +128,46 @@ parameter editor. Every policy observation contains five synchronized RGB
 images: four fixed cameras outside the tabletop corners, each aimed toward the
 table centre, plus the wrist camera. These are the only cameras used by the
 workbench and the ACT policy.
+
+Every `Run inference` job automatically exports a five-view H.264 MP4 after
+its replay is saved, including failed/2000-frame-timeout episodes. The video
+contains raw/filtered force history, TCP/command Z, target count and checkpoint
+label. `web.inference_video_dir` selects the persistent output folder; the
+Inference panel shows a video link and its saved path. Existing videos are never
+overwritten. Encoding reads the saved frames, uses at most two CPU threads, and
+does not execute the policy again. Export errors are reported separately without
+changing the physical inference outcome. Standalone replay-enabled evaluation
+can override the destination with `--video-root`.
+
+After full MP4 decoding verifies the frame count, size and frame rate, disposable
+inference PNG/WebP frames are deleted automatically. The video, frame telemetry
+and original 100 Hz causal command trace remain; workbench playback reads camera
+panels from the MP4. Failed export/validation preserves the images for recovery.
+Expert/training images are never part of this cleanup. Manual and batch inference
+share one process lease, including replay/export, without locking training.
+
+`python -m sim.act.batch_evaluate --out /path/to/exports/independent-batch`
+freezes the ready 100k checkpoint and includes 200k only when fully published at
+initial preparation. It evaluates 20 independent held-out layouts for each of six
+targets, serially: every rollout has a unique seed and layout fingerprint, also
+across checkpoints if both are ready (120 distinct layouts per checkpoint).
+It rejects overlap with training seeds/layouts and freezes the episode plan.
+Videos, replays, CSV scores and provisional/final count-density
+plots stay in that separate folder. Restarting the same command resumes the
+ledger without repeating already measured rollouts.
+
+ACT inference checks full-footprint tray inclusion on every 100 Hz control step.
+The first fully entered part starts a fixed two-second **simulated-time** window;
+later entries, exits, or re-entries never reset it. An exact target count with no
+partially overlapping part ends the rollout immediately. The original 2000-frame
+budget remains a hard upper bound, even if a first entry occurs near its end; the
+two-second window is a latest deadline, not a minimum wait or budget extension.
+The inference achievement is the largest count
+fully inside **at the same time**, not a cumulative sum of visited parts. Job and
+replay summaries retain this peak and the separate final retained count: a peak
+of four for goal six remains a failed/partial `4/6`, even if none remain at the end.
+Per-frame counts continue to describe the physical replay state. Existing expert
+demonstrations and checkpoints are not relabelled.
 
 "Generate expert preview" runs the force-controlled expert and stores the
 accepted rollout under `runs/workbench_previews/`; a failed layout is retried
@@ -629,7 +693,12 @@ Both are reproducible from `(config, seed)` and both enforce the same guarantees
 starts inside the target, minimum separation, inside the spawn box).  In the default
 cluster mode, `center_mean`, `center_std`, and `center_bounds` randomise the group
 centre without allowing it to wander across the full spawn box; component offsets,
-orientations, masses, and frictions remain random.  Exact `N<6`
+orientations, masses, and frictions remain random.  New default cluster centres
+are sampled with `0.015 <= X <= 0.18 m`; individual parts may extend beyond
+`X=0.18 m` within the unchanged spawn box (`-0.08 <= X <= 0.36 m`,
+`-0.26 <= Y <= 0.26 m`).  This limit applies to the sampled cluster anchor,
+not the realised arithmetic mean after random offsets and placement rejection.
+Existing demonstration/replay files and checkpoints are not rewritten.  Exact `N<6`
 previews still contain six physical parts and use `components.exact_partial_spawn_mode`,
 which is `cluster` by default; changing it to `uniform` is an explicit wider-layout
 experiment, not a hidden change to the task count.
