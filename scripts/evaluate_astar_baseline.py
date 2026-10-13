@@ -127,8 +127,7 @@ def publish_summary(root, rows):
     })
 
 
-def run_batch(act_root, root):
-    act_root, root = Path(act_root).resolve(), Path(root).resolve()
+def _run_owned_batch(act_root, root):
     plan = json.loads((act_root / "episode_plan.json").read_text())
     validate_plan(plan)
     metadata = json.loads((act_root / "metadata.json").read_text())
@@ -176,39 +175,61 @@ def run_batch(act_root, root):
             raise RuntimeError("baseline ledger no longer matches paired plan")
     markers = root / "attempts"
     markers.mkdir(exist_ok=True)
-    with (root / "batch.lock").open("a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    publish_summary(root, rows)
+    for spec in plan:
+        if spec["key"] in completed:
+            continue
+        if _source_fingerprints(PROJECT) != identity["sources_sha256"]:
+            raise RuntimeError("simulation source changed during baseline")
+        if (hashlib.sha256((act_root / "episode_plan.json").read_bytes()).hexdigest() != identity["plan_sha256"]
+                or hashlib.sha256(config.read_bytes()).hexdigest() != identity["config_sha256"]
+                or hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != identity["runner_sha256"]):
+            raise RuntimeError("baseline frozen input or runner changed")
+        marker = markers / f"seed_{spec['seed']}.json"
+        # An interrupted attempt is not a free second opportunity.
+        if marker.exists():
+            raise RuntimeError("unfinished attempt requires a user decision; automatic retry is forbidden")
+        with marker.open("x") as stream:
+            stream.write(json.dumps({"key": spec["key"], "started_at": time.time()}))
+            stream.flush()
+            os.fsync(stream.fileno())
+        write_json(root / "status.json", {"state": "running", "completed": len(rows),
+            "planned": 120, "current": spec["key"], "pid": os.getpid()})
+        with inference_lease():
+            row = evaluate_trial(cfg, spec)
+        with ledger.open("a") as stream:
+            stream.write(json.dumps(row, allow_nan=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        rows.append(row)
+        completed.add(spec["key"])
         publish_summary(root, rows)
-        for spec in plan:
-            if spec["key"] in completed:
-                continue
-            if _source_fingerprints(PROJECT) != identity["sources_sha256"]:
-                raise RuntimeError("simulation source changed during baseline")
-            if (hashlib.sha256((act_root / "episode_plan.json").read_bytes()).hexdigest() != identity["plan_sha256"]
-                    or hashlib.sha256(config.read_bytes()).hexdigest() != identity["config_sha256"]
-                    or hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != identity["runner_sha256"]):
-                raise RuntimeError("baseline frozen input or runner changed")
-            marker = markers / f"seed_{spec['seed']}.json"
-            # An interrupted attempt is not a free second opportunity.
-            if marker.exists():
-                raise RuntimeError("unfinished attempt requires a user decision; automatic retry is forbidden")
-            with marker.open("x") as stream:
-                stream.write(json.dumps({"key": spec["key"], "started_at": time.time()}))
-                stream.flush()
-                os.fsync(stream.fileno())
-            write_json(root / "status.json", {"state": "running", "completed": len(rows),
-                "planned": 120, "current": spec["key"], "pid": os.getpid()})
-            with inference_lease():
-                row = evaluate_trial(cfg, spec)
-            with ledger.open("a") as stream:
-                stream.write(json.dumps(row, allow_nan=False) + "\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            rows.append(row)
-            completed.add(spec["key"])
-            publish_summary(root, rows)
-            print(json.dumps({"event": "astar_trial_finished", "completed": len(rows), "seed": spec["seed"]}), flush=True)
-        write_json(root / "status.json", {"state": "complete", "completed": len(rows), "planned": 120})
+        print(json.dumps({"event": "astar_trial_finished", "completed": len(rows), "seed": spec["seed"]}), flush=True)
+    write_json(root / "status.json", {"state": "complete", "completed": len(rows), "planned": 120})
+
+
+def run_batch(act_root, root, wait_act=False):
+    act_root, root = Path(act_root).resolve(), Path(root).resolve()
+    if root == act_root or root in act_root.parents or act_root in root.parents:
+        raise ValueError("baseline output must be separate from the frozen ACT batch")
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / "batch.lock").open("a+") as lock:
+        # A competing launch owns nothing and must not write an error status.
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            if wait_act:
+                while not act_complete(act_root):
+                    write_json(root / "status.json", {"state": "waiting_for_act",
+                        "act_batch": str(act_root), "pid": os.getpid()})
+                    print(json.dumps({"event": "waiting_for_act_batch"}), flush=True)
+                    time.sleep(30)
+            _run_owned_batch(act_root, root)
+        except BaseException as exc:
+            write_json(root / "status.json", {
+                "state": "needs_attention", "error": f"{type(exc).__name__}: {exc}",
+                "automatic_retry_forbidden": True,
+            })
+            raise
 
 
 def main(argv=None):
@@ -217,22 +238,7 @@ def main(argv=None):
     parser.add_argument("--out", required=True)
     parser.add_argument("--wait-act", action="store_true")
     args = parser.parse_args(argv)
-    root = Path(args.act_batch).resolve()
-    try:
-        if args.wait_act:
-            while not act_complete(root):
-                write_json(Path(args.out) / "status.json", {"state": "waiting_for_act",
-                    "act_batch": str(root), "pid": os.getpid()})
-                print(json.dumps({"event": "waiting_for_act_batch"}), flush=True)
-                time.sleep(30)
-        run_batch(root, Path(args.out))
-    except BaseException as exc:
-        destination = Path(args.out)
-        write_json(destination / "status.json", {
-            "state": "needs_attention", "error": f"{type(exc).__name__}: {exc}",
-            "automatic_retry_forbidden": True,
-        })
-        raise
+    run_batch(Path(args.act_batch), Path(args.out), wait_act=args.wait_act)
 
 
 if __name__ == "__main__":

@@ -165,8 +165,11 @@ def test_completed_ledger_rebuilds_interrupted_final_summary(tmp_path, paired_ac
 
 def test_waiter_tolerates_transient_summary_write(tmp_path, paired_act, monkeypatch):
     import json
+    from contextlib import nullcontext
     module = runner()
     monkeypatch.setattr(module.subprocess, "check_output", lambda *a, **k: "")
+    monkeypatch.setattr(module, "_source_fingerprints", lambda p: {})
+    monkeypatch.setattr(module, "inference_lease", nullcontext)
     (paired_act / "summary.json").write_text("{")
     waited = []
     def sleep(seconds):
@@ -174,9 +177,39 @@ def test_waiter_tolerates_transient_summary_write(tmp_path, paired_act, monkeypa
         (paired_act / "summary.json").write_text(json.dumps({"complete": True, "completed": 120, "planned": 120}))
     monkeypatch.setattr(module.time, "sleep", sleep)
     called = []
-    monkeypatch.setattr(module, "run_batch", lambda act, out: called.append(act))
+    def trial(cfg, spec):
+        called.append(spec["seed"])
+        return {**spec, "success": False, "physical_attempts": 1}
+    monkeypatch.setattr(module, "evaluate_trial", trial)
     module.main(["--act-batch", str(paired_act), "--out", str(tmp_path / "baseline"), "--wait-act"])
-    assert waited == [30] and called == [paired_act]
+    assert waited == [30] and len(called) == 120
+
+
+@pytest.mark.parametrize("alias", ["same", "child", "parent"])
+def test_output_cannot_overwrite_frozen_act_batch(tmp_path, paired_act, alias):
+    module = runner()
+    output = {"same": paired_act, "child": paired_act / "baseline", "parent": tmp_path}[alias]
+    before = (paired_act / "status.json").read_bytes()
+    with pytest.raises(ValueError, match="output must be separate"):
+        module.main(["--act-batch", str(paired_act), "--out", str(output), "--wait-act"])
+    assert (paired_act / "status.json").read_bytes() == before
+
+
+def test_competing_runner_cannot_publish_any_output_state(tmp_path, paired_act, monkeypatch):
+    import fcntl
+    module = runner()
+    monkeypatch.setattr(module.subprocess, "check_output", lambda *a, **k: "")
+    monkeypatch.setattr(module, "_source_fingerprints", lambda p: {})
+    out = tmp_path / "baseline"
+    out.mkdir()
+    (out / "status.json").write_text('{"state":"running","pid":123}')
+    before = (out / "status.json").read_bytes()
+    with (out / "batch.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(BlockingIOError):
+            module.main(["--act-batch", str(paired_act), "--out", str(out)])
+        assert not (out / "metadata.json").exists()
+        assert (out / "status.json").read_bytes() == before
 
 
 def test_single_attempt_uses_same_2000_frame_budget_as_act(monkeypatch):
