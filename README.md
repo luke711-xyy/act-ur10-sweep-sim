@@ -1,5 +1,24 @@
 # act-ur10-sweep-sim — MuJoCo UR10 ACT tabletop sweep
 
+## 分支导航与回滚（2026-10-14）
+
+**本分支：`feat/objectact-bev`**。结构化对象 / BEV 感知实验；与当前五路 RGB ordinary ACT 分开。
+
+- 当前最新布局、300 条示教、batch 4 / FP32 / 50K–100K–200K 保存点、推理与工作台：
+  [feat/act-five-view](https://github.com/luke711-xyy/act-ur10-sweep-sim/tree/feat/act-five-view)。
+- [完整分支导航](https://github.com/luke711-xyy/act-ur10-sweep-sim/blob/feat/act-five-view/docs/branch-guide.md)
+  · [当前运行指南](https://github.com/luke711-xyy/act-ur10-sweep-sim/blob/feat/act-five-view/docs/fine-teached-guide.md)。
+- 本轮仅修改本分支 README；文档更新前的固定代码锚点是
+  [`5ce7a97a3c8e5575148cf1ee5e7db3a80d40116f`](https://github.com/luke711-xyy/act-ur10-sweep-sim/commit/5ce7a97a3c8e5575148cf1ee5e7db3a80d40116f)，旧实现保持原样。
+- 运行训练或冻结批测时不要切分支、reset、pull 合并或改配置。作业结束、工作区干净后才可
+  `git switch --detach 5ce7a97a3c8e5575148cf1ee5e7db3a80d40116f` 查看历史；只读查看无需切换：
+  `git show 5ce7a97a3c8e5575148cf1ee5e7db3a80d40116f:configs/default.yaml`。
+- Git 回滚不会还原未上传的 checkpoint、processor、数据/运行快照或已删除媒体。
+  不使用 reset --hard，不强制推送，不把新分支自动合并进 main。
+
+以下是**本分支原有说明**，保留其配置与历史上下文，不表示已迁移到最新实验。
+
+
 A minimal but runnable **MuJoCo** prototype of a contact-rich sweeping task: a robot uses
 its **fixed brush directly as a pusher** to collect small industrial components
 (nuts, screws, bolts, washers) from a flat table into a fixed shallow tray at the table
