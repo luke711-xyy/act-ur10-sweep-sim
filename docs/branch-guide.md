@@ -4,7 +4,7 @@
 
 | 分支 | 用途与入口 | 固定回滚锚点 |
 | --- | --- | --- |
-| [feat/act-five-view](https://github.com/luke711-xyy/act-ur10-sweep-sim/tree/feat/act-five-view) | 当前最新：五视角 ordinary ACT、fine-teached 布局/示教/落刷，训练、推理、工作台、批测；见 [运行指南](fine-teached-guide.md)。 | 本次完整源码快照 [`25d2b8d17fce7dbcfdfe545c4371181cb5f30c0a`](https://github.com/luke711-xyy/act-ur10-sweep-sim/commit/25d2b8d17fce7dbcfdfe545c4371181cb5f30c0a)；更早开发点 `239cc8d` 不含完整更新。 |
+| [feat/act-five-view](https://github.com/luke711-xyy/act-ur10-sweep-sim/tree/feat/act-five-view) | 当前最新：五视角 ordinary ACT、fine-teached 布局/示教/落刷，训练、推理、工作台、批测；见 [运行指南](fine-teached-guide.md)。 | 本次完整源码及 A* 输出保护快照 [`6aa8386998d068013962db0faebb5c0bddea666e`](https://github.com/luke711-xyy/act-ur10-sweep-sim/commit/6aa8386998d068013962db0faebb5c0bddea666e)；更早开发点 `239cc8d` 不含完整更新。 |
 | [main](https://github.com/luke711-xyy/act-ur10-sweep-sim/tree/main) | 历史 ordinary-ACT/V10 基线，不是最新五视角任务。 | `e8895a2d4c30942e0bbc23436f1caf97a45958e0` |
 | [feat/robot-learning-workbench](https://github.com/luke711-xyy/act-ur10-sweep-sim/tree/feat/robot-learning-workbench) | 历史工作台/ordinary-ACT 开发线；本轮只补导航，不合并五视角新代码。 | `60e72dc8bfebd732c69f2858fa96bcb0a58501b6` |
 | [feat/mt-act-goal-embedding](https://github.com/luke711-xyy/act-ur10-sweep-sim/tree/feat/mt-act-goal-embedding) | 可选类别 goal-token 实验；该分支曾运行 scalar ordinary ACT，必须核对实际 policy/config。 | `09ebcf37e9fbd21da303d785d688c494df1fa506` |
