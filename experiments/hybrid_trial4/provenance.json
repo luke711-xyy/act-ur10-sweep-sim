@@ -1,0 +1,162 @@
+{
+  "schema": 1,
+  "scope": "code-only dependency migration; no control declarations changed",
+  "files": [
+    {
+      "source_relative_to_exports": "act_geometry3mm_admittance5mm_k20_trial_20261014/runner.py",
+      "source_sha256": "4734bfe748a85763d2e7bd7f78b86a397fdd571d4509cf5a5a96d6b60ef671f6",
+      "portable_path": "experiments/hybrid_trial4/vendor/act_geometry3mm_admittance5mm_k20_trial_20261014/runner.py",
+      "portable_sha256": "9e69b601180379346dee473ec3230e6e03a1c1e8e8b496a757c8e4139f02ec96",
+      "path_assignment_changes": [
+        {
+          "line": 19,
+          "portable": "PROJECT = Path(__file__).resolve().parents[4]"
+        }
+      ],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "act_geometry3mm_admittance5mm_trial_20261014/trial.py",
+      "source_sha256": "331097b956948a9edd94dbe5b36d636bd207491c1a6eae275b4966f13b426aea",
+      "portable_path": "experiments/hybrid_trial4/vendor/act_geometry3mm_admittance5mm_trial_20261014/trial.py",
+      "portable_sha256": "23f9de5342689ba6a075dcb9468fb0b21314269acd8f99885fff06ad9e5fe80e",
+      "path_assignment_changes": [
+        {
+          "line": 18,
+          "portable": "PROJECT = Path(__file__).resolve().parents[4]"
+        }
+      ],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "admittance_2mm_target_gain_search_goal1_20261014/phases.py",
+      "source_sha256": "0f4a49f40a373d8003c9df096dda609439cc9376cde3032d9d9b7eced4c6ead4",
+      "portable_path": "experiments/hybrid_trial4/vendor/admittance_2mm_target_gain_search_goal1_20261014/phases.py",
+      "portable_sha256": "0f4a49f40a373d8003c9df096dda609439cc9376cde3032d9d9b7eced4c6ead4",
+      "path_assignment_changes": [],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "admittance_2mm_target_gain_search_goal1_20261014/runner.py",
+      "source_sha256": "71df84cbcf28e836d20b5b8a00737278cd71c28144b2e84c1b181c316042186c",
+      "portable_path": "experiments/hybrid_trial4/vendor/admittance_2mm_target_gain_search_goal1_20261014/runner.py",
+      "portable_sha256": "5b2261a255ca891bf284f29077ee5cc4deaebe1936088c988500abb72c0f570d",
+      "path_assignment_changes": [
+        {
+          "line": 22,
+          "portable": "PROJECT = Path(__file__).resolve().parents[4]"
+        }
+      ],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "admittance_fixed_xy_tuning_20261014/bench.py",
+      "source_sha256": "76f2fa5fa5fde47ecae0e766e580bde20fc6f43c93e20d5d3c99c3f6ebf73c2d",
+      "portable_path": "experiments/hybrid_trial4/vendor/admittance_fixed_xy_tuning_20261014/bench.py",
+      "portable_sha256": "b139d4188af5d6ba9b55242b96a73b8dbb9ee8ce85e543779b8c7c03c14e0cb0",
+      "path_assignment_changes": [
+        {
+          "line": 19,
+          "portable": "PROJECT = Path(__file__).resolve().parents[4]"
+        }
+      ],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "admittance_fixed_xy_tuning_20261014/bench_v2.py",
+      "source_sha256": "2febbf8fa7c0a2cbcf1356279a9931797adbb3cfa10d1a0c0f30a1afc8a7797e",
+      "portable_path": "experiments/hybrid_trial4/vendor/admittance_fixed_xy_tuning_20261014/bench_v2.py",
+      "portable_sha256": "2febbf8fa7c0a2cbcf1356279a9931797adbb3cfa10d1a0c0f30a1afc8a7797e",
+      "path_assignment_changes": [],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "admittance_ik_precision_comparison_20261014/precision_probe.py",
+      "source_sha256": "c3b7d22cc42c40eefde1acde9ee16259f2e4b55cea0763fb4cc4b0937d852102",
+      "portable_path": "experiments/hybrid_trial4/vendor/admittance_ik_precision_comparison_20261014/precision_probe.py",
+      "portable_sha256": "2fb0d28e268fe59b88ad2acf13eb400cb6c9d7ae203b75db3394f2b6d3d73461",
+      "path_assignment_changes": [
+        {
+          "line": 23,
+          "portable": "PROJECT = Path(__file__).resolve().parents[4]"
+        }
+      ],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "admittance_wrist1n_small_motion_20261014/control.py",
+      "source_sha256": "7ee5d1cbdff6994d1b48902b5b41fbee9b6785873ca709c3a81797cdcf55b3af",
+      "portable_path": "experiments/hybrid_trial4/vendor/admittance_wrist1n_small_motion_20261014/control.py",
+      "portable_sha256": "ed5c6135f0338f3b3a08cf4ee4b23b481ed1bd8ba2290bd8cf4b0043a4ebcb3e",
+      "path_assignment_changes": [
+        {
+          "line": 14,
+          "portable": "PROJECT = Path(__file__).resolve().parents[4]"
+        }
+      ],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "admittance_wrist1n_small_motion_20261014/follow.py",
+      "source_sha256": "f0cfde6dc0d5d495674a8e194d9a953bbdabd4e885859067cb679dc535259a41",
+      "portable_path": "experiments/hybrid_trial4/vendor/admittance_wrist1n_small_motion_20261014/follow.py",
+      "portable_sha256": "f0cfde6dc0d5d495674a8e194d9a953bbdabd4e885859067cb679dc535259a41",
+      "path_assignment_changes": [],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "contact_handoff_probe_20261014/probe.py",
+      "source_sha256": "54113c51600cd81d52e314976b8f2fa13e78cb5a3603a236ce750455e607e0ab",
+      "portable_path": "experiments/hybrid_trial4/vendor/contact_handoff_probe_20261014/probe.py",
+      "portable_sha256": "1d85d843b598f54ebbd6c36be2c447e613a1aabae0e0bf209883f4c97171aab8",
+      "path_assignment_changes": [
+        {
+          "line": 19,
+          "portable": "PROJECT = Path(__file__).resolve().parents[4]"
+        },
+        {
+          "line": 20,
+          "portable": "BATCH = PROJECT / 'exports' / 'batch_fine_teached_100k_120_unique_seeds_20261014'"
+        }
+      ],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "hybrid_astar_act_gate1mm_acc50_2s_goal1_20261014/handoff.py",
+      "source_sha256": "91094605c8fbe8e4a6b93ad76f92fa8a12818b35f6922e7e67f22f9e889b7500",
+      "portable_path": "experiments/hybrid_trial4/vendor/hybrid_astar_act_gate1mm_acc50_2s_goal1_20261014/handoff.py",
+      "portable_sha256": "91094605c8fbe8e4a6b93ad76f92fa8a12818b35f6922e7e67f22f9e889b7500",
+      "path_assignment_changes": [],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "hybrid_astar_act_gate1mm_acc50_2s_goal1_20261014/phases.py",
+      "source_sha256": "565dbe04a404f291a5cfd0b233367a9d8fb87b6edd14bc97ead1e1d106785548",
+      "portable_path": "experiments/hybrid_trial4/vendor/hybrid_astar_act_gate1mm_acc50_2s_goal1_20261014/phases.py",
+      "portable_sha256": "565dbe04a404f291a5cfd0b233367a9d8fb87b6edd14bc97ead1e1d106785548",
+      "path_assignment_changes": [],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "hybrid_astar_act_new_admittance_3mm_20261014/trial.py",
+      "source_sha256": "8d50e384e93610e64817b54d079537f75ae698df3ae8a3d027f9771d4a427529",
+      "portable_path": "experiments/hybrid_trial4/vendor/hybrid_astar_act_new_admittance_3mm_20261014/trial.py",
+      "portable_sha256": "53050c108ac6a42c64b401853f15754b7c98a573c59f79d96e078cb0e5bea5e8",
+      "path_assignment_changes": [
+        {
+          "line": 27,
+          "portable": "PROJECT = Path(__file__).resolve().parents[4]"
+        }
+      ],
+      "function_class_AST_unchanged": true
+    },
+    {
+      "source_relative_to_exports": "hybrid_astar_act_wrist1n_twostage_20261014/phases.py",
+      "source_sha256": "ffcf7e803bec00ae75a60ce63dd6134e19238f2b2def137cde573da274b00ae6",
+      "portable_path": "experiments/hybrid_trial4/vendor/hybrid_astar_act_wrist1n_twostage_20261014/phases.py",
+      "portable_sha256": "ffcf7e803bec00ae75a60ce63dd6134e19238f2b2def137cde573da274b00ae6",
+      "path_assignment_changes": [],
+      "function_class_AST_unchanged": true
+    }
+  ]
+}

@@ -17,10 +17,11 @@ DEFAULT_INFERENCE_MODEL = (
 )
 
 
-def latest_inference_model(project_root: Path) -> str:
+def latest_inference_model(project_root: Path, model_root: str | None = None) -> str:
     """Follow only this training run's fully published checkpoint pointer."""
     fallback = Path(DEFAULT_INFERENCE_MODEL)
-    model_root = fallback.parent.parent
+    configured = model_root is not None
+    model_root = Path(model_root) if configured else fallback.parent.parent
     absolute_root = (project_root / model_root).resolve()
     required = (
         "config.json", "model.safetensors", "policy_preprocessor.json",
@@ -50,7 +51,7 @@ def latest_inference_model(project_root: Path) -> str:
             return str(model_root / published)
     except (OSError, ValueError):
         pass
-    return DEFAULT_INFERENCE_MODEL if complete(project_root / fallback) else ""
+    return DEFAULT_INFERENCE_MODEL if not configured and complete(project_root / fallback) else ""
 
 
 HTML = r"""<!doctype html>
@@ -182,6 +183,11 @@ def create_app(cfg):
     from ..act.video import inference_video_root
 
     project_root = Path(__file__).resolve().parents[2]
+
+    def selected_inference_model():
+        configured_root = cfg.web.get('inference_model_root')
+        return (latest_inference_model(project_root, model_root=str(configured_root))
+                if configured_root else latest_inference_model(project_root))
     app = FastAPI(title="ACT MuJoCo Sweep Workbench")
     app.state.cfg = cfg
     app.state.inference_video_root = inference_video_root(cfg, project_root)
@@ -213,7 +219,7 @@ def create_app(cfg):
             "100 Hz filtered / raw peak",
             "100 Hz filtered / 1 ms substep peak",
         ).replace("__INFERENCE_VIDEO_DIR__", escape(str(app.state.inference_video_root))).replace(
-            "__INFERENCE_MODEL__", escape(latest_inference_model(project_root))
+            "__INFERENCE_MODEL__", escape(selected_inference_model())
         )
 
     @app.get("/api/inference-videos/{filename}")
@@ -559,7 +565,9 @@ def create_app(cfg):
         model = payload.get("model")
         if model is not None and not isinstance(model, str):
             raise HTTPException(status_code=422, detail="model must be a checkpoint path")
-        model = (model or "").strip() or latest_inference_model(project_root)
+        model = (model or "").strip() or selected_inference_model()
+        if cfg.web.get('inference_model_root') and not model:
+            raise HTTPException(status_code=422, detail='No complete checkpoint in configured model root; train or select an explicit complete checkpoint first')
         if not model:
             raise HTTPException(status_code=503,
                                 detail="No complete published checkpoint is available; select an explicit model path")

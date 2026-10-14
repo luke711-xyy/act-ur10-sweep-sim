@@ -1,1138 +1,300 @@
-# act-ur10-sweep-sim — MuJoCo UR10 ACT tabletop sweep
-
-> **当前最新开发线：`feat/act-five-view` — fine-teached ordinary ACT。**
-> 启动、训练、评测及单次 A* baseline 见 [当前运行指南](docs/fine-teached-guide.md)；
-> 历史实验与回滚锚点见 [分支导航](docs/branch-guide.md)。模型、数据、日志不随源码上传。
-
-## 当前版本一览
-
-- 六零件、目标 1–6；五路 320×320 RGB、36 维状态、1 维 float32 目标数经 Linear
-  输入（不是 goal-token embedding）、4 维动作，chunk 25 / execute 5。
-- 潜在簇中心在 `(0.05,0)` m、半径 0.10 m 圆盘内按面积均匀采样；零件最大散布
-  0.14 m，已去掉 X ≥ −0.08 m 限制。旧未选圆盘的冻结配置保留旧采样/RNG 分支。
-- 全覆盖 A*、Y 边缘连续选件、距本布局最靠 +X 零件外缘 7 cm 的动态落刷边界，
-  路径首次穿越该边界处落刷；全部目标收齐后停止专家高度阈值检查。
-- 通用 `default.yaml` 仍是 batch 2；本次正式 **batch 4、MPS、FP32、AMP 关闭**
-  的完整便携快照见 [five-view-fine-teached-300.yaml](configs/five-view-fine-teached-300.yaml)。
-  50K/100K/200K 三个保存点的 CLI 参数见运行指南。
-- 工作台刷新选择本次训练最新完整 checkpoint，显式输入优先；新推理名显示实际
-  checkpoint，seed 留在元数据；Play 旁可导出已保存示教或回放视频。
-
-本次训练按用户要求于 2026-10-14 安全中断在 **103,243 步**；额外中断点不是 200K。
-原 100K 保存点未改写，本轮 ACT 批测固定使用它。A* baseline 每布局最多一次物理执行，
-不允许候选物理筛选或失败重试。全量测试未完成，发布开发快照不表示全套测试或策略评测通过。
-
-A minimal but runnable **MuJoCo** prototype of a contact-rich sweeping task: a robot uses
-its **fixed brush directly as a pusher** to collect small industrial components
-(nuts, screws, bolts, washers) from a flat table into a fixed shallow tray at the table
-edge.
-
-There is no WAM and no active grasping DOF. The brush is held by a fixed Robotiq 2F-85
-gripper. This five-view branch defaults to the imported Rudra UR10 CB3 six-joint model;
-the Menagerie UR10e profile remains selectable for comparisons. Robot-model variants are documented in the branch guide. The project keeps the original
-Cartesian pusher/planner implementation as a legacy diagnostic path; the default ACT path
-is the UR10 brush scene.
-
-The first version focuses on five things:
-
-1. contact with the table,
-2. hybrid force/position control,
-3. conventional (non-learned) visual and trajectory planning,
-4. reproducible experiments over component count and distribution,
-5. automatic demonstrations, LeRobot 0.6.1 ACT training, and asynchronous inference.
-
-No Isaac Sim, no MoveIt. Python MuJoCo + NumPy + Matplotlib (SciPy for image labelling).
-
----
-
-## Branch guide
-
-This repository has several experiment branches with different policy and robot-model
-contracts. See [the branch guide](docs/branch-guide.md) before switching branches; it
-records each branch's purpose and the ordinary-ACT versus goal-token distinction.
-
-## Quick start
-
-下列保留旧规划器与早期示教流程；当前 fine-teached 六零件任务请优先看上方运行指南。
-
-```bash
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-# 0. health check -- do this first on a new machine
-python -m sim.smoke_test
-
-# 1. single episodes
-python -m sim.run_episode --planner fixed         --num-components 1 --seed 0
-python -m sim.run_episode --planner visual_greedy --num-components 5 --seed 0
-
-# 2. conventional vision instead of ground truth, saving camera frames and masks
-python -m sim.run_episode --planner visual_greedy --perception vision \
-    --num-components 5 --seed 0 --save-observations
-
-# 3. paired batch comparison (the headline experiment)
-python -m sim.run_experiment --planners fixed global_sweep visual_greedy \
-    --counts 1 2 3 5 10 --episodes 20
-
-# 3b. the locked main task: 3-5 parts in ONE loose cluster
-python -m sim.run_experiment --planners fixed global_sweep visual_greedy \
-    --counts 3 5 --episodes 20 --spawn-mode cluster
-
-# 3c. pick the force setpoint: where does a single fixed F_z* stop working?
-python -m sim.run_force_sweep --forces 1 2 3 5 8 12 \
-    --geometries washer hex_nut bolt --episodes 5
-
-# 3d. record a synchronized multi-camera video of one episode
-python -m sim.record_video --planner visual_greedy --num-components 5 --seed 0
-python -m sim.record_video --compare fixed global_sweep visual_greedy \
-    --num-components 5 --seed 0        # same layout, one video per planner
-
-# 4. re-plot a saved experiment
-python -m sim.visualize_results --run runs/experiment-*
-
-# 5. export demonstrations for later ACT training (no training happens here)
-python -m sim.export_dataset --planner visual_greedy --episodes 200
-
-# 6. schema-v5 five-view UR10 + ACT full-episode pipeline
-uv pip install -e '.[act,web]'
-# First generate one common layout with exact goals 1..6 for visual approval.
-python -m sim.act.generate_preview_batch --seed-base 4100 \
-    --max-attempts-per-preview 64 --set sim.real_time=false
-# After approval, promote those six records and complete the 120-demo plan.
-python -m sim.act.collect_dataset --out runs/act_dataset \
-    --promote-preview runs/workbench_previews
-python -m sim.act.collect_dataset --out runs/act_dataset \
-    --approved-plan --seed-base 4100 --max-attempts-per-episode 64
-# Formal training validates the configured 300 successful experts before it starts.
-python -m sim.act.train --config configs/default.yaml
-python -m sim.act.evaluate --config configs/default.yaml --model runs/act_model
-python -m sim.web.run --config configs/default.yaml
-
-# tests
-pytest -q                     # or: python tests/run_tests.py
-```
-
-### Local robot-learning workbench
-
-The local browser workbench is the integration surface for the current MuJoCo
-prototype:
-
-```bash
-python -m sim.web.run --config configs/default.yaml
-# open http://127.0.0.1:8765/
-```
-
-It contains five connected areas: live simulation views, saved/preview expert
-episode playback, local ACT training jobs, MuJoCo inference jobs, and a bounded
-parameter editor. Every policy observation contains five synchronized RGB
-images: four fixed cameras outside the tabletop corners, each aimed toward the
-table centre, plus the wrist camera. These are the only cameras used by the
-workbench and the ACT policy.
-
-Every `Run inference` job automatically exports a five-view H.264 MP4 after
-its replay is saved, including failed/2000-frame-timeout episodes. The video
-contains raw/filtered force history, TCP/command Z, target count and checkpoint
-label. `web.inference_video_dir` selects the persistent output folder; the
-Inference panel shows a video link and its saved path. Existing videos are never
-overwritten. Encoding reads the saved frames, uses at most two CPU threads, and
-does not execute the policy again. Export errors are reported separately without
-changing the physical inference outcome. Standalone replay-enabled evaluation
-can override the destination with `--video-root`.
-
-After full MP4 decoding verifies the frame count, size and frame rate, disposable
-inference PNG/WebP frames are deleted automatically. The video, frame telemetry
-and original 100 Hz causal command trace remain; workbench playback reads camera
-panels from the MP4. Failed export/validation preserves the images for recovery.
-Expert/training images are never part of this cleanup. Manual and batch inference
-share one process lease, including replay/export, without locking training.
-
-`python -m sim.act.batch_evaluate --out /path/to/exports/independent-batch`
-freezes the ready 100k checkpoint and includes 200k only when fully published at
-initial preparation. It evaluates 20 independent held-out layouts for each of six
-targets, serially: every rollout has a unique seed and layout fingerprint, also
-across checkpoints if both are ready (120 distinct layouts per checkpoint).
-It rejects overlap with training seeds/layouts and freezes the episode plan.
-Videos, replays, CSV scores and provisional/final count-density
-plots stay in that separate folder. Restarting the same command resumes the
-ledger without repeating already measured rollouts.
-
-ACT inference checks full-footprint tray inclusion on every 100 Hz control step.
-The first fully entered part starts a fixed two-second **simulated-time** window;
-later entries, exits, or re-entries never reset it. An exact target count with no
-partially overlapping part ends the rollout immediately. The original 2000-frame
-budget remains a hard upper bound, even if a first entry occurs near its end; the
-two-second window is a latest deadline, not a minimum wait or budget extension.
-The inference achievement is the largest count
-fully inside **at the same time**, not a cumulative sum of visited parts. Job and
-replay summaries retain this peak and the separate final retained count: a peak
-of four for goal six remains a failed/partial `4/6`, even if none remain at the end.
-Per-frame counts continue to describe the physical replay state. Existing expert
-demonstrations and checkpoints are not relabelled.
-
-"Generate expert preview" runs the force-controlled expert and stores the
-accepted rollout under `runs/workbench_previews/`; a failed layout is retried
-with a reproducible replacement seed before it is persisted. This is separate
-from the formal dataset, so preview failures (including excessive normal force
-or a component sliding out of the safe workspace) remain visible without
-silently becoming training labels. Training and inference are local
-subprocesses with captured logs and stop controls; the panel does not upload
-data or control a real arm.
-
-For a small local preview batch, generate one *shared* six-part scene and run
-the six exact target counts 1 through 6 against that same layout with:
-
-```bash
-python -m sim.act.generate_preview_batch \
-    --out runs/workbench_previews --seed-base 4100 \
-    --max-attempts-per-preview 64 --set sim.real_time=false
-```
-
-The command screens target 6 first, reuses the workbench's orientation-aware
-A* one-pass expert and admittance rollout, and replaces the *whole shared
-layout seed* if any of targets 1--6 fails. Rejected attempts write only a
-lightweight reason to `generation_failures.jsonl`; they never write images or
-trajectories. The accepted batch writes one record per target count. It
-does not start ACT training or use a remote service; rerunning it appends
-another six previews. Workbench records use the stable
-`preview_goal_<target_count>_<serial>` naming scheme. The Demonstrations panel
-can filter by target count (`all` or 1--6) and outcome (`all`, `success`, or
-`failed`); its generation controls can create one or a bounded batch of
-quality-gated successes, or deliberately labelled failures in three families:
-side-wall stalls at the real tray mouth, wrong counts (over/under-count
-episodes reused from adjacent exact-count successes where possible), and route
-deviation. A stall plans against a deliberately laterally shifted *virtual*
-tray, while the MuJoCo scene keeps the real tray fixed. The resulting A* route
-carries the selected group through the real mouth at the wrong lane, so the
-real side wall can retain only part of the group. A physical quality gate
-rejects any sample whose missed parts are still in the middle of the table.
-Deliberate failures are excluded from the formal ACT dataset by the normal
-dataset reader. With the fixed six-part scene, target 6 can produce an
-under-count but an over-count is rejected because seven physical parts do not
-exist.
-
-The UR10 preview uses a continuous task-space-to-joint adapter. Its IK solve is
-performed in scratch state, the physical joint state is restored before stepping,
-and `end_effector.ik_max_joint_step` bounds each joint target update. This keeps
-near-singular least-squares solves from causing a visible branch jump. Demo
-playback takes over the five ACT image panes and pauses periodic live refresh,
-so the policy views remain synchronized with the episode slider.
-The full-run Fz chart and the selectable TCP/action/wrench/joint/count plots use
-the same frame cursor; the frame table includes the exact values and all six
-object poses. The current wrist-sensor force target is 0.1 N; 20 N remains the
-independent transient safety ceiling. The workbench records both the filtered
-Fz signal and the per-physics-step raw peak from the wrist F/T sensor, timestamped
-at the actual physics substep where that peak occurred.
-
-The current exact-target expert uses a single contact pass. It lets the A*
-expert choose a feasible exact-cardinality subset, searches a lattice of brush
-orientations and offsets inside
-the common capture corridor, and uses a 2-D grid A* state whose previous
-heading carries a turn cost. Connectors use physical clearance; the continuous
-capture segment uses an exact-count capture envelope, so harmless edge grazes
-are not confused with carrying a distractor into the tray. A line-of-sight
-shortcut removes one-cell staircases. Candidates are scored by path length,
-centred target capture, turn count, and distractor clearance. Before a rollout
-is accepted as an expert demonstration, the shortlist is replayed in MuJoCo
-on the same layout; a dynamically bad candidate is rejected and the next one
-is tried. An episode with target `N` succeeds when any exactly `N` parts are
-fully inside the tray and no part's XY footprint only partially overlaps the
-tray. Planner-selected identities are not part of the success label or ACT
-input. Recovery phases are not appended to expert demonstrations.
-
-### Schema-v5 ACT/control contract
-
-ACT starts at the same fixed UR10 reset pose for every goal. A* is imported
-only by expert generation; training and learned inference never request an
-expert staging point, target index, or object pose. The policy observes five
-320×320 RGB views, a 36-value state consisting of current and exactly 200 ms
-prior 18-value robot/contact records, and only the requested target count as
-its one-value task state. Total and collected counts remain supervisor-only.
-The robot state no longer duplicates task counts. It predicts fixed-table frame
-`[Δx, Δy, Δz, Δyaw]` chunks at 5 Hz; references execute at 25 Hz with
-100 Hz substep interpolation, speed limiting, IK residual validation, and
-non-brush robot collision checks.
-
-Before measured contact, ACT owns all four action dimensions. The force latch
-then transfers physical Z continuously to wrist-sensor admittance at the
-configured 0.1 N target; ACT's
-post-contact Z is retained for audit but not executed, and its training `Δz`
-label is zero. The workbench plots policy Z, applied Z, ownership, force, and
-the first measured contact position. Stability/unload frames remain viewable
-but are masked from behavior cloning.
-
-The configured new training set is schema v5 and targets 300 successful
-experts, 50 for each exact target count. Every record uses its own randomized
-six-part layout; the group centre remains concentrated, while the parts are
-slightly more dispersed than in the preview batch. The six reviewed previews
-remain separate. Training allocates 35% of samples to approach/descent and 65%
-to contact-build/sweep, uses ImageNet ResNet-18, and runs for up to 100,000
-steps or 24 cumulative hours across resumes. It saves at 50,000 steps and then
-every 10,000 steps, retaining the newest six checkpoints. Trackio metrics are
-logged locally and published to the existing public static
-`Luke711/act-ur10-sweep-tracking` Space every 60 seconds.
-
-If the full candidate search cannot find a route, the expert does not execute
-a guessed target-centre fallback. It records a short bounded contact probe and
-marks the episode with
-`astar_no_feasible_path` or `no_single_capture_lane`. The workbench exposes the
-planner status, strategy, attempt count, turn count and score separately from
-the physical termination reason, so geometry failures and dynamic candidate
-rejections remain auditable.
-
-For richer dataset browsing, video playback, action plots, filtering, and
-annotations, use the upstream [LeRobot Dataset Visualizer](https://huggingface.co/spaces/lerobot/visualize_dataset)
-instead of duplicating that functionality in this project.
-
-Every run writes a timestamped directory under `runs/` containing the exact
-configuration used, metrics, phase events, the dense control trace and the plots.
-
-### Useful flags
-
-| Flag | Effect |
-|---|---|
-| `--set KEY.PATH=VALUE` | override any config entry, e.g. `--set controller.desired_force=5` |
-| `--geometry {hex_nut,cylinder,screw,bolt,washer,mixed}` | component geometry family |
-| `--spawn-mode {uniform,cluster}` | scattered parts (planner comparison) or one loose cluster (main task) |
-| `--perception {ground_truth,vision}` | perception backend |
-| `--jobs N` (experiments) | parallel worker processes |
-| `--seed`, `--seed-base` | reproducibility |
-
-Examples of domain randomisation, all through `--set`:
-
-```bash
---set components.friction.min=0.2 --set components.friction.max=1.0   # friction
---set components.mass.min=0.002 --set components.mass.max=0.02        # mass
---set table.height_perturb_std=0.002                                  # table height
---set perception.noise.position_std=0.004                             # camera noise
---set perception.noise.dropout=0.15                                   # missed detections
---set controller.control_delay_steps=3                                # actuation delay
---set controller.force_noise_std=0.2                                  # F/T sensor noise
-```
-
----
-
-## Coordinate and task convention
-
-* Table plane is **XY**, table normal is **+Z**, and the table surface is `z = 0`.
-  Every height in the config is relative to the table surface.
-* The target tray is **fixed at the left (−X) edge** and is *not* randomised in this
-  version. Successful sweeps therefore move components generally towards **−X**.
-* Component start poses are randomised but reproducible from `(config, seed)`, and no
-  component ever starts inside the target region (a clearance band is enforced).
-
-Default layout (metres):
-
-```
-   y
-  +0.32 ┌──────────────────── workspace ───────────────────┐
-        │ ┌──── tray ────┐                                 │
-  +0.18 │ │              │                                 │
-        │ │   TARGET     │        components spawn here    │
-  −0.18 │ │              │                                 │
-        │ └──────────────┘                                 │
-  −0.32 └─────────────────────────────────────────────────┘
-        −0.48         −0.34                             +0.46   x
-        <---------------- sweep direction
-```
-
----
-
-## Episode phases
-
-```
-APPROACH → SEARCH_CONTACT → CONTACT_DETECTED → FORCE_RAMP → SWEEP
-         → FORCE_RELEASE → RETRACT        ... then SUCCESS or FAILURE
-```
-
-Phases 1–7 run once per sweeping stroke; `SUCCESS`/`FAILURE` are episode outcomes.
-The state machine (`sim/controllers/state_machine.py`) is free of MuJoCo and of
-controller internals, and is unit-tested on its own.
-
-**The release guard is a hard rule.** Once the TCP enters the guard band in front of the
-tray entrance (`controller.x_release_line + controller.release_margin`), the desired
-normal force is ramped to zero and the tool retracts — regardless of what the trajectory
-was doing. The Z force loop never keeps searching for contact past the table edge or into
-the tray mouth. This is enforced in three independent places (state machine, force
-schedule, axis commands) and is covered by
-`tests/test_hybrid_controller.py::test_force_is_released_before_the_guard_line`.
-
----
-
-## Hybrid force/position controller
-
-| Axis | Mode | Command source |
-|---|---|---|
-| X, Y | position | planner → smooth Cartesian trajectory |
-| Z | **force** | outer admittance loop |
-| yaw | position | stroke yaw (pusher face ⟂ stroke direction) |
-
-The outer loop implements
-
-```
-m_d * d²w/dt² + b_d * dw/dt + k_d * w = F_desired − F_measured
-z_command = z_nominal + Δz
-```
-
-where `w` is the correction **along the inward contact normal** (positive = press deeper)
-and `Δz = −w` because the table normal is `+Z`. Both forces use the same
-*pressing-positive* convention, so `controller.desired_force` is a small **positive**
-value (0.1 N in the current pilot), never zero. Writing the ODE in the inward-normal frame is what keeps
-the signs unambiguous; see the module docstring in `sim/controllers/admittance.py`.
-
-For ACT inference, `z_nominal` is latched only after the wrist F/T sensor crosses the
-contact threshold, using the actual TCP height rather than a guessed or teleported
-command. Expert collection reaches the calibrated geometric TCP/table height without
-intentional preload, then enables the same wrist-sensor admittance so tracking error can
-be corrected. The admittance state resets at each contact handoff.
-
-Implemented safeguards:
-
-* reset-tared wrist F/T sensing rotated into world axes; filtered Fz drives control
-* the 100 Hz control trace records filtered wrist Fz and raw sensor peaks separately
-* force-target saturation (`max_force`) and a hard measured-force abort (`safe_max_force`)
-  (`safe_max_force=20 N` is the current independent safety ceiling)
-* transient-force dwell (`safe_force_dwell_steps`) before the hard abort is declared
-* `Δz` saturation (`delta_z_limit`) and `dΔz/dt` limit (`delta_z_rate_limit`), both with
-  anti-windup
-* sensor-threshold contact detection for inference; geometry-calibrated touchdown
-  followed by the same sensor-driven admittance for expert collection
-* contact-loss accounting during the sweep
-* optional actuation delay and force-sensor noise
-* controller rate `sim.control_hz` (default 100 Hz), physics timestep
-  `sim.physics_dt` (default 1 ms) — the physics step is always smaller than the control
-  period, and the runtime asserts it.
-
-Expert descent targets the calibrated TCP/table geometry without intentional preload.
-At touchdown, admittance is enabled so real tracking error can still be corrected;
-ACT inference instead hands off when measured wrist Fz crosses the contact threshold.
-Both modes use only wrist F/T for force feedback. Geometry contact remains a separate
-diagnostic, not a force estimate.
-
-### Controller tuning — the one non-obvious point
-
-The current Rudra profile starts from `m_d=0.5`, `b_d=70`, `k_d=100` in SI units.
-These values are pilot settings, not a claim of perfectly tracking 0.1 N. They must be
-judged from the synchronized wrist-sensor trace, including touchdown peaks and force
-error during the sweep:
-
-```
-F_error = F_desired − Fz_wrist
-Δz = admittance(F_error), with rate and displacement bounds
-```
-
-The bounded upward relief begins at its configured force threshold; the independent
-20 N dwell-protected stop remains authoritative. Parameters should be tuned from
-fixed-layout A/B traces rather than inferred from the geometric contact proxy.
-
-### Force sensing provenance
-
-| Signal | Source | Notes |
-|---|---|---|
-| Control Fz and plotted normal force | wrist `force` sensor at `ft_site` | reset-tared world-Z, filtered at the control rate, pressing-positive |
-| Six-axis wrench | wrist `force` and `torque` sensors at `ft_site` | rotated into world axes; retained for diagnostics |
-
-Brush/table geometric contact is logged separately for diagnostics and is never
-substituted for wrist-sensor force.
-
-### The wrench is mandatory, not optional
-
-The full 6-axis wrench is recorded on **every** control step, and the pipeline is built so
-that a missing one is an error rather than a row of zeros:
-
-* `EndEffectorInterface.wrench()` is part of the contract, not an extra;
-* `run_episode` calls `require_wrench(env)` before the first step;
-* the controller runs with `require_full_state = True` and raises if `step()` is called
-  without a wrench;
-* `export_dataset` refuses to write an episode whose wrench is identically zero while
-  sweeping in contact.
-
-Four checks for one value, because the failure they prevent is silent: a dead sensing
-path produces perfectly valid-looking episodes, and you find out after collecting the
-demonstrations.
-
-## Force signal quality
-
-The measured tangential force is dominated by the tip sliding on the **table**, not by the
-parts. With the defaults:
-
-```
-tip–table drag      = mu_tip * F_n      = 0.5 * 3.0 N   = 1.50 N
-pushing an 8 g nut  = mu_part * m * g   = 0.6 * 0.008 * 9.81 = 0.047 N   (3 % of the total)
-```
-
-So a contact event contributes roughly **1.5–5 %** of `sqrt(fx² + fy²)` for a single part.
-That is not fatal — the drag baseline is quasi-constant while part events are transient,
-so a high-pass or a baseline-subtracting feature front-end recovers them — but it does
-mean a classifier fed the raw total wrench has to find a small signal in a large one, and
-you should know the ratio before trusting a result.
-
-Three things follow, and all three are built in:
-
-**1. The simulator reports the decomposition as ground truth.** `contact_breakdown()` walks
-the active contacts, keeps those involving a gripper tip, and splits them into the
-component share and the table share:
-
-| Array | Meaning |
-|---|---|
-| `wrench` | what a real F/T sensor would measure (total) |
-| `wrench_parts` | the component-contact share — **simulator only** |
-| `wrench_table` | `wrench − wrench_parts` |
-| `n_part_contacts` | how many component contacts were active |
-| `tangential_force`, `tangential_force_parts` | in-plane magnitudes of the two |
-
-None of this exists on hardware. It is there so a classifier trained on the *total* wrench
-can be checked against what the parts actually contributed — together with the exact
-`phase` label, that is a supervised validation set no real rig can produce. `dataset.json`
-marks these arrays `simulator_ground_truth_arrays`: **never feed them to a policy**, or the
-result will not transfer.
-
-MuJoCo's sign convention for `mj_contactForce` has varied across versions, so it is not
-assumed: it is calibrated once, on the first meaningful contact, by checking which sign
-makes the per-contact sum agree with `cfrc_ext`. The decomposition is then exact
-(`wrench_parts + wrench_table == wrench`), and the smoke test verifies it.
-
-**2. Two metrics quantify it per episode.** `part_contact_ratio` (share of SWEEP samples
-actually touching a part) and `part_force_snr` (`|F_parts,xy| / |F_total,xy|` while
-touching). If `part_force_snr` is ~0.02, any force-based claim needs a front-end that
-removes the drag baseline first.
-
-**3. The drag baseline scales with `F_z*`.** Raising the normal force raises the denominator
-proportionally, so a higher setpoint makes parts easier to push *and* harder to hear. That
-trade-off is visible in `run_force_sweep` output and is worth reporting.
-
----
-
-## Perception
-
-Both backends return the same `SceneObservation`, so a planner cannot tell them apart.
-
-**1. Ground truth (`--perception ground_truth`).** Uses the simulator's true component
-poses. **Debug only** — it exists to validate the controller and planners without
-perception error. Report numbers with the vision backend as well.
-
-**2. Conventional vision (`--perception vision`).** One **fixed** high-oblique camera
-(never moves; the same configuration is used for every episode and for dataset export):
-
-1. render RGB (+ depth if needed),
-2. build a binary component mask — MuJoCo segmentation ids (default), a brightness/colour
-   threshold, or a height-above-the-table test on the depth image,
-3. back-project every masked pixel onto the table plane (exact ray/plane intersection),
-4. rasterise into a table-plane occupancy grid,
-5. label connected regions into clusters with a centroid, an area and an **estimated
-   component count** (`area / typical_component_area`).
-
-No semantic classification of screws/bolts/nuts is attempted: the planner only needs to
-know **where occupied regions are**. Optional position jitter, dropout and false
-positives are available for stress testing.
-
-The camera model (`sim/perception/camera.py`) is pure NumPy and round-trips
-world → pixel → table plane to ~1e-16 m, so it is unit-tested without a GPU.
-
----
-
-## Planners
-
-Both produce the same high-level action, a planar sweep stroke:
-
-```
-[action_x_start, action_y_start, action_x_end, action_y_end, action_yaw]
-```
-
-**Planner A — predefined directional full-cover baseline (`--planner fixed`).**
-Parallel lanes across the workspace, each swept right → left towards the tray; the tool is
-lifted before travelling to the next lane (the `APPROACH` phase always lifts to
-`workspace.z_travel`, so **the return motion is never in contact**); the sequence ends with
-a fixed consolidation stroke in front of the tray. **It never looks at the component
-positions** — the stroke list is a pure function of the configuration. Lanes whose `y` lies
-outside the tray opening are aimed diagonally so the stroke ends inside the tray; this is
-still layout-independent.
-
-**Planner C — global single sweep (`--planner global_sweep`).**
-The same perception and the same execution stack as Planner B, but it plans **one
-global stroke per iteration**, aimed at the weighted centroid of *every* detection at
-once, instead of short strokes aimed at one cluster. Then it lifts, re-observes and
-repeats.
-
-This is the planner that makes the comparison interpretable. A and B differ in two
-things at once — perception *and* stroke segmentation — so a two-planner experiment
-cannot say which one produced the gap. C changes only the segmentation:
-
-```
-C − A  =  what perception buys
-B − C  =  what stroke segmentation buys
-```
-
-**Planner B — conventional visual greedy planner (`--planner visual_greedy`).**
-`observe → generate candidates → score → execute one stroke → lift → re-observe → re-plan`,
-until success or the budget runs out. Candidates are strokes centred on each detected
-cluster plus a uniform sweep of lane offsets; each starts just to the +X side of the
-right-most cluster it would capture and ends inside the tray mouth. Scoring:
-
-```
-score(a) = estimated_collected(a) − λ · path_length(a) − μ · risk(a)
-```
-
-with `risk` penalising (i) clusters captured near the outer edge of the pusher (they squirt
-sideways), (ii) clusters that would merely be grazed and knocked off-lane, (iii) large
-lateral funnelling demand, and (iv) captures that would end outside the tray opening.
-Tunable through `planner.greedy.{lambda_path, mu_risk, …}`.
-
-Trajectories are straight Cartesian segments with a smooth scalar time scaling —
-trapezoidal (default) or quintic. No sampling-based motion planner is used for the planar
-sweeping.
-
----
-
-## Metrics
-
-Written for every episode (`*_metrics.json`, and `episodes.csv` for batches):
-
-| Metric | Meaning |
-|---|---|
-| `collection_rate` | components in the target / initial count |
-| `success` (legacy planner metrics) | `collection_rate ≥ episode.success_collection_rate`; the ACT expert uses the stricter exact-target contract described above |
-| `completion_time` | simulated seconds |
-| `n_strokes` | number of sweeping strokes |
-| `path_length`, `path_length_xy` | total TCP path |
-| `n_pushed_out` | components outside the safe workspace |
-| `peak_normal_force` | max filtered normal force |
-| `rms_force_error` | RMS of `F_desired − F_measured` during `SWEEP` |
-| `contact_loss_ratio` | fraction of `SWEEP` samples below the release threshold |
-| `components_per_stroke` | collected / strokes |
-| `n_ride_over` | components swept over without moving (see Failure modes) |
-| `n_jam_events` | sustained tangential-force events (see Failure modes) |
-| `touchdown_overshoot_max/mean` | peak normal force above target during force build-up |
-| `part_contact_ratio` | share of SWEEP samples actually touching a component |
-| `part_force_snr` | component share of the tangential force while touching |
-| `mean_tangential_force` | mean in-plane force magnitude while sweeping |
-
-Plus diagnostics: `failure_reason`, `aborts`, `strokes_with_contact`, `mean_contact_force`,
-`wall_time`, and the seed / planner / perception / geometry that produced them.
-
-### Paired comparison
-
-`sim.run_experiment` runs every `(n_components, seed)` pair through **every** planner, so
-the planners see *identical* initial layouts. The low-level controller, target force,
-velocity limits, workspace and episode budget come from one config and are therefore
-identical by construction — `experiment_force_quality.png` is the check that they really
-are (peak force, RMS tracking error and contact-loss ratio should be
-planner-independent). `paired_*.csv` holds the per-seed differences and
-`experiment_paired_*.png` the box plots.
-
----
-
-## Failure modes
-
-The official Menagerie UR10e is mounted at `[0.62, 0, 0.22]` in the default scene. This
-is a task-layout choice: it keeps the tray-mouth lane reachable while the full official
-link and collision geometry remains in the model. The brush crosses the tray mouth
-continuously and ends at the wall-safe configured depth
-(`planner.expert_tray_push_depth`) rather than stopping at the entrance or asking IK to
-reach the tray back wall outside the command workspace. Once all components are inside
-the tray, the expert rollout terminates immediately; it does not run extra recovery lanes
-that could create a new collision after success. The one-second stable confirmation is
-performed after the exact count is reached and is masked from ACT behavior cloning.
-
-Collection rate alone does not say *why* a run went badly. Three failure modes are
-detected per stroke and aggregated per episode.
-
-**Ride-over (`n_ride_over`) — too little force.** The tip passes over a component
-without moving it. Detected geometrically: a component that lay inside the pusher's
-capture band along the executed stroke and moved less than
-`metrics.ride_over_move_threshold` (4 mm). This is the thin-washer mode, and it is the
-lower bound on a usable `desired_force`.
-
-**Jam (`n_jam_events`) — too much force.** A part wedges against the tip and the tool
-loads up in plane. Detected as a **tangential** force above
-`metrics.jam_force_threshold` sustained for `metrics.jam_min_duration`. Two notes on
-why it is defined this way:
-
-* it is a *tangential* test because the normal force is regulated by design and is
-  therefore uninformative — a jam shows up in `sqrt(fx² + fy²)`, not in `fz`;
-* it is a *force* test, not a stall test, because the prototype's position actuators
-  are strong enough to keep tracking the command straight through a jam. On a real
-  position-controlled arm the same threshold is what precedes a protective stop, so
-  the metric transfers; in this simulator a velocity-based test would simply never
-  fire. The threshold must sit above the baseline `μ · F_normal` drag of the tip on
-  the table, which is why it is configured rather than derived.
-
-**Touchdown overshoot (`touchdown_overshoot_*`) — controller transient.** Peak filtered
-normal force above the target during FORCE_RAMP plus the first
-`metrics.touchdown_window` seconds of SWEEP. This is the number the admittance gains
-are actually judged on; it is where actuation delay and sensor noise show up first.
-
-## Choosing F_z*
-
-The normal-force setpoint is a fixed engineering parameter, not an action. `run_force_sweep`
-is how it gets chosen: it sweeps `controller.desired_force` against component geometry
-and reports both failure modes, so the usable range is bracketed from below (ride-over)
-and above (jams and ejected parts).
-
-```bash
-python -m sim.run_force_sweep --forces 1 2 3 5 8 12 \
-    --geometries washer hex_nut bolt --episodes 5 --spawn-mode cluster
-```
-
-It writes `episodes.csv`, `summary.csv` and `force_sweep_summary.png` (six panels:
-collection rate, ride-over, jams, touchdown overshoot, ejected parts, peak force — one
-line per geometry), and prints a suggested `F_z*`: the force with the best worst-case
-collection rate across geometries. **Treat that suggestion as a starting point for
-hardware, not as a result.** The sim's contact parameters are not calibrated against
-real fasteners (see Limitations).
-
-## Task distributions
-
-`components.spawn_mode` selects what an episode looks like:
-
-| Mode | What it is | What it is for |
-|---|---|---|
-| `cluster` *(default)* | all parts drawn around one seed-randomised but concentrated centre with a compact randomised spread (`components.cluster.*`) | the main six-part scene and exact partial-target previews |
-| `uniform` | parts scattered independently across the spawn box | planner comparison and deliberately wide-layout failure cases |
-
-Both are reproducible from `(config, seed)` and both enforce the same guarantees (nothing
-starts inside the target, minimum separation, inside the spawn box).  In the default
-cluster mode, `center_mean`, `center_std`, and `center_bounds` randomise the group
-centre without allowing it to wander across the full spawn box; component offsets,
-orientations, masses, and frictions remain random.  New default cluster centres
-are sampled with `0.015 <= X <= 0.18 m`; individual parts may extend beyond
-`X=0.18 m` within the unchanged spawn box (`-0.08 <= X <= 0.36 m`,
-`-0.26 <= Y <= 0.26 m`).  This limit applies to the sampled cluster anchor,
-not the realised arithmetic mean after random offsets and placement rejection.
-Existing demonstration/replay files and checkpoints are not rewritten.  Exact `N<6`
-previews still contain six physical parts and use `components.exact_partial_spawn_mode`,
-which is `cluster` by default; changing it to `uniform` is an explicit wider-layout
-experiment, not a hidden change to the task count.
-
----
-
-## Plots
-
-Per episode: `*_force.png` (desired vs measured normal force with phase shading and
-contact/release events), `*_z_correction.png` (Δz and commanded vs measured height),
-`*_xy.png` (TCP trajectory, in-contact segments highlighted, component start/end poses,
-table and tray), `*_events.png` (phase and contact timeline).
-With `--save-observations`, `observations/obs_*.png` shows the camera frame, the image-space
-mask and the derived table-plane occupancy grid side by side.
-
-Per experiment: `experiment_summary.png` (collection rate, components/stroke, strokes,
-time, path length, components pushed out), `experiment_force_quality.png`,
-`experiment_paired_*.png`.
-
----
-
-## Video
-
-```bash
-# default: the perception camera + a top-down overhead view, side by side
-python -m sim.record_video --planner visual_greedy --num-components 5 --seed 0
-
-# three panes, including one that tracks the tool
-python -m sim.record_video --planner fixed --num-components 10 --seed 1 \
-    --cameras scene_cam side_cam follow_cam
-
-# the same layout under every planner -- one file each, directly comparable
-python -m sim.record_video --compare fixed global_sweep visual_greedy \
-    --num-components 5 --seed 0
-```
-
-| Camera | View |
-|---|---|
-| `scene_cam` | the fixed perception camera — **what the planner actually sees** |
-| `overhead_cam` | front-oblique global view; retained name for the ACT input contract |
-| `side_cam` | low side view; best for seeing tip–table contact and parts tipping |
-| `follow_cam` | fixed position, rotates to keep the tool centred |
-Every frame carries a HUD: simulated time, stroke index, phase, planner, collected count,
-and a normal-force gauge showing measured fill against a tick at the setpoint, plus a
-contact dot. The gauge is scaled to 2.5 × `desired_force` rather than to
-`safe_max_force` — on a 25 N axis a 3 N reading fills 12 % of the bar and shows nothing.
-
-Output is MP4 (`libx264` via `imageio-ffmpeg`) with an automatic GIF fallback; frames are
-streamed to the writer, so a 200 s episode costs megabytes of RAM, not gigabytes. One
-frame every `video.every_n_control_steps` control steps — the default 4 gives 25 fps at
-real-time speed.
-
-`overhead_cam`, `side_cam` and `follow_cam` are defined under `video.extra_cameras` and are
-**recording only**. Perception looks up `scene_cam` by name and nothing else, so adding
-view angles cannot leak information into a planner or into an exported dataset; a unit test
-asserts the names never appear in the perception path.
-
-### 2-D preview (no OpenGL)
-
-`sim.preview` draws the same episode as a Matplotlib animation — top view plus a rolling
-force trace — straight from the episode record. No renderer, no GL context, so it works
-over SSH, in CI, and on a machine where MuJoCo rendering is not set up.
-
-```bash
-# one episode, 3x playback
-python -m sim.record_video --preview --planner visual_greedy --speed 3
-
-# all three planners on the SAME layout, one shared clock
-python -m sim.record_video --preview --speed 8 \
-    --compare fixed global_sweep visual_greedy --num-components 5 --seed 2
-```
-
-The comparison figure is the experimental claim as a picture: identical initial scene,
-identical low-level controller, different stroke planner; each pane freezes when its
-episode ends and prints its stroke count, time, path length and collection rate, so the
-difference is visible directly rather than read off a bar chart.
-
-It is a plot, not a camera — flat shapes seen from above. Use `sim.record_video` without
-`--preview` when you want the rendered scene. Every frame carries a provenance banner
-naming the data source, so a file that travels on its own cannot be mistaken for rendered
-physics.
-
-## Motion planning: where RRT belongs
-
-`planner.transfer.mode` chooses how the **contact-free** legs are planned — lifting off,
-travelling to the next stroke's start, and moving to the observation pose:
-
-| Mode | Behaviour |
-|---|---|
-| `direct` *(default)* | lift → straight line at travel height → descend |
-| `rrt` | lift → RRT-Connect path (shortcut, then time-scaled) → descend |
-
-**The sweeping stroke is never planned by RRT, in either mode.** That is deliberate:
-
-1. **A sweep is supposed to collide.** Its whole purpose is contact with the components.
-   A sampling-based planner is a collision-*avoidance* algorithm; asking it to plan a path
-   whose goal is contact is a category error, and an obstacle model permissive enough to
-   let it through would let it through everything else too.
-2. **Randomised geometry fights the force loop.** RRT paths are jagged; sparse
-   macro-waypoints fed to a hybrid force/position controller inject acceleration
-   transients exactly where the normal force is being regulated.
-3. **Reproducibility.** The protocol is paired seeds on identical layouts. A stochastic
-   planner inside the measured motion adds variance unrelated to the question.
-4. **The action space.** A stroke exports as 5 numbers (or 16 waypoints) only because it
-   is a simple geometric primitive.
-
-The transfer phase has none of those constraints — it is contact-free by construction, the
-force target is zero throughout, and it does not enter the action — so a planner that can
-route around the tray walls, around parts already detected on the table, and later around
-fixtures and a real arm's self-collisions belongs exactly there. Stop-and-go at waypoints
-costs time but no force transient, because the force loop is not running.
-
-**Honest note on when it earns its place.** At the default `workspace.z_travel` of 60 mm
-the transfer already clears 12 mm parts and the 40 mm tray walls, so `rrt` will return the
-straight line every time and change nothing. It starts to matter when the travel height is
-reduced, when the bin or fixtures are taller, or — the real case — when a UR10e replaces
-the Cartesian stage and joint limits and self-collision enter the picture. A unit test
-pins both behaviours.
-
-Implementation notes: the prototype's task space *is* its configuration space, so planning
-happens in `(x, y, z)`; the tool is reduced to its TCP point by inflating every obstacle
-horizontally by the tool circumradius (yaw-independent, hence conservative) and downwards
-by the tool height (the TCP is the *bottom* of the tips). Obstacles come from the
-*perception* observation, not from ground truth, so the transfer planner knows exactly what
-the stroke planner knows. Planning is seeded from the episode RNG, the straight line is
-taken without sampling when it is already free, and a failure falls back to the direct path
-rather than deadlocking the episode. For a UR10e, swap `CollisionModel` for a joint-space
-one; `rrt_connect` and `shortcut_path` are dimension-agnostic.
-
-## Dataset export for future ACT training
-
-`python -m sim.export_dataset` records what an imitation-learning policy would need.
-**No training happens here.** Per exported episode:
-
-```
-<out_dir>/
-  dataset.json        global metadata, action spec, full config
-  index.jsonl         one line per episode
-  episode_000000/
-    meta.json         seed, planner, geometry, per-component mass/friction/start pose,
-                      camera config, control rate, success label
-    episode.npz       dense per-control-step arrays + high-level actions
-    obs_000_rgb.png   fixed-camera frame at each re-planning step
-    obs_000_mask.png  component occupancy mask
-```
-
-### What is in `episode.npz`
-
-Per control step (100 Hz):
-
-| Array | Shape | Notes |
-|---|---|---|
-| `t`, `phase`, `stroke_index`, `in_contact` | (T,) | `stroke_index = −1` during transfers |
-| `tcp_position` | (T, 3) | **absolute — debug only** |
-| `tcp_pose_relative` | (T, 3) | `[dx, dy, dψ]` w.r.t. the stroke's capture pose; **no absolute z** |
-| `tcp_velocity`, `tcp_yaw` | (T, 3), (T,) | |
-| `wrench` | (T, 6) | full external wrench on the tool, world frame `[fx, fy, fz, tx, ty, tz]` |
-| `tangential_force` | (T,) | `sqrt(fx² + fy²)` — the contact-event channel |
-| `wrench_parts`, `wrench_table` | (T, 6) | **simulator ground truth** — the component / table split of `wrench` |
-| `tangential_force_parts`, `n_part_contacts` | (T,), (T,) | **simulator ground truth** |
-| `force_desired`, `force_raw`, `force_filtered` | (T,) | |
-| `command`, `delta_z`, `z_nominal` | (T, 4), (T,), (T,) | controller internals, debug only |
-
-Per stroke (N strokes):
-
-| Array | Shape | Notes |
-|---|---|---|
-| `actions` | (N, 5) | `[x_start, y_start, x_end, y_end, yaw]`, absolute table frame |
-| `actions_waypoints` | (N, 16, 3) | `[dx, dy, dψ]` w.r.t. the capture pose, resampled by arc length from the **executed** in-contact path |
-| `capture_poses` | (N, 3) | the TCP pose each observation was taken from |
-| `stroke_ride_over`, `stroke_jam_events`, `stroke_touchdown_overshoot` | (N,) | failure modes per stroke |
-| `stroke_t_start/end`, `stroke_collected_before/after`, `stroke_observation_index` | (N,) | |
-
-Per observation (one per stroke):
-
-`obs_XXX_mask` (image-space), `obs_XXX_occupancy` (table-plane grid),
-`obs_XXX_capture_pose`, `obs_XXX_wrench_history` (the last
-`dataset.wrench_history_steps` control steps of the 6-axis wrench), plus
-`obs_XXX_points`/`counts` (debug). `goal_region` is a fixed binary channel on the same
-grid as the occupancy map.
-
-`dataset.json` lists which arrays are policy-facing and which are debug-only, so the
-distinction survives outside this README.
-
-### Two design rules baked into the export
-
-> **The Z force is not an action.** The policy outputs the planar stroke only; normal-force
-> regulation stays inside the hybrid controller. This keeps the learned policy away from
-> the safety-critical loop and makes the action space low-dimensional and stable.
-
-> **No absolute z, no absolute pose in the observation.** Absolute z encodes the table
-> height — precisely the nuisance variable the force loop exists to absorb — and feeding
-> it back invites overfitting to one table height. Poses are stored relative to a fixed
-> capture pose per stroke.
-
-### Two action parameterisations, both exported
-
-`actions` (5-D stroke) and `actions_waypoints` (16 sparse waypoints) are written for every
-episode, so the choice can be made at training time instead of at data-collection time.
-They carry identical information for a straight stroke; the waypoint form additionally
-represents curved strokes and matches the sparse-waypoint + interpolation structure that
-avoids feeding sparse macro-waypoints straight to a force controller.
-
----
-
-## Project structure
-
-```
+# Ubuntu 模型训练与推理交接：UR10 / MuJoCo Sweep
+
+本分支 `feat/ubuntu-model-handoff` 是 2026-10-15 的**代码迁移与 AI 交接分支**，基于
+`9102680d8e018b225ab34d36422572cd4b547166`。目标是让另一台 Ubuntu 电脑复用现有
+示教、仿真、控制、回放和工作台，再接入 ACT 之外的模型。**其他模型尚未实现；工作台现有训练/推理按钮仍接 ACT。**
+不要把迁移代码、模型加载测试或接口测试称为新模型训练完成、策略成功或 Ubuntu 实机验证通过。
+
+这里包含代码、机器人资产及其许可证、配置、测试、文档和第四组 Hybrid 控制运行依赖。
+示教数据由用户通过 U 盘另行传输；权重、视频、日志、正式评测结果及本机虚拟环境不上传。
+Mac 历史说明保留在 [README.mac-act-history.md](README.mac-act-history.md)，分支与回滚点见
+[分支导航](docs/branch-guide.md)。历史路径不是 Ubuntu 部署指令。
+
+## 0. 接手 AI 先做什么
+
+1. 先读本 README，再读 `sim/act/interface.py`、`dataset.py`、`policy.py`、`train.py`、
+   `evaluate.py` 和 `sim/web/jobs.py`；不要先重写仿真器或示教格式。
+2. 向用户确认 Ubuntu/Python 版本、GPU 型号/驱动、数据挂载路径、空闲磁盘、要训练的模型。
+   选择该模型后再设计适配器，未获授权不下载大模型、不启动长训练或批测。
+3. 完整复制示教根目录到新位置，核验格式和目标分布。现有格式不是 LeRobot Hub Parquet；
+   `lerobot` 在此用于 ACT 实现，不表示原始数据能直接交给任意 LeRobot 命令。
+4. 先验证机器人资产、渲染、数据读取和工作台，再做 ACT 接口参考检查；新模型接入后依次验证
+   离线预测、小规模实际推理及正式评测。每一阶段分别报告证据。
+5. 不改传入示教和历史正式结果；不同模型写独立输出目录。不要修改旧指纹来绕过验证，
+   不把成功示教替代失败评测，不把“数量相同”当成严格任务成功。
+
+## 1. 代码地图与复用边界
+
+```text
 sim/
-  config.py                  YAML config with dotted-path overrides
-  metrics.py                 episode metrics, aggregation, paired comparison
-  plotting.py                episode and experiment figures
-  logging_utils.py           run directories, JSON/CSV/NPZ serialisation
-  smoke_test.py              one-command install health check
-  model/
-    geometries.py            component geometry library (incl. inline hex-prism mesh)
-    scene_builder.py         programmatic MJCF generation (no MuJoCo import)
-  controllers/
-    admittance.py            1-D admittance loop with saturations and anti-windup
-    filters.py               low-pass, slew-rate limiter, delay buffer
-    state_machine.py         episode/stroke phase FSM
-    hybrid.py                hybrid force/position controller
-  perception/
-    base.py                  SceneObservation, occupancy grid, backend registry
-    camera.py                pinhole model, pixel <-> table-plane (pure NumPy)
-    ground_truth.py          debug backend
-    vision.py                conventional segmentation + clustering backend
-  planners/
-    base.py                  SweepStroke (the 5-D action), Planner interface
-    trajectory.py            quintic / trapezoidal Cartesian trajectories
-    fixed_cover.py           Planner A (fixed full cover)
-    visual_greedy.py         Planner B (visual greedy, segmented strokes)
-    global_sweep.py          Planner C (one global sweep per iteration)
-    rrt.py                   RRT-Connect for the contact-free transfer legs
-    geometry_utils.py        planar helpers
-  environments/
-    ee_interface.py          end-effector abstraction (+ UR10e adapter)
-    layout.py                reproducible layout sampling
-    sweep_env.py             MuJoCo environment
-    episode.py               episode runner
-  video.py                   multi-camera recorder with a controller HUD
-  preview.py                 2-D Matplotlib animation (no OpenGL required)
-  run_episode.py  run_experiment.py  run_force_sweep.py  record_video.py
-  visualize_results.py  export_dataset.py
-configs/default.yaml         every controller and experiment parameter
-tests/                       unit tests (+ MuJoCo smoke tests, auto-skipped)
+  config.py, environments/         完整 YAML、布局、MuJoCo 物理环境与 IK
+  model/, model/assets/            机器人/刷子/物体资产、场景构建
+  controllers/                    导纳、混合控制与安全状态机
+  planners/                       几何规划、路径与 A* 相关规划逻辑
+  act/
+    interface.py                  观测、动作、归一化维度契约
+    dataset.py, collect_dataset.py 示教读写、采集协议与训练门禁
+    expert.py                     示教选件、coverage A*、落刷与专家路线
+    policy.py, train.py            ACT 模型包装、训练与保存
+    evaluate.py                   观测到动作、实时调度与物理执行
+  web/
+    run.py, app.py, jobs.py        工作台入口、HTTP 路由、子进程任务
+    workbench.py                  数据浏览、回放、派生示教操作
+scripts/
+  ubuntu_setup.py                 生成本机配置、只读核验 U 盘示教
+  evaluate_astar_baseline.py      单次机会的纯 A* 批评测
+  evaluate_hybrid_paired_batch.py 第四组 A*→ACT 配对批评测入口
+  hybrid_live_view.py             可选外部热力图/已验证视频展示，不调用推理
+experiments/hybrid_trial4/
+  runtime.py, vendor/             纳入仓库的第四组控制依赖，见其 README
+configs/                         完整配置；ubuntu-five-view.yaml 为模板
+tests/, docs/                    契约测试、工作台与实验文档
 ```
 
----
+| 可复用部分 | 新模型必须适配的部分 |
+| --- | --- |
+| 机器人/场景、物理、腕部力传感、安全保护、IK | 模型工厂、依赖、权重格式、预处理/后处理 |
+| 现有示教文件、相机和低维状态契约 | 训练窗口、损失、优化器、padding/valid 掩码 |
+| A*、导纳、动作执行、记录/回放 | 单步或动作块调度、reset、预测延迟约束 |
+| 工作台页面、数据查看、视频导出及任务框架 | 模型类型选择、训练/推理命令与加载路由 |
+| 数量/严格成功指标和配对布局机制 | 新模型正式评测入口与独立冻结元数据 |
 
-## UR10 model boundary
+不需要 ROS、MoveIt 或 Isaac Sim 才能运行当前流程。当前五视角默认是 Rudra UR10 CB3；
+另一 UR10e 资产是比较配置，迁移时不要顺手换机器人或刷子物理参数。
 
-Everything above `EndEffectorInterface` — planners, trajectory generation, the admittance
-loop, the state machine, metrics and the dataset exporter — is written against a
-**task-space** interface: an absolute TCP pose command, the measured TCP pose/velocity,
-and the contact wrench at the fingertip frame. Nothing in them knows about slide joints.
+## 2. Ubuntu 环境与渲染
 
-The current default `end_effector.type: ur10e` uses the vendored MuJoCo Menagerie
-UR10e six-joint model with official visual meshes and collision geometry. It
-is suitable for validating the ACT observation/action plumbing and the hybrid
-force-control loop, but it is not a calibrated hardware model.
-The model is mounted just beyond the table's +X edge and starts from an above-table IK
-seed that keeps the link clear of the work surface in the initial pose.
-The fixed-closed Robotiq 2F-85, handled brush, TCP, wrist F/T site and wrist camera are
-attached at the model's `attachment_site`. The official 2F-85 meshes are frozen at their
-closed pose: the handle is visibly held between the pads, but there are no finger joints or
-gripper actuator. This remains an ACT-feasibility model rather than a calibrated hardware
-digital twin; the Menagerie README notes that actuator values are not carefully tuned.
-
-The current adapter solves damped-least-squares IK on the official tool frame, then sends
-bounded joint-position targets to the Menagerie actuators. The force-control framework
-above it continues to use the same absolute-TCP-pose and normal-force contract. The
-vendored model's `README.md` and `LICENSE` are kept beside the assets for provenance.
-
-The original `cartesian3dof` scene remains available as a diagnostic baseline.
-`end_effector.type` selects the scene and adapter; the planner, force controller,
-state machine, metrics, and dataset exporter keep the same task-space contract.
-
----
-
-## Assumptions and known simulation limitations
-
-Read this before quoting any number from this simulator.
-
-**Robot model**
-
-1. The active end-effector is the six-joint UR10e Menagerie model with visual meshes,
-   inertial links, collision geometry, joint limits and position actuators. It is not a
-   calibrated hardware digital twin: actuator gains, contact parameters and the rigid
-   brush fixture remain feasibility-level settings, and `controller.control_delay_steps`
-   is still a crude stand-in for hardware latency.
-2. The Robotiq 2F-85 is **permanently closed** and rigid: its official visual meshes are
-   frozen around a centred brush handle, with no finger joint, finger compliance, pad
-   deformation, or grasping degree of freedom (a unit test enforces this).
-3. The TCP is defined at the **bottom centre of the high, thin brush plate**. The simulated
-   F/T site remains at the UR10 attachment flange, upstream of the fixed gripper.
-
-**Contact and components**
-
-4. Components are **simple convex primitives** — a hexagonal prism mesh, cylinders, and
-   two-geom screw/bolt approximations — not CAD meshes of real fasteners. Threads,
-   chamfers, internal holes and the real mass distribution are absent. **This validates the
-   control, planning and data pipeline, not the detailed contact dynamics of real screws.**
-5. Friction is Coulomb with MuJoCo's elliptic cone; sliding, torsional and rolling
-   coefficients are constant per component, isotropic, and independent of speed, wear and
-   contamination. Real fasteners on a real bench roll, jam and stick far more irregularly.
-6. The table is a perfectly flat, rigid plane. `table.height_perturb_std` shifts the whole
-   surface; there is no waviness, tilt or local compliance.
-7. Component–component interaction is modelled (they collide and shove each other) but
-   stacking and interlocking are not tuned, and small parts can be squeezed out sideways —
-   `n_pushed_out` is the metric that exposes this.
-8. The tray floor **is** the table surface, with three walls and an open +X side, so parts
-   slide in without climbing a lip. There is no "bounce-out" model beyond plain contact.
-
-**Perception**
-
-9. The conventional-vision backend renders from a fixed, noise-free, perfectly calibrated
-   camera. MuJoCo segmentation ids give a mask with no classification error; the `color`
-   and `depth` modes are more realistic but still ideal. Camera noise must be injected
-   deliberately (`perception.noise.*`).
-10. Back-projection assumes components lie on a known plane at
-    `table_top_z + perception.plane_offset`. For an oblique camera this biases the recovered
-    position of tall parts by roughly `height · tan(view angle)`. The offset partially
-    compensates it; it does not remove it.
-11. MuJoCo's depth buffer is the camera-frame z-distance, not the Euclidean ray length.
-    `perception.depth_convention` selects which one the depth-segmentation mode compares
-    against (`optical_axis` by default, which matches MuJoCo).
-12. Re-observation moves the tool to `workspace.observe_pose` so it does not occlude the
-    scene; this cost is included in `completion_time`.
-
-**Control and evaluation**
-
-13. The normal-force measurement is the *total* external force on the tool body, so a
-    horizontal shove from a component contributes its (small) vertical component. It is not
-    a calibrated, drift-affected, temperature-dependent F/T sensor.
-14. Force regulation has an inherent steady-state offset proportional to `k_d` (see
-    "Controller tuning"). Do not read `desired_force` as the achieved force — read
-    `mean_contact_force` and `rms_force_error`.
-15. In the current ACT task, "collected" means the component's **complete conservative
-    footprint** lies inside the tray opening; a part balanced on the lip does not count.
-    Older legacy planner metrics may still use centre-only collection.
-16. Episode budgets (`sim.max_episode_time`, `planner.max_strokes`) truncate long episodes;
-    `failure_reason` says which limit was hit. Truncated episodes drag the mean collection
-    rate down, which is intended — the baseline is supposed to look expensive.
-17. **Jam detection is a force threshold, not a measured stall.** It fires on sustained
-    tangential load, which is the right physical signal but needs a threshold above the
-    tip's own friction drag. If `desired_force` is changed a lot, re-check
-    `metrics.jam_force_threshold` — it does not scale itself.
-18. **Ride-over detection is geometric.** A component inside the capture band that moved
-    less than 4 mm counts as ridden over. A part that was nudged by a *neighbour* rather
-    than by the tip can therefore escape the count, and a part the tip legitimately only
-    grazed can be counted. It is a screening metric, not a contact-level diagnosis.
-19. `actions_waypoints` is resampled from the executed path, so it inherits any tracking
-    error the position loop had. That is deliberate (it is what the robot actually did),
-    but it means the waypoints are not exactly the commanded stroke.
-20. **The part-contact force is a small fraction of the measured wrench** (see Force signal
-    quality). Any force-based classification result should be reported together with the
-    `part_force_snr` it was obtained at.
-21. The contact decomposition is exact *in the simulator*. On hardware only the total
-    wrench exists, so a method that needs the split will not transfer — the split is for
-    supervision and validation, not for deployment.
-22. **Transfer RRT plans against a box model, not the real geometry.** The tray walls and
-    detected parts are axis-aligned boxes inflated by the tool circumradius. That is
-    conservative, so it never plans *through* something, but it will refuse clearances a
-    finer model would allow.
-23. Video is a rendering of the same simulation, not independent evidence. A run that looks
-    right and a metric that says otherwise disagree because the metric is measuring
-    something the camera cannot see — trust the metric and find out which.
-24. Everything is deterministic given `(config, seed)` on one machine and MuJoCo version.
-    Across MuJoCo versions or platforms, contact solver differences can change trajectories;
-    the *config hash* is recorded with every experiment so runs can be compared honestly.
-
----
-
-## Which machine to run this on
-
-Nothing in this repository is platform-specific — pure Python, `os.path.join` throughout,
-`multiprocessing` via an explicit `spawn` context (what macOS and Windows need anyway), and
-`imageio-ffmpeg` ships its own ffmpeg binary. MuJoCo itself has prebuilt binaries for
-Windows, Linux and macOS on both x86_64 and arm64. So it runs anywhere; the question is
-only where it is least friction.
-
-| Machine | Good for | Notes |
-|---|---|---|
-| **macOS (Apple Silicon)** | development, single episodes, video | `pip install mujoco` just works; offscreen rendering needs no `MUJOCO_GL` setting |
-| **Linux** | batch runs (`run_experiment`, `export_dataset`) | more cores for `--jobs N`; headless rendering with `MUJOCO_GL=egl` |
-| **Windows** | — | works, but never easier than the other two, and the downstream imitation-learning stack expects WSL |
-
-The one macOS quirk worth knowing: MuJoCo's **interactive** viewer (`launch_passive`) must be
-started with `mjpython` instead of `python`, because macOS requires rendering on the main
-thread. It does not affect this repository — `sim.video` and the vision backend use the
-*offscreen* `mujoco.Renderer`, which has no such restriction. Use `mjpython` only if you
-want to open the scene and poke at it by hand.
-
-## Troubleshooting
-
-**Offscreen rendering fails / `Renderer` raises a GL error.** MuJoCo picks a GL backend
-via `MUJOCO_GL`. On macOS the default (CGL) normally works; on a headless Linux box set
-`MUJOCO_GL=egl`, or `MUJOCO_GL=osmesa` if there is no GPU:
+建议先采用 Ubuntu 24.04 + Python 3.12；项目声明 Python ≥3.10。这是部署建议，**本分支尚未在目标
+Ubuntu/GPU 上实测**。从完整 Git clone 使用 editable 安装，资产依赖仓库目录结构，不要只复制 Python 包。
 
 ```bash
-MUJOCO_GL=egl python -m sim.smoke_test
+git clone --branch feat/ubuntu-model-handoff https://github.com/luke711-xyy/act-ur10-sweep-sim.git
+cd act-ur10-sweep-sim
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[web,dev]'
+# 需要现有 ACT 参考流程时再安装；新模型的重依赖可放独立虚拟环境
+python -m pip install -e '.[act]'
 ```
 
-Only the `vision` perception backend, `--save-observations` and `sim.record_video` need
-rendering — the `ground_truth` backend and every controller/planner experiment run without
-it.
+GPU 训练先按 [PyTorch 官方安装选择器](https://pytorch.org/get-started/locally/)选适合目标驱动的
+CPU/CUDA/ROCm wheel，Torch 与 torchvision 必须配套，并满足本仓库声明的版本范围。
+不要把 Mac MPS 配置直接带过去，也不要猜 CUDA 下载链接。
 
-**MP4 writing fails.** `imageio-ffmpeg` ships its own ffmpeg binary; if it is missing the
-recorder falls back to GIF automatically and says so. `--gif` forces it.
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+python -m pip check
+```
 
-**`multiprocessing` and rendering.** `--jobs > 1` uses spawned processes, each building
-its own MuJoCo model. That is fine for `ground_truth`; with `--perception vision` each
-worker also creates its own GL context, which some drivers dislike. If a parallel vision
-run hangs, drop to `--jobs 1`.
+迁移来源环境曾使用 MuJoCo 3.14.0、NumPy 2.2.6、Torch 2.11.0、torchvision 0.26.0、
+LeRobot 0.6.1；仅是来源版本记录，**不是 Ubuntu 已验证锁文件**。依赖约束以 `pyproject.toml` 为准。
+GPU 加速主要用于网络；现有 MuJoCo 物理不因 `act.device=cuda` 自动改成 GPU 物理。
 
-**Episodes end with "stroke budget exhausted".** Planner A needs about `n_lanes + 1`
-strokes; `planner.max_strokes` must be at least that or the baseline is truncated (which
-silently flatters it — fewer strokes, lower collection rate). `n_planned_strokes` is
-recorded in every episode's `extra` field.
+Ubuntu 渲染需要匹配的 OpenGL 驱动/库。下列是常见库示例，先检查系统已有包和显卡驱动再安装：
 
-**The force never reaches the target.** Expected: a non-zero `k_d` leaves a steady-state
-offset (see "Controller tuning"). Read `mean_contact_force`, not `desired_force`.
+```bash
+sudo apt-get install libgl1 libegl1 libosmesa6 libglfw3
+# 无桌面 GPU 渲染：启动 Python 之前设置
+export MUJOCO_GL=egl
+# 没有可用 EGL 时，另一个新终端/进程可尝试 CPU 渲染：
+# export MUJOCO_GL=osmesa
+# 有桌面窗口则可使用 glfw
+# 可选历史 Cartesian 健康检查（不是 UR10 ACT 成功证明）
+python -m sim.smoke_test
+```
 
-## What this prototype is for
+Linux 的 EGL/OSMesa/GLFW 选择见 [MuJoCo 官方 GL 后端代码](https://github.com/google-deepmind/mujoco/blob/main/python/mujoco/rendering/classic/gl_context.py)；
+变量必须在导入 MuJoCo 前设置。Torch 的 CUDA 可用不等于 RGB 渲染可用。
+MuJoCo Python wheel 包含其运行库，不需要沿用旧 `mujoco-py` 安装流程；
+Mac 的 `mjpython` passive-viewer 要求也不是 Ubuntu 指令，见
+[MuJoCo Python 文档](https://mujoco.readthedocs.io/en/stable/python.html)。
+生成本机配置后，可用 `python -m sim.act.camera_preview --config configs/local-ubuntu.yaml`
+检查UR10资产和离屏渲染；它生成四个预览相机，不代替五个正式策略视角的核验。
 
-The first goal is **not** photorealism and **not** an accurate model of real screws. It is
-to establish where a fixed full-cover sweep, a single global sweep and a segmented visual
-planner start to differ — as a function of component count and spatial distribution — on
-top of a hybrid force/position controller that is provably identical across all three. The
-three-way split separates what perception buys from what stroke segmentation buys. That
-difference, the force sweep that fixes `F_z*`, and the demonstrations exported from both,
-are the foundation for the learned policy that comes next.
+## 3. U 盘示教：保持格式和相对路径
 
-## License
+复制**完整数据根目录**：`manifest.jsonl`、每条 episode 元数据、NPZ、所有视角帧图、
+采集配置/协议、trace/审计文件及已有 split。仅复制 NPZ 或仅复制图片均不足。
+不要改写 manifest 的相对路径，不要把 USB 挂载路径写入每条历史记录。
+如需复用 ACT checkpoint，另行复制完整 checkpoint 目录，包括模型、配置、统计与 pre/postprocessor；
+续训还需要对应训练状态，不能只复制一个权重文件。
 
-MIT.
+```bash
+# 用新目的目录，避免覆盖已有数据；替换下面两个示例路径
+mkdir -p runs
+rsync -a /media/USER/USB/act_dataset/ runs/act_dataset_five_view_rudra_300_smooth320_v1/
+python -B scripts/ubuntu_setup.py check-data \
+  --dataset runs/act_dataset_five_view_rudra_300_smooth320_v1
+# 确认规模和耗时后才做全部载荷/图片解码检查（仍为只读）
+python -B scripts/ubuntu_setup.py check-data \
+  --dataset runs/act_dataset_five_view_rudra_300_smooth320_v1 \
+  --all-episodes --check-images
+```
+
+默认核验全部 manifest/元数据，但只检查前三条 NPZ/图片引用，不扫描整库图片；
+报告会写出检查范围。全量图片检查也**不等于 split 泄漏、重复布局或所有 trace 哈希的完整审计**。
+训练前还要核验成功专家的数量、采集协议、来源指纹、动作有效掩码以及 train/validation 划分。
+正式门禁可额外使用 `check-data --formal-config configs/local-ubuntu.yaml`；
+当前五视角正式训练配置要求目标 1–6 各 50 条、共 300 条成功专家示教。
+个别旧 help 文本中的 120/每目标20 不是当前门禁；不要删除门禁让不足或不同协议的数据混入。
+
+## 4. 数据与动作契约：换模型前必须掌握
+
+当前 schema_version=5。以 `sim/act/interface.py` 和 `dataset.py` 为准：
+
+| 字段 | 当前形状/含义 |
+| --- | --- |
+| `state` | float32 `(T,36)`；当前 18 维 + 200 ms 前历史 18 维 |
+| 每组 18 维 | 六关节 + TCP XYZ 3 + yaw 的 sin/cos 2 + 腕部 wrench 6 + contact latch 1 |
+| `environment_state` | 当前 float32 `(T,1)`，仅目标数；兼容旧 `(T,3)` 时目标在列1，旧列0/2是总数/收集数 |
+| `action` | float32 `(T,4)`：世界坐标固定参考系的指令增量 `Δx,Δy,Δz,Δyaw`，单位 m/rad |
+| 时间 | `t` 单调递增；动作 25 Hz，40 ms/帧 |
+| `action_valid` | 每帧有效监督掩码；不能把无效接近/静置标签直接当扫动标签 |
+| RGB | 五路 320×320；文件 HWC uint8，reader 转 CHW uint8，训练再转 float/255 |
+
+五个 camera 名：`corner_xminus_yminus`、`corner_xminus_yplus`、
+`corner_xplus_yminus`、`corner_xplus_yplus`、`wrist`。
+**必须核对实际配置中的相机键与顺序**，不能仅凭“5张图”猜映射；
+若更换分辨率，现有 reader 不会替你自动 resize。
+不足200ms历史时重复首帧；关闭历史时重复当前帧，既有接口仍保留36维，不能默默改状态结构。
+
+动作不是关节角、实际 TCP 轨迹或任意模型的绝对 pose。现有推理以查询时刻的指令参考锚定动作块，
+不能从执行时的实际 pose 重新解释同一动作块。ACT chunk=25、execute_steps=5；
+单步模型需要自己的调度适配，不要重复五次同一输出冒充动作块。
+
+接触 latch 后，Z 的执行由导纳管理，监督中相应 `dz` 为0；Hybrid 中 ACT 预测 Z 不执行，
+只保留审计，ACT 负责 XY/yaw。原始 state 的 wrench 是传感器反馈转世界系，
+补偿/滤波的接触 Fz 是另外的控制量；二者不能随意当成同一个数。
+收集数、物体真值 pose、专家选件信息和成功判定不能作为新策略输入偷渡。
+
+新模型数据适配必须保持：动作单位/坐标系、相机映射、历史语义、有效和 padding 掩码、
+只用训练集拟合 normalization。派生自同一条示教的样本放同一 split；
+别仅用随机帧划分导致数据泄漏。元数据门禁通过并不证明载荷和 split 全部正确。
+
+## 5. 本机配置与 ACT 参考全流程
+
+配置加载是读取**完整 YAML**，不是自动把短文件 merge 到默认配置。
+迁移工具从现有完整五视角配置生成副本，只改设备、数据/模型/视频路径和关闭外部追踪；
+物理、控制、相机、任务、训练结构保持原值。输出必须是新文件，不覆盖冻结配置。
+
+```bash
+python -B scripts/ubuntu_setup.py config \
+  --base configs/five-view-fine-teached-300.yaml \
+  --dataset runs/act_dataset_five_view_rudra_300_smooth320_v1 \
+  --model-dir runs/ubuntu_act_reference --device cuda \
+  --out configs/local-ubuntu.yaml
+# 无兼容 GPU 时用 --device cpu；不支持 mps/auto 静默回退
+```
+
+仓库已有 `configs/ubuntu-five-view.yaml` CUDA 模板，可作为参考。
+训练、evaluate、web 命令本身没有统一的 `--device` 或 `--set` 参数，设备要写进完整配置。
+`web.inference_model_root` 在本分支支持选择本机模型目录的最新完整 checkpoint；
+工作台空模型输入没有可用完整 checkpoint 时会报错，不会悄悄使用随机权重。
+
+下列是**迁移后的参考命令，不是自动启动授权**。先确认数据门禁、设备和显存；原 batch=4、FP32。
+不在 Mac 恢复已停止的训练，103243 中断点不是200K，历史 step_100000 不改写。
+
+```bash
+# 未来得到用户训练授权后，Ubuntu 上的 ACT 参考训练
+python -m sim.act.train --config configs/local-ubuntu.yaml \
+  --dataset runs/act_dataset_five_view_rudra_300_smooth320_v1 \
+  --out runs/ubuntu_act_reference --steps 200000 --batch-size 4 --no-amp --no-trackio
+
+# 仅在对应 checkpoint 已完整生成或转移后做实际推理；--model 必须显式给
+python -m sim.act.evaluate --config configs/local-ubuntu.yaml \
+  --model runs/ubuntu_act_reference/checkpoints/step_100000 \
+  --seed 3000000 --target-count 1 --record-replay \
+  --replay-root runs/workbench_previews --video-root runs/inference_videos
+
+python -m sim.web.run --config configs/local-ubuntu.yaml --host 127.0.0.1 --port 8765
+```
+
+浏览器访问 `http://127.0.0.1:8765`；远程访问优先 SSH tunnel，不把无认证控制台直接公开到网络。
+工作台可以查看传入示教、保存状态回放和视频；训练/推理仍使用现有 ACT 子进程，新增模型需改路由。
+数据、checkpoint、回放和视频目录应写入本机配置；不要沿用 `/Users/...` 或 Mac 外部 exports 路径。
+
+续训用 `--resume` 指向完整 checkpoint，并另设输出保护历史；`--steps` 是总步数上限，
+不是额外步数。独立 evaluate 不指定模型可能创建未训练策略，所以这里明确要求 `--model`。
+`--preview` 允许预测延迟暂停仿真，不是严格实时调度评测。
+
+## 6. ACT 之外的模型如何接入
+
+建议小步复用，而不是先把 ACT 类名全部替换：
+
+1. 单独实现模型模块和配置，明确图像/低维/目标数输入、时间窗和输出。
+   需要语言或其他模态时先与用户确认：现有示教没有凭空提供这些标签。
+2. 数据适配读取原格式，按新模型组成 batch/窗口，保留 valid/padding 掩码；测试预处理和归一化。
+3. 增加训练入口、模型 factory、loss/optimizer 和完整 checkpoint save/load。
+   不改物理控制代码迁就训练 API。每个模型独立依赖环境和输出目录。
+4. 推理适配器输出物理单位的 `(K,4)` 动作，并提供 reset/query 语义；
+   单步/扩散动作块/绝对 pose 各需明确转换、缓存和延迟预算，不套错 ACT scheduler。
+5. 在工作台配置、jobs 和模型选择路由中注册模型类型；测试新命令与完整 checkpoint 检查。
+   先离线前向，再目标1/6短测试，再冻结正式布局/配置/来源；真实失败全部记录。
+
+可直接复用环境、腕部力反馈、导纳、安全限制、IK、记录/状态回放和指标计算。
+但策略 success、数量误差、接触稳定性、力和实际 Z 跟随误差要分别报告。
+静止1N或收集到目标数不能证明扫动持续贴桌。
+
+## 7. 第四组 Hybrid 运行依赖与评测边界
+
+Mac 上此前散落在 exports 的14份控制 Python 依赖已纳入
+[experiments/hybrid_trial4](experiments/hybrid_trial4/README.md)，路径改成仓库相对位置，
+不带历史物理轨迹、权重或数据。查看其来源哈希与迁移哈希；不要运行 vendor 内旧实验 main，
+它们有意保留历史实验结构，不是可单独部署的批测入口。
+
+```bash
+python -c "from experiments.hybrid_trial4.runtime import load_runtime; print(load_runtime().TRIAL_SPEC)"
+```
+
+第四组固定：1N目标力、导纳+实际Z跟随补偿**合计±2mm**，寻找 M/B/K=10/400/10，
+维持=10/800/10；实际距桌面1mm启用导纳，腕力0.5N持续0.1s转稳定，
+0.8–1.2N持续0.2s才交 ACT XY/yaw。Z全程由腕部力导纳和有界实际Z跟随补偿管理，
+不执行 ACT 预测Z、不看桌面力真值。
+首个有效 ACT 动作后2秒，XY加速度50mm/s²；之后精确恢复原生 ACT，不永久限扫动。
+XY最高80mm/s，转角0.35rad/s及交接0.5rad/s²；正常上抬20mm/s、下探100mm/s，
+跟随gain0.5/±0.2mm、进程内IK精度1e-6、5Hz力滤波及现有安全保护保留。
+
+新入口支持 `--exports-root`、`--act-batch`，供 Ubuntu 本机**重新建立并正常完成的 ACT 基线**
+生成新的 Hybrid 批次使用；所有阶段共享2000个25Hz动作帧，入区后两秒终止连续跨阶段。
+每布局一次几何机会、最多一次物理执行；无方案也记失败，不换seed、筛成功、重试或增加恢复路线。
+预测、调度、执行异常停止保留现场，需人决定。
+
+**不能把 Mac 历史批次复制到 Ubuntu 后重写 metadata/seal/mtime 来强行恢复。**
+正式冻结记录仍要求实际配置、数据/checkpoint和依赖指纹一致；现有迁移仅取消旧清理审查文件的
+机器路径依赖，改冻结完整完成基线的计划/配置/ledger/summary/status/metadata。
+新模型正式入口也须有同等级别保护。Hybrid 不是纯 ACT；
+曾参与调参的布局不能宣称全新未调参测试集，不作单因素因果或显著性宣称。
+
+可选 `scripts/hybrid_live_view.py` 是外部展示工具，不导入/调用评测器、不改正式推理。
+它生成最终数量密度PNG/SVG/CSV，并从已核验视频保留查看副本；原视频已删除时不重新执行策略补视频。
+**正常整批完成且执行进程退出后，该工具会按自身receipt核验并永久删除自己的视频副本。**
+仅在用户同意这一“整批保留、结束清理”策略后启动；默认不自动开启，也不恢复定时任务。
+新批次先创建 `BATCH/live_view`，再运行 `python -B scripts/hybrid_live_view.py --root /absolute/BATCH`；
+展示目录已有journal时，只可用 `--resume-display-only` 恢复展示，不能恢复物理评测。
+
+## 8. 已验证范围与目标机验收
+
+本分支在来源 Mac 的既有环境做了有界专项测试，未启动训练、完整120批测或新模型实验：
+
+当前专项结果：136项，132通过、4项专有历史证据测试跳过、0失败/错误；不是全套测试。
+另做工作台回归35项全部通过；详情见 [验证范围](docs/ubuntu-handoff-validation.md)。
+
+```bash
+python -B -m pytest tests/test_ubuntu_handoff.py tests/test_workbench_ubuntu.py \
+  tests/test_hybrid_paired_batch.py tests/test_workbench_ordinary_50k.py \
+  tests/test_admittance.py tests/test_scene_and_config.py -q
+```
+
+记录层原始历史恢复的4个样本测试需要本机专有轨迹，默认明确跳过；
+只有用户提供真实只读历史证据时才设置 `SWEEPSIM_HISTORICAL_HYBRID_BATCH`。
+这不是全套 pytest 通过，也不是 Ubuntu 驱动/CUDA/EGL/策略验证。
+勿直接无审查跑所有测试：部分历史测试会创建训练/物理工作负载。
+
+目标机验收顺序：依赖检查 → 资产/场景 → RGB 渲染 → 数据检查 → 工作台数据/回放
+→ checkpoint 完整加载/离线预测 → 短实际推理与控制审计 → 用户授权训练/正式评测。
+
+常见问题：黑图先检查 GL 后端和驱动；维度相同不证明示教/归一化相同；
+找不到模型先检查 `web.inference_model_root` 和完整 checkpoint。
+旧记录中 MP4 绝对路径在 Ubuntu 缺文件不是重新推理的理由：
+使用独立映射/新回放目录从保存状态生成媒体，保留旧正式 ledger 不变。

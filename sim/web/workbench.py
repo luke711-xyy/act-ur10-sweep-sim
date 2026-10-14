@@ -568,7 +568,11 @@ class WorkbenchState:
         arrays_path = dest_dir / "arrays.npz"
         arrays = np.load(arrays_path, allow_pickle=False)
         payload = {key: np.asarray(arrays[key]) for key in arrays.files}
-        payload["environment_state"][:, 1] = float(target_count)
+        environment = payload["environment_state"]
+        if environment.ndim != 2 or environment.shape[1] not in (1, 3):
+            raise ValueError("wrong-count preview requires 1-D or 3-D task conditioning")
+        target_column = 0 if environment.shape[1] == 1 else 1
+        environment[:, target_column] = float(target_count)
         # Goal counts live only in environment_state; robot state and visual
         # observations remain the physical trace of the source rollout.
         np.savez_compressed(arrays_path, **payload)
@@ -578,6 +582,8 @@ class WorkbenchState:
                 return value.replace(source_id, episode_id)
             if isinstance(value, list):
                 return [replace_path(item) for item in value]
+            if isinstance(value, dict):
+                return {key: replace_path(item) for key, item in value.items()}
             return value
 
         record = {key: replace_path(value) for key, value in source.items()}

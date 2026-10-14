@@ -34,7 +34,7 @@ web = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["sim*"]
+include = ["sim*", "experiments*"]
 
 [tool.setuptools.package-data]
 sim = ["../configs/*.yaml"]

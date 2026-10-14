@@ -11,3 +11,7 @@ datasets/
 graphify-out/
 .worktrees/
 exports/
+configs/local-*.yaml
+experiments/hybrid_trial4/vendor/**/goal_*/
+experiments/hybrid_trial4/vendor/**/videos/
+experiments/hybrid_trial4/vendor/**/charts/
