@@ -206,6 +206,42 @@ MuJoCo or load ACT. No claim of physical validation without actual rollout proof
   Main's285-case regression included those paths. Physical parity/contact/pilot
   readiness were explicitly left for the real preflight, not claimed from tests.
 
+## Authorized exact same-stream zero preflight
+
+- The second invocation `residual_sac_pilot_ensemble_fixed_20261015_2200`
+  executed native temporal ensembling, but stopped before learning when two
+  independent asynchronous native/zero streams accepted different query sets.
+  Both measured target1 outcomes (two collected, ordinary failure) remain as
+  original records; training_steps/residual_decisions/updates remained0.
+- The user approved replacing ONLY that non-isolating cross-rollout gate with
+  same-stream shadow checking and ONE new unused-layout invocation after tests
+  and publication. Native asynchronous scheduling/ensemble and Z are unchanged.
+- The production route-composition arithmetic was extracted into
+  `ResidualReference`, shared by real residual execution and an independent zero
+  shadow. The real native path still executes once. The shadow receives the
+  same action/start/already-computed Z and never advances policy, controller,
+  handoff or physics. Inactive handoff is a bypass; active steps compare native
+  reference versus native-plus-zero with exact dtype/shape/byte equality.
+- `zero_residual_shadow` and per-step trace audits record counts, active counts,
+  zero differences and matching reference digests. Nonempty accepted ACT and
+  active coverage equal to actual ACT control-step count are required. One-ULP
+  mismatch, missing coverage, malformed evidence or added query/physics fails.
+- New preflight3152000/3152001 and probes3152100/3152101 do not reuse either
+  prior invocation. Preparation seals consumed markers and measured pose hashes
+  from BOTH prior roots as exclusions. No failed layout is retried or replaced.
+- TDD:16 expected missing-feature/old-schedule failures before implementation;
+  final focused regression306 passed,0 failures/errors/skips in6.44s. The actual
+  strict handoff/reference integration test covers208 synthetic control steps,
+  including8 native-restored active checks, one handoff proposal per reference,
+  no model/physics and exact shadow digests. This is not physical preflight proof.
+- Project-suite attempt was bounded by SIGINT to our verified pytest process:
+  184 passed,1 upstream Starlette/httpx deprecation warning in120.26s; NOT a
+  full-suite pass. Latest scoped evidence is `docs/residual_rl_verification.xml`.
+- Independent read-only repair review found no Critical/Important blocker;
+  2,000 numeric substeps matched prior nonzero composition. It passed25 focused
+  non-writing tests and explicitly deferred physical/pilot claims. The suggested
+  missing/unequal coverage evidence tests are included in the306-case main run.
+
 Implementation choices documented for handoff: fixed seed schedules are sealed
 up front; their actual pose fingerprints are checked after reset but before any
 commanded execution, rather than spending the pilot budget pre-simulating50k

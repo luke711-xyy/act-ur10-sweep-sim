@@ -167,6 +167,8 @@ import numpy as np
 from residual_rl.runtime import PROJECT,identity,load_formal,install_driver,PolicyCache
 from residual_rl.baseline import pre_dino_sources
 from residual_rl.features import FeatureMailbox
+from residual_rl.control import ResidualGovernor
+from residual_rl.shadow import ZeroResidualShadow
 f=identity(); pre_dino_sources(PROJECT,f['source_fingerprints']).activate()
 from sim.config import load_config
 formal=load_formal(); module=formal.runtime()
@@ -175,7 +177,14 @@ env=SimpleNamespace(control_dt=.01,time=5.)
 c=dict(env=env,admittance=object(),force_gate=object(),collection_timer=object(),
        trace=[dict(t=4.99,command=np.zeros(4)),dict(t=5.,command=np.zeros(4))],
        last_reference=np.zeros(4),act_trace=[])
-collector=SimpleNamespace(mailbox=FeatureMailbox())
+collector=SimpleNamespace(mailbox=FeatureMailbox(),env=env,mode='native',
+    control=ResidualGovernor([[cfg.workspace.x_min,cfg.workspace.x_max],
+                              [cfg.workspace.y_min,cfg.workspace.y_max]]))
+collector.shadow=ZeroResidualShadow(collector.control.bounds)
+collector.is_active=lambda: (collector.governor is not None and
+    collector.governor.started_at is not None and env.time-collector.governor.started_at>=2.-1e-9)
+frames=[]
+collector.begin=lambda nominal:frames.append(np.asarray(nominal).copy())
 cache=PolicyCache()
 driver=install_driver(formal,module,cfg,c,collector,cache)
 scheduler=driver.__globals__['ActionChunkScheduler'](cfg,allow_late=True)
@@ -189,6 +198,40 @@ assert scheduler is collector.scheduler
 assert scheduler.temporal_ensemble.coeff==.01
 assert collector.mailbox.current(5.)['available']
 assert cache.bundle is None
-print('strict handoff adapter verified, no model or physical execution')
+# Exercise the REAL installed handoff and native reference, but no policy or
+# physics. Acknowledgement advances only the synthetic test clock/state.
+reference=driver.__globals__['_policy_reference_substep']
+governor=collector.governor
+proposals=[]
+propose=governor.propose
+def counted(*args,**kwargs):
+    proposals.append(float(env.time))
+    return propose(*args,**kwargs)
+governor.propose=counted
+controller=c['admittance']; gate=c['force_gate']
+last=np.zeros(4,np.float32)
+for i in range(208):
+    if i%4==0:
+        start=last.copy(); target=start+np.array([.002,.001,0.,.01],np.float32)
+    z=.001+i*1e-8
+    command=reference(start,target,i%4+1,4,.01,.08,.1,.35,True,z)
+    # Exactly one native handoff proposal per command; shadow does not mutate it.
+    assert len(proposals)==i+1
+    assert np.array_equal(command,governor.pending['command'])
+    if governor.pending['mode']=='native_restored':
+        assert command[2]==governor.pending['native_reference'][2]
+    else: assert command[2]==z  # Original handoff retains float64 Z before trace rounding.
+    last=np.asarray(command,dtype=np.float32)
+    row=dict(t=env.time+.01,command=last,control_step_advanced=True)
+    governor.prepare_record(row); governor.acknowledge(row)
+    env.time=row['t']
+proof=collector.shadow.summary()
+assert proof['checked_steps']==208 and proof['active_checked_steps']==8
+assert proof['native_sha256']==proof['zero_sha256'] and proof['mismatches']==0
+assert len(frames)==52 and not collector.control.velocity.any()
+assert c['admittance'] is controller and c['force_gate'] is gate
+assert cache.bundle is None  # No model loading/query or environment.step call.
+assert len(collector.mailbox.accepted)==1
+print('strict handoff and same-stream shadow verified, no model or physical execution')
 '''], cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout+result.stderr

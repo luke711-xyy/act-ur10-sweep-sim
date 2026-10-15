@@ -64,3 +64,33 @@ class ResidualGovernor:
             filtered_residual=self.velocity.copy(), residual_acceleration=(self.velocity-previous)/dt,
             native=native.copy(), applied=result.copy(), Z_unchanged=True, active=bool(active))
         return result
+
+
+class ResidualReference:
+    """Production route accumulation shared with the isolated zero shadow."""
+    def __init__(self,control):
+        self.control=control
+        self.previous_native=None; self.previous_applied=None
+
+    def begin_frame(self,start):
+        start=np.asarray(start)
+        if start.shape!=(4,) or not np.isfinite(start).all():
+            raise ValueError('invalid residual frame start')
+        self.previous_native=start.copy(); self.previous_applied=start.copy()
+
+    def step(self,raw,action,*,dt,active):
+        if self.previous_applied is None: raise RuntimeError('residual frame was not initialized')
+        raw=np.asarray(raw); action=np.asarray(action)
+        synthetic=raw.copy()
+        if np.any(self.control.velocity) or np.any(action):
+            synthetic[:2]=self.previous_applied[:2]+raw[:2]-self.previous_native[:2]
+            synthetic[3]=self.previous_applied[3]+np.arctan2(
+                np.sin(raw[3]-self.previous_native[3]),np.cos(raw[3]-self.previous_native[3]))
+        filter_before=self.control.velocity.copy()
+        result=self.control.step(self.previous_applied,synthetic,action,dt=dt,active=active)
+        self.control.last_audit.update(start=self.previous_applied.copy(),dt=float(dt),
+            filter_before=filter_before,bounds=self.control.bounds.copy(),
+            composition_native=synthetic.copy(),native=raw.copy(),
+            native_before=self.previous_native.copy())
+        self.previous_native=raw.copy(); self.previous_applied=result.copy()
+        return result

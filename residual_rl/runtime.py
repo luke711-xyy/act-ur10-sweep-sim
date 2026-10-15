@@ -15,7 +15,7 @@ import numpy as np
 from .bridge import (RecentRows, closure_value, contact_mask, instrument_physics,
                      streaming_native)
 from .config import DEFAULT
-from .control import ResidualGovernor
+from .control import ResidualGovernor,ResidualReference
 from .features import FeatureMailbox,observed_scheduler
 from .observations import actor_observation,critic_observation
 from .rewards import ContactReward,classify_failure
@@ -142,6 +142,10 @@ class Collector:
         self.governor=None; self.scheduler=None
         self.control=ResidualGovernor([[cfg.workspace.x_min,cfg.workspace.x_max],
                                       [cfg.workspace.y_min,cfg.workspace.y_max]])
+        from .shadow import ZeroResidualShadow
+        self.shadow=(ZeroResidualShadow(self.control.bounds)
+                     if spec.get('phase')=='preflight_shadow' else None)
+        self.ACT_control_steps=0
         self.hidden=None; self.previous_action=np.zeros(3)
         self.raw_action=np.zeros(3); self.nominal_velocity=np.zeros(3)
         self.actor_rows=[]; self.critic_rows=[]; self.actions=[]; self.rewards=[]; self.masks=[]
@@ -238,6 +242,7 @@ class Collector:
     def after_control(self,env,command):
         import mujoco
         self.control_steps+=1; self.steps_in_frame+=1
+        if self.governor is not None: self.ACT_control_steps+=1
         self.accepted_velocity=self.control.velocity.copy()
         if self.active:
             norm=float(np.linalg.norm(self.control.velocity[:2]))
@@ -264,6 +269,7 @@ class Collector:
             final_collected=int(env.collected_mask().sum()),active=self.active,
             phase=self.current_phase,raw_action=self.raw_action,
             ACT_feature_sources=getattr(self.scheduler,'feature_components',[]),
+            zero_shadow_audit=self.shadow.last_audit if self.shadow is not None else None,
             residual_velocity=self.control.velocity.copy(),
             replay_state=dict(spec=int(mujoco.mjtState.mjSTATE_INTEGRATION),values=values),
             control_audit=audit))
@@ -329,7 +335,7 @@ def install_driver(formal,module,cfg,context,collector,cache):
     ns['build_act_policy']=lambda cfg,pretrained_path:cache.build(base_builder,cfg,pretrained_path)
     ns['ActionChunkScheduler']=observed_scheduler(base_scheduler,collector.mailbox,
         on_created=lambda scheduler:setattr(collector,'scheduler',scheduler))
-    state={'previous_native':None,'previous_applied':None}
+    composition=ResidualReference(collector.control)
     def reference(start,target,substep,substeps,dt,max_xy_speed,max_z_speed,max_yaw_rate,
                   contact_latched,admittance_z=None):
         active=collector.is_active()
@@ -338,25 +344,19 @@ def install_driver(formal,module,cfg,context,collector,cache):
                 max_yaw_rate,contact_latched,admittance_z)
             delta=endpoint-np.asarray(start)
             collector.begin(np.r_[delta[:2],np.arctan2(np.sin(delta[3]),np.cos(delta[3]))]/(dt*substeps))
-            state.update(previous_native=np.asarray(start).copy(),previous_applied=np.asarray(start).copy())
+            composition.begin_frame(start)
+            if getattr(collector,'shadow',None) is not None: collector.shadow.begin_frame(start)
         if not active or collector.mode=='native':
-            return old_reference(start,target,substep,substeps,dt,max_xy_speed,max_z_speed,
+            actual=old_reference(start,target,substep,substeps,dt,max_xy_speed,max_z_speed,
                                  max_yaw_rate,contact_latched,admittance_z)
+            if getattr(collector,'shadow',None) is not None:
+                raw=(native(start,target,substep,substeps,dt,max_xy_speed,max_z_speed,max_yaw_rate,
+                            contact_latched,admittance_z) if active else actual)
+                collector.shadow.check(actual,raw,dt=dt,active=active)
+            return actual
         raw=native(start,target,substep,substeps,dt,max_xy_speed,max_z_speed,max_yaw_rate,
                    contact_latched,admittance_z)
-        synthetic=raw.copy()
-        if np.any(collector.control.velocity) or np.any(collector.raw_action):
-            synthetic[:2]=state['previous_applied'][:2]+raw[:2]-state['previous_native'][:2]
-            synthetic[3]=state['previous_applied'][3]+np.arctan2(
-                np.sin(raw[3]-state['previous_native'][3]),np.cos(raw[3]-state['previous_native'][3]))
-        filter_before=collector.control.velocity.copy()
-        result=collector.control.step(state['previous_applied'],synthetic,collector.raw_action,
-                                      dt=dt,active=True)
-        collector.control.last_audit.update(start=state['previous_applied'].copy(),dt=float(dt),
-            filter_before=filter_before,bounds=collector.control.bounds.copy(),
-            composition_native=synthetic.copy(),native=raw.copy(),
-            native_before=state['previous_native'].copy())
-        state.update(previous_native=raw.copy(),previous_applied=result.copy())
+        result=composition.step(raw,collector.raw_action,dt=dt,active=True)
         collector.current_phase='ACT_residual' if active else 'ACT_handoff'
         return result
     def record(row,env):
@@ -441,7 +441,9 @@ class HybridRuntime:
                 known=None
             if known is None:
                 write_json(destination/'exception.json',dict(type=type(failure).__name__,error=str(failure),
-                    final_collected=int(env.collected_mask().sum()) if env is not None else None))
+                    final_collected=int(env.collected_mask().sum()) if env is not None else None,
+                    zero_shadow_audit=(collector.shadow.last_audit
+                        if collector is not None and collector.shadow is not None else None)))
                 raise
             outcome=known; reason=str(failure); error=repr(failure)
         finally:
@@ -466,6 +468,8 @@ class HybridRuntime:
             rl_return=collector.reward.rl_contact_return+terminal,
             unique_contacts=collector.reward.unique_count,short_contact_breaks=collector.reward.short_contact_breaks,
             residual_frames=collector.active_frames,control_steps=collector.control_steps,
+            ACT_control_steps=collector.ACT_control_steps,
+            zero_residual_shadow=collector.shadow.summary() if collector.shadow is not None else None,
             command_sha256=collector.command_digest.hexdigest(),Z_sha256=collector.z_digest.hexdigest(),
             peak_wrist_N=collector.peak if collector.force_samples else None,
             mean_wrist_N=collector.force_sum/n if collector.force_samples else None,

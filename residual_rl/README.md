@@ -19,8 +19,8 @@ the baseline identity and new code hashes. It does not consume an opportunity.
 Every layout's actual initial-pose hash is checked against old120 and previous
 training/validation layouts after reset and BEFORE planning/execution. A collision
 is an error, never silently replaced with another seed. The registry binds each
-seed to one initial-pose hash and its consumed roles. Only the exact native/zero
-preflight pair or base/final validation pair can reuse that seed AND hash.
+seed to one initial-pose hash and its consumed roles. The current preflight uses
+one physical rollout per layout; only base/final validation pairs reuse layouts.
 
 **Selected baseline (2026-10-15):** the user chose the pre-DINO implementation,
 commit `9102680d8e018b225ab34d36422572cd4b547166`, with the existing five-view
@@ -38,7 +38,8 @@ fingerprints and formal scripts are not rewritten. The private process must star
 before any `sim` imports; a mixed current/legacy namespace is rejected rather than
 replaced. Virtual source filenames preserve existing asset/config directories and
 allow module/function inspection and the reviewed AST adapters to see pinned text;
-no source copy or bytecode file is created. No real ACT preflight has run yet.
+no source copy or bytecode file is created. Two earlier invocations stopped in
+preflight before learning; their actual traces and consumed layouts are preserved.
 
 ## Execution requires a separate explicit human request
 
@@ -51,7 +52,7 @@ With the selected source baseline, the commands below are interfaces, **not evid
 of authorization or of an executed experiment**:
 
 ```sh
-# Real ACT preflight only: two native/zero pairs plus two bounded motion probes.
+# Real ACT preflight only: two same-stream zero shadows plus two motion probes.
 .venv/bin/python -B scripts/train_residual_sac.py --mode preflight \
   --out /absolute/new/preflight_directory --acknowledge-preflight
 
@@ -95,8 +96,31 @@ summaries, not an invented single-block identity; full contributor provenance is
 retained in the trace. Critic queue context is the newest contributing block,
 not an unaccepted or not-yet-valid prediction. Actor input dimensions and its
 sensor-only boundary are unchanged. Scheduler reset clears feature bookkeeping.
-The explicitly authorized replacement run uses preflight seeds3151000/3151001
-and probes3151100/3151101, not the previous failed opportunity.
+The current explicitly authorized replacement uses preflight seeds3152000/3152001
+and probes3152100/3152101. Preparation seals consumed markers and initial-pose
+fingerprints from BOTH prior stopped invocations as exclusions.
+
+### Exact zero check on one actual asynchronous ACT stream
+
+Two independent rollouts can accept different asynchronous prediction results at
+the same physical time, even with the same seed and unchanged settings. Their
+trajectory hashes are therefore not an isolating zero-adapter test. The current
+gate executes the native path once on each new preflight layout. At every ACT
+100 Hz reference step, an isolated zero-residual shadow uses the same accepted
+action, frame start and already computed admittance Z. It uses the production
+residual reference composer, without another policy query, handoff/controller
+advance, executed command or physics step. During the original handoff it follows
+the same bypass; after two seconds it tests native reference plus zero residual.
+
+Equality requires identical dtype, shape and bytes, including Z and yaw; even one
+ULP difference stops the invocation. `zero_residual_shadow` records compared and
+active counts, maximum difference and both command digests. The gate requires real
+accepted ACT chunks, post-gate frames and complete coverage of actual ACT control
+steps, not an empty/prefix-only pass. The trace retains per-step shadow evidence.
+Native command selection, temporal ensembling and termination are unchanged. This
+proves reference equivalence on the observed stream, not that asynchronous runs
+will have identical action-block acceptance or task outcomes. All shadow/probe
+checks must pass before baseline validation and learner initialization.
 
 Geometry contact dwell is sampled every physics substep. Only signed contact
 distance <=0 is considered. Twenty continuous milliseconds confirm one unique

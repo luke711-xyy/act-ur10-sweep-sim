@@ -29,12 +29,39 @@ def seed_schedule():
 
 
 def require_equivalent(native,zero):
+    """Legacy dual-rollout diagnostic, NOT the same-stream pilot gate."""
     if any(r.get('accepted_ACT_chunks',0)<1 or r.get('residual_frames',0)<1 for r in (native,zero)):
         raise RuntimeError('preflight did not exercise real ACT after handoff')
     fields=('command_sha256','Z_sha256','control_steps','accepted_ACT_chunks',
             'success','final_collected','reason','layout_fingerprint')
     if any(native.get(key)!=zero.get(key) for key in fields):
         raise RuntimeError('zero residual changed actual commands, Z, scheduler or termination')
+
+
+def require_shadow_equivalent(row):
+    proof=row.get('zero_residual_shadow') or {}
+    checked=proof.get('checked_steps',0); active=proof.get('active_checked_steps',0)
+    native=proof.get('native_sha256'); zero=proof.get('zero_sha256')
+    valid_digest=(isinstance(native,str) and len(native)==64
+                  and all(c in '0123456789abcdef' for c in native))
+    if (row.get('physical_attempts')!=1 or row.get('accepted_ACT_chunks',0)<1
+            or row.get('residual_frames',0)<1 or type(checked) is not int or type(active) is not int
+            or not 0<active<=checked or checked!=row.get('ACT_control_steps')
+            or checked>row.get('control_steps',0) or proof.get('single_actual_ACT_stream') is not True
+            or proof.get('mismatches')!=0 or proof.get('max_abs_error')!=0.
+            or not valid_digest or native!=zero or proof.get('extra_policy_queries')!=0
+            or proof.get('extra_physics_steps')!=0):
+        raise RuntimeError('same-stream zero residual preflight lacks exact complete active ACT proof')
+    return dict(zero_equivalent=True,**proof)
+
+
+def zero_residual_preflight(engine,plan):
+    checks=[]
+    for spec in plan:
+        item=dict(spec,episode_id=spec['episode_id']+'_shadow',phase='preflight_shadow')
+        row=engine.run(item,'native').row
+        checks.append(dict(seed=spec['seed'],**require_shadow_equivalent(row)))
+    return checks
 
 
 class UpdateSchedule:
@@ -102,11 +129,11 @@ def prepare(root):
     from .runtime import EXPORTS,identity
     root=validate_output_path(root)
     baseline=identity()  # Must fail BEFORE writing a new run on frozen-source drift.
+    schedule=seed_schedule()
+    schedule['prior_consumed_layouts']=sum((prior_consumed_layouts(EXPORTS/name) for name in (
+        'residual_sac_pilot_pre_dino_20261015_2143','residual_sac_pilot_ensemble_fixed_20261015_2200')),[])
     store=RunStore(root,create=True)
     write_json(store.root/'configuration.json',DEFAULT.to_dict())
-    schedule=seed_schedule()
-    schedule['prior_consumed_layouts']=prior_consumed_layouts(
-        EXPORTS/'residual_sac_pilot_pre_dino_20261015_2143')
     write_json(store.root/'seed_schedule.json',schedule)
     write_json(store.root/'frozen_identity.json',baseline)
     write_json(store.root/'code_hashes.json',own_code_hashes())
@@ -327,13 +354,7 @@ def execute(store,*,preflight_only=False,started_at=None,stop_request=None):
         with exclusive_inference():
             engine=HybridRuntime(store,guard)
             write_json(store.root/'status.json',dict(state='preflight',training_started=False))
-            preflight=[]
-            for spec in initial_config['preflight'][:2]:
-                paired=[]
-                for mode in ('native','zero'):
-                    item=dict(spec,episode_id=spec['episode_id']+'_'+mode,phase='preflight_'+mode)
-                    paired.append(engine.run(item,mode).row)
-                require_equivalent(*paired); preflight.append(dict(seed=spec['seed'],zero_equivalent=True))
+            preflight=zero_residual_preflight(engine,initial_config['preflight'][:2])
             for spec in initial_config['preflight'][2:]:
                 probe=engine.run(dict(spec,phase='probe'),'probe')
                 preflight.append(dict(seed=spec['seed'],**audit_probe(probe)))
