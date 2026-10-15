@@ -45,11 +45,15 @@ preflight before learning; their actual traces and consumed layouts are preserve
 The latest restoration authorization permits one original no-RL target1 check,
 then adapter reconnection only after a normal rollout. It does NOT authorize a
 new pilot, preflight campaign, validation campaign, or training restart.
+That was the2026-10-15 authorization boundary. On2026-10-16 the user explicitly
+authorized ONE new bounded pilot; see [the new execution note](../docs/residual_rl_execution_20261016.md).
+All safety and preflight integrity gates remain unchanged.
 
 ## Execution requires a separate explicit human request
 
-The user supplied that request on 2026-10-15 for one new bounded pilot after
-GitHub publication; see `docs/residual_rl_execution_20261015.md`. This does not
+The latest request is2026-10-16 for ONE new bounded pilot on the restored
+independent Hybrid; see `docs/residual_rl_execution_20261016.md`. The previous
+invocations and authorizations remain documented separately. This does not
 authorize automatic restarts, old ACT training resumption or the future240-rollout
 comparison. No execution result is implied by this authorization note.
 
@@ -101,9 +105,10 @@ summaries, not an invented single-block identity; full contributor provenance is
 retained in the trace. Critic queue context is the newest contributing block,
 not an unaccepted or not-yet-valid prediction. Actor input dimensions and its
 sensor-only boundary are unchanged. Scheduler reset clears feature bookkeeping.
-The current explicitly authorized replacement uses preflight seeds3152000/3152001
-and probes3152100/3152101. Preparation seals consumed markers and initial-pose
-fingerprints from BOTH prior stopped invocations as exclusions.
+The2026-10-16 replacement uses preflight seeds3152300/3152301 and motion probes
+3152400/3152401. Preparation seals consumed markers and initial-pose fingerprints
+from all three prior stopped invocations and the original-Hybrid restore check
+3152200 as exclusions. It never resumes or reruns any earlier opportunity.
 
 ### Exact zero check on one actual asynchronous ACT stream
 

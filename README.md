@@ -2,7 +2,8 @@
 
 > **本分支：`feat/act-residual-sac-post-training` — ResNet ACT + 第四组 Hybrid，保留残差 SAC 开发成果。**
 > 模拟器和控制基线恢复自 `feat/hybrid-astar-act-trial4` (`eb88784`)，不启用 DINOv3。
-> [恢复与验证入口](docs/hybrid_restore_20261015.md)；[残差模块说明](residual_rl/README.md)。本次不启动训练。
+> [恢复与验证记录](docs/hybrid_restore_20261015.md)；[残差模块说明](residual_rl/README.md)。
+> 新一轮残差 SAC 的明确授权及执行边界见 [2026-10-16 执行说明](docs/residual_rl_execution_20261016.md)；不自动恢复旧任务。
 > 原 ResNet 开发线 `feat/act-five-view` 的启动、训练、评测及单次 A* baseline 见 [原运行指南](docs/fine-teached-guide.md)；
 > 历史实验与回滚锚点见 [分支导航](docs/branch-guide.md)。模型、数据、日志不随源码上传。
 

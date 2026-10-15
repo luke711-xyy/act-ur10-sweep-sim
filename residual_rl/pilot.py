@@ -125,13 +125,37 @@ def prior_consumed_layouts(previous):
     return excluded
 
 
+def native_check_consumed_layout(previous):
+    """Exclude the separately executed original-Hybrid check without replaying it."""
+    import hashlib
+    previous = Path(previous)
+    marker = previous/'attempt.json'
+    layout = previous/'initial_layout.json'
+    item = json.loads(marker.read_text())
+    source = json.loads(layout.read_text())
+    poses = np.asarray(source['poses'], dtype='<f4')
+    if (type(item['seed']) is not int or item.get('opportunities') != 1
+            or type(item['target_count']) is not int or not 1 <= item['target_count'] <= 6
+            or poses.shape != (6, 7) or not np.isfinite(poses).all()):
+        raise RuntimeError('invalid prior native-check layout evidence')
+    fingerprint = hashlib.sha256(poses.tobytes()).hexdigest()
+    if fingerprint != source['sha256']:
+        raise RuntimeError('prior native-check layout fingerprint mismatch')
+    return [dict(seed=item['seed'], layout_fingerprint=fingerprint,
+                 source_sha256={str(marker): sha256(marker), str(layout): sha256(layout)})]
+
+
 def prepare(root):
     from .runtime import EXPORTS,identity
     root=validate_output_path(root)
     baseline=identity()  # Must fail BEFORE writing a new run on frozen-source drift.
     schedule=seed_schedule()
     schedule['prior_consumed_layouts']=sum((prior_consumed_layouts(EXPORTS/name) for name in (
-        'residual_sac_pilot_pre_dino_20261015_2143','residual_sac_pilot_ensemble_fixed_20261015_2200')),[])
+        'residual_sac_pilot_pre_dino_20261015_2143',
+        'residual_sac_pilot_ensemble_fixed_20261015_2200',
+        'residual_sac_pilot_same_stream_20261015_2219')),[])
+    schedule['prior_consumed_layouts'] += native_check_consumed_layout(
+        EXPORTS/'hybrid_restore_goal1_20261015')
     store=RunStore(root,create=True)
     write_json(store.root/'configuration.json',DEFAULT.to_dict())
     write_json(store.root/'seed_schedule.json',schedule)

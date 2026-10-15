@@ -29,7 +29,7 @@ class PilotConfig:
     pressure_dwell_seconds: float = 30.
     training_seed_base: int = 3300000
     validation_seed_base: int = 3140000
-    preflight_seed_base: int = 3152000
+    preflight_seed_base: int = 3152300
     random_seed: int = 20261015
 
     def to_dict(self):
