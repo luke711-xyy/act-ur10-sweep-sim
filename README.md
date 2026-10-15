@@ -2,6 +2,7 @@
 
 > **本分支：`feat/act-dinov3-frozen` — frozen DINOv3 + fresh ACT。**
 > DINOv3 接口、依赖、独立训练命令及验证边界见 [DINOv3 指南](docs/dinov3-act-guide.md)。
+> 在另一台电脑训练：见 [跨机训练准备](docs/dinov3-transfer-guide.md)，含 NVIDIA/CUDA 配置及数据迁移清单；本机训练已停止，不自动恢复。
 > 原 ResNet 开发线 `feat/act-five-view` 的启动、训练、评测及单次 A* baseline 见 [原运行指南](docs/fine-teached-guide.md)；
 > 历史实验与回滚锚点见 [分支导航](docs/branch-guide.md)。模型、数据、日志不随源码上传。
 
