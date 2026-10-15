@@ -173,6 +173,39 @@ MuJoCo or load ACT. No claim of physical validation without actual rollout proof
   compatibility review; no full-suite success is claimed. No resumed experiments,
   commits, branch changes, scheduled jobs, model writes or historical edits.
 
+## Native temporal-ensemble adapter repair and authorized new invocation
+
+- First authorized pilot at `residual_sac_pilot_pre_dino_20261015_2143` stopped
+  at4.83s with `unexpected ACT temporal ensemble`, before learner initialization,
+  residual decisions or updates. It consumed only native preflight seed3150000;
+  measured prefix count0 is preserved as exception evidence, NOT a fabricated
+  formal training failure. No automatic restart or same-layout retry occurred.
+- New user authorization explicitly preserves native temporal_ensemble_coeff0.01
+  while fixing the adapter, testing/publishing and starting ONE new invocation
+  on unused preflight layouts, with training still gated by the whole preflight.
+- Ruling: native scheduler action_for remains the sole action-fusion authority,
+  including circular yaw; the residual still applies after fusion at the existing
+  reference layer, only after the original two-second handoff. Observer bookkeeping
+  combines accepted contributor tokens with native weights; age/index become
+  weighted summaries and full contributor provenance is stored in the trace.
+  This512D mixture is derived observation context, not a new native network output.
+- New seeds3151000/3151001 and3151100/3151101 are distinct from all previous
+  preflight/probe seeds. New-run preparation seals the previous consumed marker
+  and measured pose hash in seed_schedule.json; runtime rejects either that seed
+  or fingerprint under a different seed before planning. Old evidence is read only.
+- TDD:7 expected missing-adapter/old-seed failures, then31 related tests pass;
+  two new exclusion cases RED before implementation;87 related tests pass. A
+  real strict handoff-adapter construction/acceptance test uses synthetic context
+  and no ACT weights or physics. All10 new ensemble tests pass in0.99s.
+- Fresh scoped regression285 passed in7.61s, no failures/errors/skips. Project
+  suite was attempted and bounded with SIGINT to our verified pytest process:
+  185 passed,1 upstream Starlette/httpx deprecation warning in143.90s; NOT a
+  full-suite pass. This test activity did not launch a physical pilot.
+- Independent focused read-only review of this repair found no Critical/Important
+  regressions;73 checks passed with3 intentionally deselected in that review.
+  Main's285-case regression included those paths. Physical parity/contact/pilot
+  readiness were explicitly left for the real preflight, not claimed from tests.
+
 Implementation choices documented for handoff: fixed seed schedules are sealed
 up front; their actual pose fingerprints are checked after reset but before any
 commanded execution, rather than spending the pilot budget pre-simulating50k

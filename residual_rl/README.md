@@ -87,6 +87,17 @@ Tokens become visible only when their timestamped ACT chunk was accepted and its
 corresponding index selected. Privileged Critic state has a separate builder;
 reward values and simulator identities never enter the Actor input.
 
+The native temporal ensemble stays enabled at its frozen coefficient0.01. The
+adapter does not compute or replace executed ACT actions. It aligns512-dimensional
+feature tokens to every currently contributing accepted block/index and combines
+them with the native normalized exponential weights. Age/index are weighted
+summaries, not an invented single-block identity; full contributor provenance is
+retained in the trace. Critic queue context is the newest contributing block,
+not an unaccepted or not-yet-valid prediction. Actor input dimensions and its
+sensor-only boundary are unchanged. Scheduler reset clears feature bookkeeping.
+The explicitly authorized replacement run uses preflight seeds3151000/3151001
+and probes3151100/3151101, not the previous failed opportunity.
+
 Geometry contact dwell is sampled every physics substep. Only signed contact
 distance <=0 is considered. Twenty continuous milliseconds confirm one unique
 component; interruption resets unconfirmed dwell. Prefix contacts consume quota

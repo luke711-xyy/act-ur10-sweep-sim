@@ -75,13 +75,39 @@ def own_code_hashes():
     return {str(p.relative_to(project)):sha256(p) for p in sorted(paths)}
 
 
+def prior_consumed_layouts(previous):
+    """Read only the explicitly superseded run's small marker/layout evidence."""
+    import hashlib
+    previous=Path(previous)
+    excluded=[]
+    for marker in sorted((previous/'attempts').glob('*.json')):
+        item=json.loads(marker.read_text()); episode_id=item['episode_id']
+        if not isinstance(episode_id,str) or Path(episode_id).name!=episode_id:
+            raise ValueError('invalid previous episode identifier')
+        layout=previous/'episodes'/episode_id/'layout.json'
+        source=json.loads(layout.read_text())
+        poses=np.asarray(source['poses'],dtype='<f4')
+        if poses.shape!=(6,7) or not np.isfinite(poses).all():
+            raise RuntimeError('previous consumed layout fingerprint has invalid poses')
+        fingerprint=hashlib.sha256(poses.tobytes()).hexdigest()
+        if fingerprint!=source['layout_fingerprint']:
+            raise RuntimeError('previous consumed layout fingerprint mismatch')
+        excluded.append(dict(seed=item['seed'],layout_fingerprint=fingerprint,
+            source_sha256={str(marker):sha256(marker),str(layout):sha256(layout)}))
+    if not excluded: raise RuntimeError('previous consumed attempt evidence is missing')
+    return excluded
+
+
 def prepare(root):
-    from .runtime import identity
+    from .runtime import EXPORTS,identity
     root=validate_output_path(root)
     baseline=identity()  # Must fail BEFORE writing a new run on frozen-source drift.
     store=RunStore(root,create=True)
     write_json(store.root/'configuration.json',DEFAULT.to_dict())
-    write_json(store.root/'seed_schedule.json',seed_schedule())
+    schedule=seed_schedule()
+    schedule['prior_consumed_layouts']=prior_consumed_layouts(
+        EXPORTS/'residual_sac_pilot_pre_dino_20261015_2143')
+    write_json(store.root/'seed_schedule.json',schedule)
     write_json(store.root/'frozen_identity.json',baseline)
     write_json(store.root/'code_hashes.json',own_code_hashes())
     seal={name:sha256(store.root/name) for name in

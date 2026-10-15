@@ -16,7 +16,7 @@ from .bridge import (RecentRows, closure_value, contact_mask, instrument_physics
                      streaming_native)
 from .config import DEFAULT
 from .control import ResidualGovernor
-from .features import FeatureMailbox
+from .features import FeatureMailbox,observed_scheduler
 from .observations import actor_observation,critic_observation
 from .rewards import ContactReward,classify_failure
 from .safety import BudgetStop
@@ -28,13 +28,17 @@ HYBRID=EXPORTS/'batch_hybrid_trial4_100k_120_paired_20261014'
 
 
 class LayoutRegistry:
-    def __init__(self,old_plan):
+    def __init__(self,old_plan,prior_consumed=()):
         self.old_seeds={p['seed'] for p in old_plan}
         self.old_hashes={p['layout_fingerprint'] for p in old_plan}
+        self.prior_seeds={p['seed'] for p in prior_consumed}
+        self.prior_hashes={p['layout_fingerprint'] for p in prior_consumed}
         self.used={}
         self.seeds={}
 
     def register(self,seed,fingerprint,role):
+        if seed in self.prior_seeds or fingerprint in self.prior_hashes:
+            raise ValueError('previously consumed layout cannot enter a replacement pilot')
         if seed in self.old_seeds or fingerprint in self.old_hashes:
             raise ValueError('old120 layout cannot enter residual training or tuning')
         if seed in self.seeds and self.seeds[seed]['fingerprint']!=fingerprint:
@@ -170,7 +174,7 @@ class Collector:
         limiter=c.get('z_limiter'); gate=c.get('force_gate')
         first=getattr(timer,'first_entry_time',None)
         queue=np.zeros((25,4),np.float32)
-        chunk=getattr(self.scheduler,'chunk',None)
+        chunk=getattr(self.scheduler,'observation_chunk',None)
         if chunk is not None: queue[:len(chunk.actions)]=chunk.actions
         critic=critic_observation(actor,qpos=self.env.data.qpos,qvel=self.env.data.qvel,
             collected=self.env.collected_mask(),seen=self.reward.seen,dwell=self.reward.durations,
@@ -259,6 +263,7 @@ class Collector:
             compensated_normal_force_raw=float(env.compensated_normal_force_raw()),
             final_collected=int(env.collected_mask().sum()),active=self.active,
             phase=self.current_phase,raw_action=self.raw_action,
+            ACT_feature_sources=getattr(self.scheduler,'feature_components',[]),
             residual_velocity=self.control.velocity.copy(),
             replay_state=dict(spec=int(mujoco.mjtState.mjSTATE_INTEGRATION),values=values),
             control_audit=audit))
@@ -322,22 +327,8 @@ def install_driver(formal,module,cfg,context,collector,cache):
     base_builder=ns['build_act_policy']; base_scheduler=ns['ActionChunkScheduler']
     cache.mailbox=collector.mailbox
     ns['build_act_policy']=lambda cfg,pretrained_path:cache.build(base_builder,cfg,pretrained_path)
-    class ObservedScheduler(base_scheduler):
-        def __init__(self,*args,**kwargs):
-            super().__init__(*args,**kwargs); collector.scheduler=self
-            if self.temporal_ensemble is not None: raise RuntimeError('unexpected ACT temporal ensemble')
-        def accept(self,issued_at,actions,now):
-            accepted=super().accept(issued_at,actions,now)
-            collector.mailbox.accept(issued_at=issued_at,accepted=accepted,length=len(actions))
-            return accepted
-        def action_for(self,now):
-            result=super().action_for(now)
-            if result is not None and self.chunk is not None:
-                index=int(np.floor((now-self.chunk.issued_at)/self.action_period+1e-6))
-                collector.mailbox.select(self.chunk.issued_at,index,now)
-            else: collector.mailbox.clear_selection()
-            return result
-    ns['ActionChunkScheduler']=ObservedScheduler
+    ns['ActionChunkScheduler']=observed_scheduler(base_scheduler,collector.mailbox,
+        on_created=lambda scheduler:setattr(collector,'scheduler',scheduler))
     state={'previous_native':None,'previous_applied':None}
     def reference(start,target,substep,substeps,dt,max_xy_speed,max_z_speed,max_yaw_rate,
                   contact_latched,admittance_z=None):
@@ -387,7 +378,8 @@ class HybridRuntime:
         self.formal=load_formal()
         self.module=self.formal.runtime(); self.cache=PolicyCache()
         self.plan=json.loads((HYBRID/'episode_plan.json').read_text())
-        self.registry=LayoutRegistry(self.plan)
+        schedule=json.loads((store.root/'seed_schedule.json').read_text())
+        self.registry=LayoutRegistry(self.plan,schedule.get('prior_consumed_layouts',[]))
 
     def run(self,spec,mode,learner=None):
         import mujoco

@@ -34,3 +34,30 @@ Pre-publication scoped regression: 275 passed, no failures/errors/skips. Prior
 full-project attempts were bounded and incomplete, not full-suite passes. Real
 preflight/training results belong in the new run directory; this authorization
 document is not evidence that either has passed.
+
+## Authorized replacement invocation after adapter failure
+
+The first invocation, `residual_sac_pilot_pre_dino_20261015_2143`, stopped before
+any learner initialization or residual decision. Its original ACT configuration
+has `temporal_ensemble_coeff=0.01`; the new residual scheduler incorrectly rejected
+all temporal ensembles. The consumed native-preflight opportunity (seed3150000)
+and its actual prefix, partial experience and exception evidence remain intact.
+
+The user explicitly authorized fixing that adapter, adding tests, publishing the
+fix, and starting ONE new invocation on new preflight layouts. Preserve the
+native ensemble coefficient, accepted chunks, action calculation, query timing,
+Z state, model and termination. Do not retry or rewrite the previous invocation.
+
+Feature metadata follows the native contributors and horizon indices with the
+same normalized exponential weights; the512-dimensional feature, age and index
+are weighted summaries. Full contributing block/index/weight provenance is saved
+in numeric traces. This is observation bookkeeping, not a claim that a blended
+hidden token is a new native network activation. Critic queue context uses the
+newest eligible contributing block. Native action calculation, including circular
+yaw averaging, runs exactly once in the inherited scheduler and is not replaced.
+
+New preflight seeds:3151000/3151001 for the native/zero pairs,3151100/3151101 for
+motion probes. Training3300000+ and validation3140000–3140005 were not attempted
+in the failed invocation and remain separately fixed. Check the first new reset
+fingerprint against the preserved failed layout as well as old120 exclusions.
+All prior six-hour/50k-decision/resource/no-auto-resume limits remain unchanged.
