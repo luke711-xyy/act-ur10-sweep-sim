@@ -7,9 +7,6 @@ useful installation message when it is absent.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 
 def require_act_dependencies():
     try:
@@ -55,24 +52,14 @@ def build_act_config(cfg, camera_views=None, environment_state_dim=None):
 
     if device == "mps" and not torch.backends.mps.is_available():
         device = "cpu"
-    encoder = str(cfg.act.get("vision_encoder", "resnet18"))
-    config_class = ACTConfig
-    backbone_weights = "ResNet18_Weights.IMAGENET1K_V1"
-    if encoder == "dinov3":
-        from .configuration_dinov3 import DINOv3ACTConfig
-
-        config_class = DINOv3ACTConfig
-        backbone_weights = None
-    elif encoder != "resnet18":
-        raise ValueError(f"unsupported ACT vision_encoder: {encoder!r}")
-    act_cfg = config_class(
+    act_cfg = ACTConfig(
         n_obs_steps=1,
         chunk_size=int(cfg.act.chunk_size),
         n_action_steps=int(cfg.act.execute_steps),
         input_features=inputs,
         output_features=outputs,
         device=device,
-        pretrained_backbone_weights=backbone_weights,
+        pretrained_backbone_weights="ResNet18_Weights.IMAGENET1K_V1",
         temporal_ensemble_coeff=None,
         push_to_hub=False,
     )
@@ -99,18 +86,6 @@ def build_act_policy(cfg, pretrained_path=None):
     _, _, _, ACTPolicy = require_act_dependencies()
     act_cfg = build_act_config(cfg)
     if pretrained_path:
-        config_path = Path(pretrained_path) / "config.json"
-        if config_path.is_file() and json.loads(config_path.read_text()).get("type") == "act_dinov3":
-            from .configuration_dinov3 import DINOv3ACTConfig
-            from .dinov3 import DINOv3ACTPolicy
-
-            saved_cfg = DINOv3ACTConfig.from_pretrained(pretrained_path, local_files_only=True)
-            saved_cfg.device = str(act_cfg.device)
-            validate_act_policy_contract(saved_cfg, cfg)
-            policy = DINOv3ACTPolicy.from_pretrained(
-                pretrained_path, config=saved_cfg, local_files_only=True,
-            )
-            return policy, saved_cfg
         # Load the serialized policy config as well as weights.  This keeps
         # older two-view checkpoints usable while the current training config
         # may expose five input views.
@@ -123,12 +98,7 @@ def build_act_policy(cfg, pretrained_path=None):
         policy.config.device = device
         policy.to(device)
         return policy, policy.config
-    if getattr(act_cfg, "type", "act") == "act_dinov3":
-        from .dinov3 import DINOv3ACTPolicy
-
-        policy = DINOv3ACTPolicy(act_cfg)
-    else:
-        policy = ACTPolicy(act_cfg)
+    policy = ACTPolicy(act_cfg)
     policy.to(act_cfg.device)
     validate_act_policy_contract(act_cfg, cfg)
     return policy, act_cfg

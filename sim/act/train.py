@@ -371,19 +371,6 @@ def main(argv=None) -> int:
     from .policy import build_act_policy, build_act_processors
 
     cfg = load_config(args.config)
-    if args.resume:
-        checkpoint_config = json.loads(
-            (Path(args.resume) / "config.json").read_text(encoding="utf-8")
-        )
-        requested_encoder = str(cfg.act.get("vision_encoder", "resnet18"))
-        expected_type = "act_dinov3" if requested_encoder == "dinov3" else "act"
-        if checkpoint_config.get("type") != expected_type:
-            raise ValueError(
-                "ACT training encoder mismatch: "
-                f"requested {requested_encoder!r}, checkpoint type "
-                f"{checkpoint_config.get('type')!r}; use a matching profile or "
-                "omit --resume to initialize a fresh policy"
-            )
     dataset_root = args.dataset or str(cfg.act.dataset_dir)
     out_root = Path(args.out or str(cfg.act.model_dir))
     out_root.mkdir(parents=True, exist_ok=True)

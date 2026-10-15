@@ -31,7 +31,8 @@ def test_selected_sources_match_all_67_historical_fingerprints_without_disk_roll
     snapshot = api('pre_dino_sources', PROJECT, expected)
     assert len(snapshot.sources) == 67
     assert {p: hashlib.sha256(s).hexdigest() for p, s in snapshot.sources.items()} == expected
-    assert snapshot.manifest()['git_fallback_files'] == ['sim/act/policy.py', 'sim/act/train.py']
+    assert snapshot.manifest()['git_fallback_files'] == []
+    assert snapshot.manifest()['disk_source_audit']['matches'] is True
     assert snapshot.manifest()['commit'] == '9102680d8e018b225ab34d36422572cd4b547166'
     after = {str(p.relative_to(PROJECT)): hashlib.sha256(p.read_bytes()).hexdigest()
              for p in (PROJECT/'sim').rglob('*.py')}
@@ -111,7 +112,7 @@ from residual_rl.runtime import identity
 frozen=identity()
 assert len(frozen['source_fingerprints'])==67
 assert frozen['baseline']['commit']=='9102680d8e018b225ab34d36422572cd4b547166'
-assert frozen['baseline']['disk_source_audit']['actual_files']==69
+assert frozen['baseline']['disk_source_audit']['actual_files']==67
 assert not any(n=='sim' or n.startswith('sim.') for n in sys.modules)
 assert 'torch' not in sys.modules and 'mujoco' not in sys.modules
 ''')
@@ -122,7 +123,7 @@ assert 'torch' not in sys.modules and 'mujoco' not in sys.modules
     payload = json.loads(inspected.stdout)
     assert payload['execution_started'] is False
     assert payload['baseline_source_audit']['effective_matches'] is True
-    assert payload['baseline_source_audit']['disk_source_audit']['matches'] is False
+    assert payload['baseline_source_audit']['disk_source_audit']['matches'] is True
 
 
 @pytest.fixture

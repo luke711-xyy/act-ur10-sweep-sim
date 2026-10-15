@@ -22,11 +22,13 @@ is an error, never silently replaced with another seed. The registry binds each
 seed to one initial-pose hash and its consumed roles. The current preflight uses
 one physical rollout per layout; only base/final validation pairs reuse layouts.
 
-**Selected baseline (2026-10-15):** the user chose the pre-DINO implementation,
-commit `9102680d8e018b225ab34d36422572cd4b547166`, with the existing five-view
-ordinary ACT `step_100000` and trial-4 Hybrid controls. The current DINOv3 branch
-and its 69 on-disk Python sources stay intact. The isolated RL process executes
-exactly the 67 sources identified by the historical sealed Hybrid SHA256 map.
+**Selected baseline (2026-10-15):** restored from the published independent branch
+`feat/hybrid-astar-act-trial4`, commit `eb887843c9849d4a72be116bb87c44519dc7ef74`,
+whose simulator base is `9102680d8e018b225ab34d36422572cd4b547166`. The existing
+five-view ResNet ACT `step_100000` and trial-4 Hybrid controls stay fixed. The
+67 on-disk sim sources now exactly match the historical sealed SHA256 map;
+DINO code is preserved in its own Git branch, not enabled in this worktree.
+The isolated RL process executes these same 67 sources.
 Hash-identical disk sources are reused in memory; only `policy.py` / `train.py`
 are obtained from the pinned Git blobs when their disk versions differ. A missing
 blob, wrong hash or other modified frozen source fails closed. Added sim modules,
@@ -38,8 +40,11 @@ fingerprints and formal scripts are not rewritten. The private process must star
 before any `sim` imports; a mixed current/legacy namespace is rejected rather than
 replaced. Virtual source filenames preserve existing asset/config directories and
 allow module/function inspection and the reviewed AST adapters to see pinned text;
-no source copy or bytecode file is created. Two earlier invocations stopped in
+no virtual source copy or bytecode file is created. Earlier invocations stopped in
 preflight before learning; their actual traces and consumed layouts are preserved.
+The latest restoration authorization permits one original no-RL target1 check,
+then adapter reconnection only after a normal rollout. It does NOT authorize a
+new pilot, preflight campaign, validation campaign, or training restart.
 
 ## Execution requires a separate explicit human request
 

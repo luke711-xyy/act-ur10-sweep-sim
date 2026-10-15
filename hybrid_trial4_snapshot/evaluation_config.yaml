@@ -1,5 +1,3 @@
-# Frozen pretrained DINOv3 ViT-S/16 + a freshly initialized ACT/VAE.
-# Same 300 demonstrations and training parameters as the ResNet baseline.
 seed: 0
 sim:
   physics_dt: 0.001
@@ -141,7 +139,7 @@ workspace:
   safe_y_min: -0.42
   safe_y_max: 0.42
 controller:
-  desired_force: 0.1
+  desired_force: 1.0
   max_force: 5.0
   safe_max_force: 20.0
   safe_force_dwell_steps: 3
@@ -150,10 +148,10 @@ controller:
   force_ramp_rate: 15.0
   force_filter_cutoff_hz: 5.0
   admittance:
-    m: 0.5
-    b: 70.0
-    k: 100.0
-  delta_z_limit: 0.001
+    m: 10.0
+    b: 400.0
+    k: 10.0
+  delta_z_limit: 0.002
   delta_z_rate_limit: 0.01
   delta_z_upward_rate_limit: 0.02
   delta_z_downward_rate_limit: 0.1
@@ -466,7 +464,6 @@ video:
       fovy_deg: 45.0
 act:
   enabled: true
-  vision_encoder: dinov3
   image_size:
   - 320
   - 320
@@ -497,28 +494,25 @@ act:
   action_dim: 4
   state_dim: 36
   device: mps
-  batch_size: 4
+  batch_size: 2
   image_stat_samples: 100
   max_steps: 200000
   checkpoint_start_step: 100000
   checkpoint_every_steps: 100000
-  keep_checkpoints: 3
+  keep_checkpoints: 2
   train_hours: 192
   training_episodes_per_target: 50
   dataset_dir: runs/act_dataset_five_view_rudra_300_smooth320_v1
-  model_dir: runs/act_model_five_view_dinov3_vits16_frozen_300_200k_20261015
+  model_dir: runs/act_model_five_view_rudra_300_smooth320_v1
   realtime_budget_seconds: 0.2
   approach_sample_fraction: 0.35
   tracking_project: act-ur10-sweep-full-episode-v1
   tracking_space: Luke711/act-ur10-sweep-tracking
   tracking_private: true
   tracking_sync_interval_seconds: 60
-  use_amp: false
-  checkpoint_extra_steps:
-  - 50000
 task:
   total_count: 6
-  target_count: 3
+  target_count: 1
   target_mode: exact
   contact_start_xy:
   - 0.42
@@ -531,7 +525,7 @@ web:
   host: 127.0.0.1
   port: 8765
   refresh_hz: 5.0
-  inference_video_dir: runs/inference_videos
+  inference_video_dir: /Users/huazhi_luke/Documents/Codex/2026-09-08/zhe/exports
 episode:
   expert_height_guard_until_exact_count: true
   max_time: 45.0
@@ -559,3 +553,4 @@ dataset:
   save_images: true
   image_format: png
   only_successful: true
+_source_config: /Users/huazhi_luke/Documents/Codex/2026-09-08/zhe/exports/batch_fine_teached_100k_120_unique_seeds_20261014/evaluation_config.yaml
