@@ -1,11 +1,14 @@
 # act-ur10-sweep-sim — MuJoCo UR10 ACT tabletop sweep
 
-> **当前最新开发线：`feat/act-five-view` — fine-teached ordinary ACT。**
-> 启动、训练、评测及单次 A* baseline 见 [当前运行指南](docs/fine-teached-guide.md)；
+> **本分支：`feat/act-dinov3-frozen` — frozen DINOv3 + fresh ACT。**
+> DINOv3 接口、依赖、独立训练命令及验证边界见 [DINOv3 指南](docs/dinov3-act-guide.md)。
+> 原 ResNet 开发线 `feat/act-five-view` 的启动、训练、评测及单次 A* baseline 见 [原运行指南](docs/fine-teached-guide.md)；
 > 历史实验与回滚锚点见 [分支导航](docs/branch-guide.md)。模型、数据、日志不随源码上传。
 
 ## 当前版本一览
 
+- 本分支可选冻结 DINOv3 ViT-S/16，空间特征经池化和可训练投影输入原 ACT/VAE；
+  不增加检测框、分割或 occupancy，不续训旧 ResNet，默认配置仍保留原 ResNet 路径。
 - 六零件、目标 1–6；五路 320×320 RGB、36 维状态、1 维 float32 目标数经 Linear
   输入（不是 goal-token embedding）、4 维动作，chunk 25 / execute 5。
 - 潜在簇中心在 `(0.05,0)` m、半径 0.10 m 圆盘内按面积均匀采样；零件最大散布
@@ -18,7 +21,7 @@
 - 工作台刷新选择本次训练最新完整 checkpoint，显式输入优先；新推理名显示实际
   checkpoint，seed 留在元数据；Play 旁可导出已保存示教或回放视频。
 
-本次训练按用户要求于 2026-10-14 安全中断在 **103,243 步**；额外中断点不是 200K。
+原 ResNet 训练按用户要求于 2026-10-14 安全中断在 **103,243 步**；额外中断点不是 200K。
 原 100K 保存点未改写，本轮 ACT 批测固定使用它。A* baseline 每布局最多一次物理执行，
 不允许候选物理筛选或失败重试。全量测试未完成，发布开发快照不表示全套测试或策略评测通过。
 
