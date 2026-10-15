@@ -1,6 +1,8 @@
 # act-ur10-sweep-sim — MuJoCo UR10 ACT tabletop sweep
 
-> **本分支：`feat/act-dinov3-frozen` — frozen DINOv3 + fresh ACT。**
+> **本分支：`feat/act-dinov3-frozen` — 第四组 Hybrid A*→ACT + 冻结 DINOv3。**
+> 基于独立 Hybrid 分支 `feat/hybrid-astar-act-trial4`；保留 A*、导纳及接管规则，
+> 只替换 ACT 视觉编码器。入口与参数见 [Hybrid DINO 指南](docs/hybrid-dinov3-guide.md)。
 > DINOv3 接口、依赖、独立训练命令及验证边界见 [DINOv3 指南](docs/dinov3-act-guide.md)。
 > 在另一台电脑训练：见 [跨机训练准备](docs/dinov3-transfer-guide.md)，含 NVIDIA/CUDA 配置及数据迁移清单；本机训练已停止，不自动恢复。
 > 原 ResNet 开发线 `feat/act-five-view` 的启动、训练、评测及单次 A* baseline 见 [原运行指南](docs/fine-teached-guide.md)；
@@ -9,7 +11,8 @@
 ## 当前版本一览
 
 - 本分支可选冻结 DINOv3 ViT-S/16，空间特征经池化和可训练投影输入原 ACT/VAE；
-  不增加检测框、分割或 occupancy，不续训旧 ResNet，默认配置仍保留原 ResNet 路径。
+  不增加检测框、分割或 occupancy，不续训旧 ResNet。选择 DINO checkpoint 时，
+  CLI 和工作台自动走第四组 Hybrid，**不是让 ACT 自己下降落刷**；旧 ResNet 路径不变。
 - 六零件、目标 1–6；五路 320×320 RGB、36 维状态、1 维 float32 目标数经 Linear
   输入（不是 goal-token embedding）、4 维动作，chunk 25 / execute 5。
 - 潜在簇中心在 `(0.05,0)` m、半径 0.10 m 圆盘内按面积均匀采样；零件最大散布

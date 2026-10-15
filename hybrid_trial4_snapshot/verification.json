@@ -1,0 +1,26 @@
+{
+  "publication_date_sgt": "2026-10-15",
+  "base_commit": "9102680d8e018b225ab34d36422572cd4b547166",
+  "base_tree": "1927dc5c5428140d3ec1ea3c197d1da13bca9e96",
+  "original_sim_source_fingerprints_verified": 67,
+  "original_frozen_runtime_sources_sha256_matched": 15,
+  "runtime_sources_modified": false,
+  "all_published_python_sources_AST_parsed": true,
+  "numeric_contract_tests": {
+    "tests": 39,
+    "failures": 0,
+    "errors": 0,
+    "duration_seconds": 0.63,
+    "original_files": [
+      "hybrid_astar_act_gate1mm_acc50_2s_goal1_20261014/test_handoff.py",
+      "admittance_2mm_target_gain_search_goal1_20261014/test_tuning.py"
+    ],
+    "scope": "Original numeric/controller contracts; no policy load, physical episode or training"
+  },
+  "whole_suite_pass_claim": false,
+  "new_physical_evaluation_run": false,
+  "new_training_run": false,
+  "portable_runtime_claim": false,
+  "historic_absolute_paths_preserved": true,
+  "DINO_or_residual_learning_included": false
+}

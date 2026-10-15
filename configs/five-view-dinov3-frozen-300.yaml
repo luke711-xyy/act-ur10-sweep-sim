@@ -141,7 +141,7 @@ workspace:
   safe_y_min: -0.42
   safe_y_max: 0.42
 controller:
-  desired_force: 0.1
+  desired_force: 1.0
   max_force: 5.0
   safe_max_force: 20.0
   safe_force_dwell_steps: 3
@@ -150,10 +150,10 @@ controller:
   force_ramp_rate: 15.0
   force_filter_cutoff_hz: 5.0
   admittance:
-    m: 0.5
-    b: 70.0
-    k: 100.0
-  delta_z_limit: 0.001
+    m: 10.0
+    b: 400.0
+    k: 10.0
+  delta_z_limit: 0.002
   delta_z_rate_limit: 0.01
   delta_z_upward_rate_limit: 0.02
   delta_z_downward_rate_limit: 0.1
@@ -465,6 +465,7 @@ video:
       - 0.4
       fovy_deg: 45.0
 act:
+  inference_mode: hybrid_trial4
   enabled: true
   vision_encoder: dinov3
   image_size:

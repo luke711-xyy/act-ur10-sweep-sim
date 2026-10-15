@@ -451,7 +451,7 @@ web:
   port: 8765
   refresh_hz: 5.0
   # Local workbench artifact destination; does not change policy/training inputs.
-  inference_video_dir: /Users/huazhi_luke/Documents/Codex/2026-09-08/zhe/exports
+  inference_video_dir: exports
 
 episode:
   # Expert-only height guard ends after the exact count is fully collected.

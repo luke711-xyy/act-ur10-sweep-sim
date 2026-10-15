@@ -1,0 +1,194 @@
+{
+  "kind": "independent_hybrid_trial4_source_snapshot",
+  "branch": "feat/hybrid-astar-act-trial4",
+  "base_commit": "9102680d8e018b225ab34d36422572cd4b547166",
+  "frozen_runtime_source_count": 15,
+  "files": {
+    "scripts/evaluate_hybrid_paired_batch.py": {
+      "sha256": "e42e3940d8732393b441a0497e27c990bdc118915b8f21b6e8d2625997537c71",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/act_geometry3mm_admittance5mm_k20_trial_20261014/runner.py": {
+      "sha256": "4734bfe748a85763d2e7bd7f78b86a397fdd571d4509cf5a5a96d6b60ef671f6",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/act_geometry3mm_admittance5mm_trial_20261014/trial.py": {
+      "sha256": "331097b956948a9edd94dbe5b36d636bd207491c1a6eae275b4966f13b426aea",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/admittance_2mm_target_gain_search_goal1_20261014/phases.py": {
+      "sha256": "0f4a49f40a373d8003c9df096dda609439cc9376cde3032d9d9b7eced4c6ead4",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/admittance_2mm_target_gain_search_goal1_20261014/runner.py": {
+      "sha256": "71df84cbcf28e836d20b5b8a00737278cd71c28144b2e84c1b181c316042186c",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/admittance_fixed_xy_tuning_20261014/bench.py": {
+      "sha256": "76f2fa5fa5fde47ecae0e766e580bde20fc6f43c93e20d5d3c99c3f6ebf73c2d",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/admittance_fixed_xy_tuning_20261014/bench_v2.py": {
+      "sha256": "2febbf8fa7c0a2cbcf1356279a9931797adbb3cfa10d1a0c0f30a1afc8a7797e",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/admittance_ik_precision_comparison_20261014/precision_probe.py": {
+      "sha256": "c3b7d22cc42c40eefde1acde9ee16259f2e4b55cea0763fb4cc4b0937d852102",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/admittance_wrist1n_small_motion_20261014/control.py": {
+      "sha256": "7ee5d1cbdff6994d1b48902b5b41fbee9b6785873ca709c3a81797cdcf55b3af",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/admittance_wrist1n_small_motion_20261014/follow.py": {
+      "sha256": "f0cfde6dc0d5d495674a8e194d9a953bbdabd4e885859067cb679dc535259a41",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/contact_handoff_probe_20261014/probe.py": {
+      "sha256": "54113c51600cd81d52e314976b8f2fa13e78cb5a3603a236ce750455e607e0ab",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/hybrid_astar_act_gate1mm_acc50_2s_goal1_20261014/handoff.py": {
+      "sha256": "91094605c8fbe8e4a6b93ad76f92fa8a12818b35f6922e7e67f22f9e889b7500",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/hybrid_astar_act_gate1mm_acc50_2s_goal1_20261014/phases.py": {
+      "sha256": "565dbe04a404f291a5cfd0b233367a9d8fb87b6edd14bc97ead1e1d106785548",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/hybrid_astar_act_new_admittance_3mm_20261014/trial.py": {
+      "sha256": "8d50e384e93610e64817b54d079537f75ae698df3ae8a3d027f9771d4a427529",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/hybrid_astar_act_wrist1n_twostage_20261014/phases.py": {
+      "sha256": "ffcf7e803bec00ae75a60ce63dd6134e19238f2b2def137cde573da274b00ae6",
+      "role": "frozen_runtime_source"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/hybrid_astar_act_gate1mm_acc50_2s_goal1_20261014/test_handoff.py": {
+      "sha256": "ccf5780bb9c58228212d313c34d22c1864fbae5c50e4d8c64f0058e96dd915e8",
+      "role": "original_numeric_contract_tests"
+    },
+    "hybrid_trial4_snapshot/legacy_exports/admittance_2mm_target_gain_search_goal1_20261014/test_tuning.py": {
+      "sha256": "8fedbe450aa0479f4c6e5627af0fd368b27cb944a65dba2216d66bd44188fb30",
+      "role": "original_numeric_contract_tests"
+    },
+    "hybrid_trial4_snapshot/evaluation_config.yaml": {
+      "sha256": "43245f3b67db6ad51c70d7e7fbe8db95b198ec701eda312dc02d961e9cef2397",
+      "role": "frozen_configuration"
+    },
+    "hybrid_trial4_snapshot/control_profile.json": {
+      "sha256": "39db2d08c92059e5b8bbdda1f1cd230f0bf0ef4cd70645daf5a59636b50a2aa6",
+      "role": "frozen_configuration"
+    }
+  },
+  "profile": {
+    "target_force_N": 1,
+    "total_Z_limit_m": 0.002,
+    "seek_MBK": [
+      10,
+      400,
+      10
+    ],
+    "maintain_MBK": [
+      10,
+      800,
+      10
+    ],
+    "gate_m": 0.001,
+    "contact_threshold_N": 0.5,
+    "contact_dwell_s": 0.1,
+    "stable_band_N": [
+      0.8,
+      1.2
+    ],
+    "stable_dwell_s": 0.2,
+    "handoff_window_s": 2,
+    "XY_acceleration_m_s2": 0.05,
+    "XY_speed_m_s": 0.08,
+    "yaw_speed_rad_s": 0.35,
+    "yaw_acceleration_rad_s2": 0.5,
+    "up_m_s": 0.02,
+    "down_m_s": 0.1,
+    "tracking_gain": 0.5,
+    "tracking_bias_cap_m": 0.0002,
+    "IK_early_exit_threshold": 0.000001,
+    "force_feedback": "compensated_filtered_wrist_Fz_only",
+    "Z_owner": "admittance_plus_bounded_actual_Z_follow",
+    "ACT_predicted_Z_executed": false,
+    "after_handoff_window": "exact_native_ACT_without_continued_acceleration_limiting"
+  },
+  "source_fingerprints": {
+    "sim/__init__.py": "2b488359431d20c8ed3aa1738cd36ddc89d9d62aa8091d07f20b69fb1ddc6194",
+    "sim/act/__init__.py": "26d5daf508a2e9861955e3c59812379d1a826fe1aaa2ce66251439ac5d286c9c",
+    "sim/act/batch_evaluate.py": "64a4cd613b53718f7358c4289992be1cd9c62cd4ed562e6ee4580c9c1f200d38",
+    "sim/act/camera_preview.py": "39f6f03c6f77b0eb5ceb9133f9fca87bdbd438b6f9ff7f124b1ebfd403e5e6c4",
+    "sim/act/collect_dataset.py": "e584dd7c89a4ae6ffe0be7a7f97ec53bb19569e00e925d13d34272e4b1c018cd",
+    "sim/act/dataset.py": "a2cf8a24b6e344663923c14a22c47b60566dc28d5fb63deb03b7ce96b3ca2f2e",
+    "sim/act/evaluate.py": "35ad4a0d3dbdd3d45ec58fab99ea665d622661d8fd8d44a2cadbbbb80b3d4387",
+    "sim/act/expert.py": "2ea84bb5bdef1d90edcce6ea1c94658157f78f5abb4523b7a8c67fb5511cd7d7",
+    "sim/act/generate_preview_batch.py": "268a103df72497f8ca7ec80c56fa3c6276307ad4950da5a27bed79411cebf08d",
+    "sim/act/inference_lock.py": "8e1cde473a146ba0535dc4f06e189f29f4964b31a08ab4a02e4faa928b00bfbd",
+    "sim/act/interface.py": "c0f813a823bbc02caca91508d3e3db23a1ff2e675fa4ac97483007a56bd60be7",
+    "sim/act/media_retention.py": "f4e3e40cdb35d6b4df7f8b8ef2851aaa957167bea495f0811bfa3f5cdf46d1f4",
+    "sim/act/naming.py": "8aba7f7dbaabaa627cd5a5d96c5be86c89a7b3f579a60f522b1cfd75d5577cdf",
+    "sim/act/policy.py": "02084a26e140e79cd95826e0cb2471c43806f3c9265d218916fe25862bd42bb1",
+    "sim/act/realtime.py": "959b3835259c4f588b097761ee955c8d9414970519ba565c44ef7d0641f90d4f",
+    "sim/act/replay.py": "95a30fa621484d01b02f49322c510aa037473a257f2749a2f443f2da5324ca46",
+    "sim/act/rollout.py": "1970358eace7e165fb20a992159afc13eb0985694639286ec93c8e3d6ac26bc3",
+    "sim/act/small_sample_gate.py": "086eac44cd22d52b2a677097bd7ceb462b88923e0d9e719388c11a958b5fb2d4",
+    "sim/act/train.py": "fc4acd46b3761353a2adb4dbbf41ddcf8fac39cf10fcd597bdee351a7a37ba2d",
+    "sim/act/video.py": "bfecd279a6e7ec765f315a2dd834c68cfc1729ffae4f81348121a6d011568c7a",
+    "sim/config.py": "4ecb31bd4cbec2d8f9a206c44bf239e36821f0b82301146d0b82d9ecff8eab8d",
+    "sim/controllers/__init__.py": "6e679d7b3c68525e9b94a94769bcc3e680c10c3759884d0cf65c420f97f8e088",
+    "sim/controllers/admittance.py": "baa333aa49364b5f70ac4452446ee4d5d472273e329c924c04a5831ebdbdabfe",
+    "sim/controllers/filters.py": "b54d9648c4f5974ec69cd48b9edd58830af597156f213e6b8e396dd4947204a5",
+    "sim/controllers/hybrid.py": "10573c12ebc6637d2aa5b9d00cf8bfed0380c9a829ff56733cb8eb26c9cd0f40",
+    "sim/controllers/state_machine.py": "a595804e0ef23d7f388baeb96a32e08bd24741cdd626ff2fa5aa7a211f0babf5",
+    "sim/environments/__init__.py": "c0d84b7d4cbb8b6da96f1ae98d6bcd2a7b176fdf68d7c094603c64072c18fa0c",
+    "sim/environments/ee_interface.py": "1928ceb8e729404589f0eb3d9f76ea5901023699d442cd1f8f3317b01628476a",
+    "sim/environments/episode.py": "bce3fd59d985c72ceafe83b050cff408fb3b91ee7bffa193ca101efbb7770bdc",
+    "sim/environments/layout.py": "17c393d68426d20ee2262901b5981762bf45fff5d614cb9a6389b12ba572d153",
+    "sim/environments/sweep_env.py": "bfb12a30b8c1310c54795017e7571c7bb61526d1d62defdd6b12504d7580ccf7",
+    "sim/environments/ur10_interface.py": "94c60afbfe5478846e459e44b2e2f269ecdf93433e74eed56f0c5f10453bfe2d",
+    "sim/export_dataset.py": "b205643355757469dcf73080e581c1c9730ea864a5c8bea8d1aa92c32d48248a",
+    "sim/logging_utils.py": "b2d3f146d536381be2a0e02197614894871ad56c4f92f7115684c3a93c5520c3",
+    "sim/metrics.py": "888715c32d2048a4ea817548be206cdc41c34f5f670536a54fde83bb81360049",
+    "sim/model/__init__.py": "71573e5a2c2c5022fc415b077cb0779ffcdf983dfedaa3cc4aca2851a7c4df64",
+    "sim/model/geometries.py": "2fffde71158538ac21641d9095ce1bf81dbb1c0ed91fc1d2a106a5b8af60d1d8",
+    "sim/model/scene_builder.py": "bad8b8d34178d4fb9864165bb3563306782287f5bb133620ef55e3f826af955d",
+    "sim/model/ur10_mjcf.py": "22773419cdf9112228c8fbc0b4bef012eb15cb486c769d93152b66e36a729d9c",
+    "sim/perception/__init__.py": "f693c34bf40b35957de9930bcc5b703c6be689a0b651b0376a87d68941a6bf3e",
+    "sim/perception/base.py": "df448477889a7b4c86bd8b940d810035d487d54e45e9011746d1ffdc4ca65764",
+    "sim/perception/camera.py": "7eeb180fa68333e58c13ebf1f42e8516bcca20cab4c963dc14d47021b5c3cab7",
+    "sim/perception/ground_truth.py": "7b94c968f01e7e90c57679a0ddb5d2472b64518933aa6ff20779e0f4961699cd",
+    "sim/perception/vision.py": "e0e54067f0122115e7aa6a1c3ff44dd42a723d680aa6018c2974ab7f9bfdf23f",
+    "sim/planners/__init__.py": "2897a44e96a5b990f71dd77a214ca74eba6862792d5e7461983bb6c6fedb0a99",
+    "sim/planners/base.py": "3a6fb1c450e5532fc545077944275ed00f58642b64c751e28c7de33bcfdeb225",
+    "sim/planners/fixed_cover.py": "8f04e2015b9e5196b52be54ee068cb3cdd9196f8e29666a56abe53f357c33924",
+    "sim/planners/geometry_utils.py": "066e245a7bbf347218ededcbd53ae584f30464a05b7b2a959abdc913655b284c",
+    "sim/planners/global_sweep.py": "886211fba917fa1a70b0802803f7713cd47bcc95e43375af7f7c6fd0c9a43d01",
+    "sim/planners/rrt.py": "010065b47a77023ad1ac34a563cbe66f399013bb878b7146aa70f365bfb9c7cb",
+    "sim/planners/trajectory.py": "95007b7f3f0e4dfe9344307da0bab9caca97342eeb6d00cf435a3348482eea62",
+    "sim/planners/visual_greedy.py": "f09968e6e0a62fb88c497f834b57d6633159de60cf857de5aa52d9600ab816e9",
+    "sim/plotting.py": "919041a197fee1e42831590d00d5c3241a4e623252d13d9aac43b5f838b452ab",
+    "sim/preview.py": "34c55f3cf1592fbe556df5aabceb7e4ef3a454d9adb8f29a97dbc8331ec4500f",
+    "sim/record_video.py": "2b03111bf84a815f1425a1fb9aaaa675aff074323b69f9c88546d4a1718b630d",
+    "sim/run_episode.py": "9a3debf1227d9500a9b1dd5a979df43db953b0c8701df6960ba1f7ea949141c4",
+    "sim/run_experiment.py": "2b3e025ef34511ca958dc8cf1800b6a57105dcc84beaa39347a7c025baa74ae1",
+    "sim/run_force_sweep.py": "497be8e3fe626230ab96be148610436289c1cee17434cf26041aa28bbc3238cb",
+    "sim/smoke_test.py": "fc543c2806233c2df3362e8ab5e9af0e3b87f706076cb9d3e95b15050e8cec83",
+    "sim/video.py": "51307961601017b11f8cce1fa52c6ceb90b1ef93c504400936d463e9c3f9921f",
+    "sim/visualize_results.py": "3a8d6fab0fbe04726d0bb5f86eb8bd063c5c37e789022c35b52b910a3e901d7a",
+    "sim/web/__init__.py": "eaac7ca27325d1953d26d919a0a6bc631f89bb8f69fc2a03e56f176b56f00e11",
+    "sim/web/app.py": "7f1723022601befa9e4b994cae473ed1b1c0cb8eb55f9129fc6aeeec9b207988",
+    "sim/web/jobs.py": "1a98fd48b370b09aa6304ef9a08c1d1e1da3792ac3f667aeafa6196670f6571f",
+    "sim/web/run.py": "7b54d819f779c15aa2e2a3e411c88fda0e3d122ff5d47e782d17f31f3b4cc586",
+    "sim/web/video_export.py": "faec7877cf572ee8e315ccfa6e77e7e028f0e35a86946177c6ccb0ffda01a7a4",
+    "sim/web/workbench.py": "e37abbc5663010e5d524c426905c5c0e2b25a51888da7d350f8a402ec9e6e0dd"
+  },
+  "original_sources_unmodified": true,
+  "portability_status": "historical absolute paths preserved; not a turnkey portable runner",
+  "no_new_training_or_physical_evaluation": true,
+  "no_model_weights_or_results_or_media": true,
+  "no_DINO_or_residual_learning": true
+}

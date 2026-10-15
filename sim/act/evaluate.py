@@ -476,6 +476,34 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
     return result
 
 
+def run_inference_episode(cfg, seed=0, model_path=None, preview=False, capture_replay=False):
+    """Public CLI/workbench dispatch; DINO checkpoints always use trial-4 Hybrid.
+
+    Leave run_act_episode's original body intact: the reviewed Hybrid adapters
+    copy it and inherit the already-running environment and controller state.
+    Existing ResNet callers keep the original pure-ACT path.
+    """
+    mode = cfg.get_path('act.inference_mode', 'native')
+    if mode not in ('native', 'hybrid_trial4'):
+        raise ValueError(f'unknown ACT inference mode: {mode}')
+    dino_requested = cfg.get_path('act.vision_encoder', 'resnet18') == 'dinov3'
+    if model_path is None and (mode == 'hybrid_trial4' or dino_requested):
+        model_path = cfg.get_path('act.model_dir')
+    if model_path:
+        model_path = _resolve_model_path(str(model_path))
+        config_file = Path(model_path) / 'config.json'
+        if config_file.is_file():
+            dino_requested = dino_requested or json.loads(config_file.read_text()).get('type') == 'act_dinov3'
+    if mode == 'hybrid_trial4' or dino_requested:
+        from .hybrid_trial4 import require_dinov3_checkpoint, run_hybrid_episode
+
+        checkpoint = require_dinov3_checkpoint(model_path)
+        return run_hybrid_episode(cfg, seed=seed, model_path=checkpoint,
+                                  preview=preview, capture_replay=capture_replay)
+    return run_act_episode(cfg, seed=seed, model_path=model_path,
+                           preview=preview, capture_replay=capture_replay)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one ACT policy episode")
     parser.add_argument("--config", default="configs/default.yaml")
@@ -512,8 +540,12 @@ def _run_main(argv=None) -> int:
     resolved_model = _resolve_model_path(args.model)
     if resolved_model:
         resolved_model = str(Path(resolved_model).resolve())
-    result = run_act_episode(cfg, seed=args.seed, model_path=resolved_model,
+    result = run_inference_episode(cfg, seed=args.seed, model_path=resolved_model,
                              preview=args.preview, capture_replay=args.record_replay)
+    # Hybrid overlays the effective trial-4 controller even when the workbench
+    # supplied default.yaml; persist/replay that same physical configuration.
+    cfg = getattr(result, 'inference_config', cfg)
+    resolved_model = getattr(result, 'model_checkpoint', resolved_model)
     physical_summary = {"success": result.success, "reason": result.failure_reason,
                         "collected": result.collected, "target_count": result.target_count,
                         "peak_collected": (result.collected if getattr(
@@ -531,7 +563,18 @@ def _run_main(argv=None) -> int:
                         "peak_force": result.peak_force,
                         "termination_reason": result.termination_reason,
                         "preview": bool(args.preview),
-                        "model_checkpoint": resolved_model}
+                        "model_checkpoint": resolved_model,
+                        "inference_strategy": getattr(result, 'planner_strategy', 'unknown'),
+                        "hybrid_control_profile": getattr(result, 'control_profile', None)}
+    no_plan = (getattr(result, 'planner_strategy', '') == 'hybrid_astar_act_trial4_dinov3_frozen'
+               and result.termination_reason == 'no_plan'
+               and getattr(result, 'physical_attempts', None) == 0 and not result.success)
+    if getattr(result, 'control_profile', None) is not None or no_plan:
+        physical_summary.update(
+            seed=args.seed, planning_calls=result.planner_attempts,
+            physical_attempts=result.physical_attempts,
+            initial_object_poses=np.asarray(result.initial_object_poses, dtype='<f4').tolist(),
+            media_not_applicable_no_plan=no_plan)
     replay_episode_id = None
     replay_error = ""
     video_path = None
@@ -539,7 +582,7 @@ def _run_main(argv=None) -> int:
     frame_images_deleted = False
     image_cleanup_error = ""
     replay_input_path = None
-    if args.record_replay:
+    if args.record_replay and not no_plan:
         # Replay uses the causal command trace, not the cached query images.
         # Release those after inference, before rendering another five views.
         if getattr(result, "observations", None) is not None:

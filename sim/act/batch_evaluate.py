@@ -56,7 +56,9 @@ def select_models(model_root: str | Path) -> list[dict]:
         except (OSError, ValueError, KeyError, TypeError):
             ready = False
         if ready:
-            models.append({"label": f"five_view_{step // 1000}k", "step": step,
+            saved_type = json.loads((path / 'config.json').read_text()).get('type')
+            prefix = 'hybrid_dinov3' if saved_type == 'act_dinov3' else 'five_view'
+            models.append({"label": f"{prefix}_{step // 1000}k", "step": step,
                            "path": str(path),
                            "weights_sha256": _sha256(path / "model.safetensors"),
                            "checkpoint_files": {
@@ -94,6 +96,27 @@ def build_episode_command(root: Path, spec: dict) -> list[str]:
             "--video-root", str(root / "videos"), "--replay-image-format", "webp-lossless"]
 
 
+def unexecuted_hybrid_no_plan(physical: dict) -> bool:
+    """Only a measured, unexecuted Hybrid planning failure needs no media."""
+    return (physical.get('inference_strategy') == 'hybrid_astar_act_trial4_dinov3_frozen'
+            and physical.get('media_not_applicable_no_plan') is True
+            and physical.get('termination_reason') == 'no_plan'
+            and physical.get('success') is False
+            and type(physical.get('physical_attempts')) is int and physical['physical_attempts'] == 0
+            and type(physical.get('planning_calls')) is int and physical['planning_calls'] == 1
+            and not physical.get('replay_error') and not physical.get('video_error'))
+
+
+def effective_replay_config(cfg, physical):
+    """Reapply the exact inference overlay when replaying an already measured result."""
+    if physical.get('inference_strategy') != 'hybrid_astar_act_trial4_dinov3_frozen':
+        return cfg
+    from .hybrid_trial4 import PROFILE, formal
+    if physical.get('hybrid_control_profile') != PROFILE:
+        raise RuntimeError('measured Hybrid control profile differs from the replay implementation')
+    return formal.candidate_config(cfg, int(cfg.task.target_count))
+
+
 def parse_episode_output(output: str, returncode: int, *, require_media=True) -> dict:
     result = None
     for line in reversed(output.splitlines()):
@@ -107,7 +130,7 @@ def parse_episode_output(output: str, returncode: int, *, require_media=True) ->
             break
     if result is None or returncode not in (0, 1):
         raise RuntimeError("evaluator exited without a valid physical result")
-    if require_media and (not result.get("video_path") or result.get("video_error")
+    if require_media and not unexecuted_hybrid_no_plan(result) and (not result.get("video_path") or result.get("video_error")
                           or not result.get("replay_episode_id") or result.get("replay_error")):
         raise RuntimeError("physical result exists but video/replay export did not finish")
     return result
@@ -190,7 +213,9 @@ def write_artifacts(root: Path, rows: list[dict], planned: int) -> None:
                            f"Exact peak-count matches {stats['exact_peak_matches']}/{stats['episodes']}")
             fig.colorbar(plot, ax=axis, label="Frequency within each tested target", format="%.1f")
         status = "FINAL" if len(rows) == planned else "PROVISIONAL"
-        fig.suptitle(f"Five-view ACT count density | {status} {len(rows)}/{planned}", fontsize=16)
+        title = ('Hybrid A*→ACT + frozen DINOv3' if all(label.startswith('hybrid_dinov3_') for label in models)
+                 else 'Five-view ACT')
+        fig.suptitle(f"{title} count density | {status} {len(rows)}/{planned}", fontsize=16)
         fig.tight_layout()
         fig.savefig(root / filename, dpi=180)
         plt.close(fig)
@@ -301,6 +326,18 @@ def recover_episode_media(root: Path, physical: dict) -> None:
 def validate_episode_identity(root: Path, spec: dict, physical: dict, *,
                               allow_legacy_first_frame: bool = False) -> dict:
     """Verify measured replay provenance, never relabel an old log as a new test."""
+    if unexecuted_hybrid_no_plan(physical):
+        poses = np.asarray(physical.get('initial_object_poses'), dtype='<f4')
+        fingerprint = hashlib.sha256(np.ascontiguousarray(poses).tobytes()).hexdigest()
+        if (poses.shape != (6, 7) or not np.isfinite(poses).all()
+                or fingerprint != spec['layout_fingerprint']
+                or physical.get('seed') != spec['seed']
+                or physical.get('target_count') != spec['target_count']
+                or physical.get('model_checkpoint') != spec['model_path']):
+            raise RuntimeError('measured no-plan identity differs from the frozen plan')
+        return dict(seed=spec['seed'], source='unexecuted_initial_pose_snapshot',
+                    measured_pose_fingerprint=fingerprint,
+                    planned_layout_fingerprint=spec['layout_fingerprint'])
     records = [json.loads(line) for line in (root / "replays" / "manifest.jsonl").read_text().splitlines()
                if line.strip()]
     matches = [record for record in records if record["episode_id"] == physical.get("replay_episode_id")]
@@ -387,7 +424,7 @@ def run_batch(root: Path, metadata: dict, *, pipeline_media: bool = False,
             # failed afterward. Draining the same pending future is idempotent.
             if spec["key"] in completed:
                 return
-            if (not physical.get("video_path") or physical.get("video_error") or
+            if not unexecuted_hybrid_no_plan(physical) and (not physical.get("video_path") or physical.get("video_error") or
                     not physical.get("frame_images_deleted") or physical.get("image_cleanup_error")):
                 raise RuntimeError("video export or intermediate image cleanup needs attention")
             row = {**spec, **physical, "layout_identity_verification": identity}
@@ -423,7 +460,8 @@ def run_batch(root: Path, metadata: dict, *, pipeline_media: bool = False,
         try:
             for spec in plan:
                 if spec["key"] in completed:
-                    if not Path(next(row for row in rows if row["key"] == spec["key"])["video_path"]).is_file():
+                    previous = next(row for row in rows if row['key'] == spec['key'])
+                    if not unexecuted_hybrid_no_plan(previous) and not Path(previous['video_path']).is_file():
                         raise RuntimeError("a previously completed batch video is missing")
                     continue
                 if pending is not None and pending[0].done():
@@ -456,7 +494,7 @@ def run_batch(root: Path, metadata: dict, *, pipeline_media: bool = False,
                     # Recovery may finish export, never repeat a measured rollout
                     # just because encoding failed (which would resample its outcome).
                     physical = parse_episode_output(log.read_text(), 1, require_media=False)
-                    if not physical.get("replay_episode_id"):
+                    if not physical.get("replay_episode_id") and not unexecuted_hybrid_no_plan(physical):
                         saved = physical.get("replay_input_path")
                         if not saved:
                             raise RuntimeError("unfinished replay needs attention; refusing to resample")
@@ -467,6 +505,7 @@ def run_batch(root: Path, metadata: dict, *, pipeline_media: bool = False,
                         from .replay import load_replay_input, recover_replay_input
                         cfg = load_config(str(root / "evaluation_config.yaml"))
                         cfg.set_path("task.target_count", spec["target_count"])
+                        cfg = effective_replay_config(cfg, physical)
                         measured = load_replay_input(saved, cfg, seed=spec["seed"], model=spec["model_path"])
                         if any(getattr(measured, name, None) != physical[name] for name in (
                                 "success", "target_count", "peak_collected", "final_collected")):
@@ -495,14 +534,17 @@ def run_batch(root: Path, metadata: dict, *, pipeline_media: bool = False,
                                           "planned": len(plan), "key": spec["key"], "pid": child.pid}), flush=True)
                         code = child.wait()
                     physical = parse_episode_output(log.read_text(), code, require_media=not pipeline_media)
-                if not physical.get("replay_episode_id") or physical.get("replay_error"):
+                if not unexecuted_hybrid_no_plan(physical) and (not physical.get("replay_episode_id") or physical.get("replay_error")):
                     raise RuntimeError("unfinished replay needs attention; refusing to resample")
                 identity = validate_episode_identity(root, spec, physical,
                     allow_legacy_first_frame=physical.get("replay_episode_id") in
                     metadata.get("legacy_identity_episode_ids", []))
                 if physical["model_checkpoint"] != spec["model_path"] or physical["target_count"] != spec["target_count"]:
                     raise RuntimeError("evaluated checkpoint or target does not match the frozen plan")
-                if pipeline_media:
+                if unexecuted_hybrid_no_plan(physical):
+                    finish_pending(spec['key'])
+                    commit_episode(spec, physical, identity)
+                elif pipeline_media:
                     # At most one export plus one physical episode. Do not queue
                     # a second image set while an earlier encoder is unfinished.
                     finish_pending(spec["key"])

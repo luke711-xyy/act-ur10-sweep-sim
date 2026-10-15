@@ -17,10 +17,10 @@ DEFAULT_INFERENCE_MODEL = (
 )
 
 
-def latest_inference_model(project_root: Path) -> str:
+def latest_inference_model(project_root: Path, model_dir: str | None = None) -> str:
     """Follow only this training run's fully published checkpoint pointer."""
     fallback = Path(DEFAULT_INFERENCE_MODEL)
-    model_root = fallback.parent.parent
+    model_root = Path(model_dir) if model_dir is not None else fallback.parent.parent
     absolute_root = (project_root / model_root).resolve()
     required = (
         "config.json", "model.safetensors", "policy_preprocessor.json",
@@ -33,7 +33,8 @@ def latest_inference_model(project_root: Path) -> str:
     def complete(path):
         try:
             candidate = path.resolve()
-            return (candidate.parent == absolute_root / "checkpoints"
+            identity_ok = (model_dir is None or json.loads((candidate / 'config.json').read_text()).get('type') == 'act_dinov3')
+            return (identity_ok and candidate.parent == absolute_root / "checkpoints"
                     and all((candidate / name).resolve().is_relative_to(candidate)
                             and (candidate / name).is_file()
                             and (candidate / name).stat().st_size > 0
@@ -50,7 +51,16 @@ def latest_inference_model(project_root: Path) -> str:
             return str(model_root / published)
     except (OSError, ValueError):
         pass
+    if model_dir is not None:
+        return ""  # never silently substitute a historical ResNet checkpoint
     return DEFAULT_INFERENCE_MODEL if complete(project_root / fallback) else ""
+
+
+def configured_inference_model(project_root: Path, cfg) -> str:
+    if (cfg.get_path('act.vision_encoder') == 'dinov3'
+            or cfg.get_path('act.inference_mode') == 'hybrid_trial4'):
+        return latest_inference_model(project_root, model_dir=str(cfg.act.model_dir))
+    return latest_inference_model(project_root)
 
 
 HTML = r"""<!doctype html>
@@ -213,7 +223,7 @@ def create_app(cfg):
             "100 Hz filtered / raw peak",
             "100 Hz filtered / 1 ms substep peak",
         ).replace("__INFERENCE_VIDEO_DIR__", escape(str(app.state.inference_video_root))).replace(
-            "__INFERENCE_MODEL__", escape(latest_inference_model(project_root))
+            "__INFERENCE_MODEL__", escape(configured_inference_model(project_root, app.state.cfg))
         )
 
     @app.get("/api/inference-videos/{filename}")
@@ -559,7 +569,7 @@ def create_app(cfg):
         model = payload.get("model")
         if model is not None and not isinstance(model, str):
             raise HTTPException(status_code=422, detail="model must be a checkpoint path")
-        model = (model or "").strip() or latest_inference_model(project_root)
+        model = (model or "").strip() or configured_inference_model(project_root, app.state.cfg)
         if not model:
             raise HTTPException(status_code=503,
                                 detail="No complete published checkpoint is available; select an explicit model path")

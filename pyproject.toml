@@ -39,6 +39,7 @@ include = ["sim*"]
 
 [tool.setuptools.package-data]
 sim = ["../configs/*.yaml"]
+"sim.act.hybrid_trial4" = ["control_profile.json", "legacy/*/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

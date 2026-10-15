@@ -1,7 +1,9 @@
 # Frozen DINOv3 + ACT
 
-分支 `feat/act-dinov3-frozen`，基于 `feat/act-five-view` 的
-`9102680d8e018b225ab34d36422572cd4b547166`。仅替换可选视觉编码路径：
+分支 `feat/act-dinov3-frozen`，现基于独立 Hybrid 分支
+`feat/hybrid-astar-act-trial4` 的 `eb887843c9849d4a72be116bb87c44519dc7ef74`。
+保留第四组 A*→ACT 推理，具体接管规则见 [Hybrid DINO 指南](hybrid-dinov3-guide.md)。
+只替换 ACT 视觉编码路径：
 冻结预训练 DINOv3，重新初始化并训练图像适配层及原 ACT/VAE。
 不从旧 ResNet ACT 保存点继续训练，不修改旧示教、旧模型或正式评测结果。
 
@@ -61,7 +63,8 @@ uv pip install --python .venv/bin/python --no-deps timm==1.0.30
 ## 独立 200K 训练
 
 [新配置](../configs/five-view-dinov3-frozen-300.yaml) 以原便携配置为基础，
-只增加 `act.vision_encoder: dinov3` 并更换输出目录。其余配置保持原值。
+增加 `act.vision_encoder: dinov3`、`act.inference_mode: hybrid_trial4`，更换输出目录，
+并显式记录第四组寻找接触增益与 1 N/±2 mm 参数。训练网络和采样设置保持原值。
 复用原 300 条成功示教（目标 1–6 各 50 条），五路 320×320，不重采集。
 原始图像共 1,015,605 张，全部核验存在；代表性解码 4,500 张，
 不是声称完整解码百万图片。有效 BC 样本 195,621。
@@ -83,19 +86,21 @@ approach/descent 采样占比 0.35、sweep 0.65，总时间预算 192 小时；
 在线提取冻结视觉特征，不创建数百 GB 的全量特征缓存。
 
 训练入口在读数据、创建输出目录之前拒绝 ResNet/DINO 交叉续训。
-推理仍按 checkpoint 中真实类型自动加载，旧 ResNet 保存点继续可读。
+推理按 checkpoint 中真实类型加载，DINO 自动走第四组 Hybrid；旧 ResNet 保存点继续可读。
 后续选择本模型推理时要显式选择新的 checkpoint，而不是旧工作台默认模型路径。
 训练和工作台推理会竞争 MPS，不自动停止用户工作台任务。
 
 ## 验证范围
 
-已用固定预训练权重完成真实五视角、batch 4、FP32/MPS 的 8 步训练；
+此前版本曾用固定预训练权重完成真实五视角、batch 4、FP32/MPS 的 8 步训练；
 训练后编码器 162 个状态张量与源权重逐项相等，适配层和动作头优化器状态已更新。
 重载保存模型及 processors 后，用原示教的 4 个真实样本产生有限值 `4×25×4` 动作。
 专项测试覆盖冻结/eval、空间接口、输入归一化、更新范围、离线严格恢复、缺权重拒绝、
 预训练哈希和不同视觉编码器交叉续训拒绝。
 
-这只证明接入和训练/保存/重载链路，不证明扫动成功率，也不表示 200K 已完成。
+上述是历史视觉接入证据，不是本次 Hybrid DINO 的物理效果证据。
+本次按用户要求不训练、不评测，只做静态、数值、调度和模型加载检查。
+这不证明扫动成功率，也不表示 200K 已完成。
 完整训练后的策略表现必须另做真实物理 rollout；不据 8 步 loss 宣称优于 ResNet。
 旧正式 ACT/A*/Hybrid 结果不因本分支变化被改写或重跑。
 

@@ -1,0 +1,46 @@
+{
+  "verified_at_sgt": "2026-10-16",
+  "independent_hybrid_commit": "eb887843c9849d4a72be116bb87c44519dc7ef74",
+  "previous_dino_commit": "21f433cb0f0d432f07f27d86da4b4e5efe61ccbf",
+  "frozen_helper_modules_with_identical_function_class_AST": 14,
+  "formal_configuration_driver_functions_with_identical_AST": 4,
+  "original_planning_controller_environment_files_SHA256_matched": 20,
+  "native_ACT_loop_AST_unchanged": true,
+  "focused_tests": {
+    "passed": 108,
+    "failures": 0,
+    "errors": 0,
+    "deselected": 4,
+    "deselection_reason": "No optimizer update or real environment preparation allowed by user",
+    "command": "python -B -m pytest tests/test_hybrid_dinov3.py tests/test_act_dinov3.py tests/test_workbench_ordinary_50k.py tests/test_act_video.py tests/test_act_batch_evaluate.py -k 'not real_act_update and not preparation_materializes'",
+    "whole_suite_claim": false
+  },
+  "offline_vision_check": {
+    "model_id": "timm/vit_small_patch16_dinov3.lvd1689m",
+    "revision": "3bf4720a82ec2066db88137180ff1f83a675cef0",
+    "weight_SHA256": "2a1ec16ae28ffa07bc0ead0241ee7df9fc26451fe6f9f839b7b3afa0a906b040",
+    "input_shape": [5, 3, 320, 320],
+    "feature_shape": [5, 384, 10, 10],
+    "encoder_state_tensors": 162,
+    "finite": true,
+    "frozen_and_eval": true,
+    "device": "cpu",
+    "CUDA_run_verified": false
+  },
+  "packaged_hybrid_resources": 17,
+  "integration_repairs": [
+    "Explicitly rebind the unchanged trial4 Z follow/limiter into copied ACT globals",
+    "Reject invalid nonfinite executable ACT predictions instead of silent hold fallback",
+    "Use configured DINO output for workbench discovery without ResNet fallback",
+    "Preserve no-plan failures without demanding nonexistent video; verify initial poses",
+    "Use the effective trial4 overlay for recorded-state media recovery",
+    "Label DINO Hybrid batches distinctly from pure ACT"
+  ],
+  "new_training_started": false,
+  "optimizer_updates": 0,
+  "physical_policy_episodes": 0,
+  "formal_batches_prepared_or_started": 0,
+  "workbench_service_started": false,
+  "old_models_data_results_modified": false,
+  "physical_performance_claim": false
+}

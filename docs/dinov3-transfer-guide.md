@@ -1,6 +1,7 @@
 # 在另一台电脑从头训练 DINOv3 + ACT
 
 本分支只提供源码、配置及操作说明。clone、安装依赖、下载权重或验证配置都不启动训练；
+推理结构现为第四组 Hybrid A*→ACT，不是纯 ACT 落刷；见 [接管与参数](hybrid-dinov3-guide.md)。
 只有最后明确执行 `python -m sim.act.train` 才会训练。本机训练已按用户要求停止在 122 步，
 不自动恢复。目标机器应从头训练，不使用本机中断点或旧 ResNet 保存点。
 
@@ -30,6 +31,8 @@ uv pip install --python .venv/bin/python -e '.[act,dino]' -c configs/constraints
 上面的命令不创建模型或优化器、不训练。CUDA 检查失败时先处理环境，不启动训练。
 这里的 CUDA 配置已做配置一致性检查；尚未在目标机器 GPU 上做运行验证。
 Apple Silicon 另用原 MPS 配置 `configs/five-view-dinov3-frozen-300.yaml`。
+Hybrid 全部依赖现随仓库携带；不需复制本机历史 `exports` 或试验脚本文件夹。
+代码归档中的旧绝对路径仅为来源证据；运行配置使用仓库相对路径，视频默认写入 `exports/`。
 
 ## 2. 单独迁移完整示教数据
 
