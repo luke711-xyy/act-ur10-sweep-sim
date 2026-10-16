@@ -17,6 +17,7 @@
 - 保留 DINOv3 ViT-S/16 的 pinned revision/digest、RGB 预处理、五路相机顺序、36 维状态、1 维 target-count、4 维动作统计、25 步 chunk、每块执行 5 步以及现有 Z 导纳控制权。
 - DINOv3 encoder 在 Actor、reference、Critic 内都冻结且不进入 optimizer；PPO 只更新 ACT 模块和 XY/yaw exploration scales。预测 Z 不执行。
 - 沿用 PAC-ACT 既有 PPO/reward/安全/回滚/记账协议；不调 reward、控制参数、KL 系数或模型统计。已有 ResNet 代码路径保持回归通过，但这次运行不得加载 ResNet checkpoint。
+- PAC 冻结快照与活动 DINO sync5 导纳不一致。DINO 运行必须显式选择分支内 hash-bound 的 `dinov3_sync5` 控制快照：沿用 1 N、±2 mm、seek/maintain MBK 10/400/10 和 10/800/10、1 mm gate、2 s handoff；maintain force compliance 为 5e-05 m/N（cap 0.0005 m、仅 maintain、compensated filtered wrist Fz）；overforce relief 为 1.5/1.1 N、0.0005/0.0005 m/s、cap 0.00025 m。不得使用旧 PAC 快照的 10/7 N、0.02/0.1 m/s relief，也不得借此调参。
 - 当前 120 布局批测未完成前不得占用推理槽或启动物理验收；其 120 个布局和所有已知历史数据必须列入 exclusion，机会不可重试或换 seed。
 - CPU 验收限时 2 小时、最多 24 个一次性机会及 2 次 PPO 更新、输出不超过 5 GiB、保留至少 8 GiB 空间；验收失败不启动 CUDA 训练。
 - 正式训练仅在通过且匹配 bundle 的 CPU 验收报告和空闲 CUDA/推理资源确认后启动；沿用最多 1,000,000 effective actions 或 72 小时、66 小时后停止新采样、50 GiB 输出上限、20 GiB 空间保留及 10 GiB / 30 秒 RSS 保护。
@@ -24,15 +25,36 @@
 
 ## Review Focus
 
-- 错误模型类型、checkpoint 文件缺失或 pinned DINO 身份不符：加载必须在创建环境前失败；由 Task 1 和 Task 3 的拒绝测试覆盖。
-- DINO 权重被 Actor、Critic 或 optimizer 解冻：参数哈希/梯度和 optimizer 成员测试由 Task 2 覆盖。
-- 相机顺序、RGB 归一化、状态/动作维度或 checkpoint processor 漂移：确定性真实 checkpoint 对照测试由 Task 1 与 Task 5 覆盖。
-- checkpoint 恢复遗漏可训练张量或覆盖 frozen DINO base：快照往返与篡改拒绝测试由 Task 2 覆盖。
-- 120 批测仍在运行、重启器或编码器未退出、账本或视频不完整：DINOv3-sync5 队列测试由 Task 4 覆盖。
+- 错误模型类型、checkpoint 文件缺失或 pinned DINO 身份不符：加载必须在创建环境前失败；由 Task 2 和 Task 4 的拒绝测试覆盖。
+- DINO 权重被 Actor、Critic 或 optimizer 解冻：参数哈希/梯度和 optimizer 成员测试由 Task 3 覆盖。
+- 相机顺序、RGB 归一化、状态/动作维度或 checkpoint processor 漂移：确定性真实 checkpoint 对照测试由 Task 2 与 Task 6 覆盖。
+- checkpoint 恢复遗漏可训练张量或覆盖 frozen DINO base：快照往返与篡改拒绝测试由 Task 3 覆盖。
+- 120 批测仍在运行、重启器或编码器未退出、账本或视频不完整：DINOv3-sync5 队列测试由 Task 5 覆盖。
 
 ---
 
-### Task 1: DINOv3 ACT strict loader and PAC policy adapter
+### Task 1: Branch-local DINO sync5 controller-profile parity
+
+**Files:**
+- Create: hybrid_trial4_snapshot/dinov3_sync5/control_profile.json
+- Create: hybrid_trial4_snapshot/dinov3_sync5/evaluation_config.yaml (or an equivalently explicit, bundle-contained representation)
+- Modify: pac_act/hybrid.py
+- Modify: pac_act/identity.py
+- Create: tests/test_pac_dinov3_control_profile.py
+
+**Interfaces:**
+- Resolve the controller profile explicitly from the verified bundle manifest as dinov3_sync5; reject unknown profile ids or digest/config mismatches before environment construction.
+- Preserve the legacy PAC snapshot and loader behavior for provenance and existing tests. The DINO bundle must never select its older relief settings.
+
+- [ ] **Step 1: Write failing tests** for exact sync5 control-profile values and refusal of stale/changed hashes. Cover target force 1 N, ±0.002 m Z limit, seek/maintain MBK 10/400/10 and 10/800/10, 1 mm contact gate, force/stability thresholds and dwell, 2 s handoff, handoff-only XY/yaw acceleration limits, tracking/follow, wrist-Fz feedback, and ACT-predicted-Z disabled.
+- [ ] **Step 2: Add** the compliance and relief behavior recorded by the active sync5 metadata/config: maintain compliance 5e-05 m/N capped at 0.0005 m only in maintain; overforce relief activates/releases at 1.5/1.1 N with 0.0005/0.0005 m/s rates and 0.00025 m cap. Bind these values and the effective evaluation config to the bundle source/profile digests.
+- [ ] **Step 3: Implement** explicit profile selection in the PAC runtime and package path. Do not consult the active run directory at runtime; the verified profile travels inside the new DINO bundle. Do not change any parameter or modify the root checkout, current evaluation worktree, or default inference route.
+- [ ] **Step 4: Test** Z correction/cap, relief activation/release, phase ownership and profile drift using synthetic force/state inputs only; no simulator episode, optimizer update or physical attempt. Require generated runtime settings to equal the frozen DINO sync5 profile.
+- [ ] **Step 5: Run** python -m pytest -q tests/test_pac_dinov3_control_profile.py; expect parity and fail-closed tests to pass.
+- [ ] **Step 6: Commit** with message fix: preserve DINO sync5 admittance profile in PAC-ACT.
+
+---
+### Task 2: DINOv3 ACT strict loader and PAC policy adapter
 
 **Files:**
 - Create: `sim/act/configuration_dinov3.py`
@@ -52,7 +74,7 @@
 - [ ] **Step 5: Run** `python -m pytest -q tests/test_pac_dinov3.py tests/test_pac_policy.py`; expect PASS.
 - [ ] **Step 6: Commit** with message `feat: load frozen DINOv3 ACT in PAC policy`.
 
-### Task 2: Frozen-weight optimizer and learner checkpoint semantics
+### Task 3: Frozen-weight optimizer and learner checkpoint semantics
 
 **Files:**
 - Modify: `pac_act/policy.py`
@@ -72,7 +94,7 @@
 - [ ] **Step 4: Run** `python -m pytest -q tests/test_pac_dinov3.py tests/test_pac_policy.py tests/test_pac_ppo.py tests/test_pac_recovery_contract.py`; expect the Actor, Critic, optimizer, accepted update and rollback contracts to pass.
 - [ ] **Step 5: Commit** with message `fix: keep DINOv3 frozen across PAC updates and restores`.
 
-### Task 3: Portable DINOv3 200K bundle and pinned runtime dependency
+### Task 4: Portable DINOv3 200K bundle and pinned runtime dependency
 
 **Files:**
 - Modify: `pac_act/identity.py`
@@ -94,7 +116,7 @@
 - [ ] **Step 5: Run** `python -m pytest -q tests/test_pac_bundle.py tests/test_pac_runtime_identity.py`; expect both existing and DINO bundle checks to pass.
 - [ ] **Step 6: Commit** with message `feat: package the frozen DINOv3 ACT 200K base`.
 
-### Task 4: Explicit completion queue for the current DINOv3 sync5 batch
+### Task 5: Explicit completion queue for the current DINOv3 sync5 batch
 
 **Files:**
 - Modify: `pac_act/preflight_queue.py`
@@ -114,7 +136,7 @@
 - [ ] **Step 6: Run** `python -m pytest -q tests/test_pac_preflight_queue.py tests/test_pac_lifecycle.py`; expect old-profile behavior, DINO success fixture and no-retry failure cases to pass.
 - [ ] **Step 7: Commit** with message `feat: gate PAC preflight on completed DINO sync5 batch`.
 
-### Task 5: Isolated runtime, offline checkpoint verification and readiness gate
+### Task 6: Isolated runtime, offline checkpoint verification and readiness gate
 
 **Files:**
 - Modify: `tests/test_pac_real_model.py`
@@ -131,18 +153,18 @@
 - [ ] **Step 5: Verify** the built bundle with `python -B scripts/train_pac_act.py --mode inspect --bundle <new-bundle>` and record runtime compatibility, DINO manifest identity, source hashes, and bundle identity. Stop on any mismatch; do not begin acceptance.
 - [ ] **Step 6: Commit** any test/doc fixes with message `test: verify DINOv3 PAC-ACT base contract`.
 
-### Task 6: One-shot CPU acceptance followed by bounded CUDA post-training
+### Task 7: One-shot CPU acceptance followed by bounded CUDA post-training
 
 **Files:**
 - No edits to the active 120-layout batch or historical runs.
 - New output root: `/home/luke/luke－projects/UR１０SWEEP/runs/pac_act_dinov3_200k_<UTC-run-id>/`
 
 **Interfaces:**
-- Bundle input: the verified `base_bundle` produced by Task 3.
+- Bundle input: the verified `base_bundle` produced by Task 4.
 - Acceptance certificate: new `preflight/acceptance.json`; formal training may read it only when `engineering_passed=true` and its `bundle_identity` matches exactly.
 - Training output: a new `training/` directory with PAC-ACT journal, TensorBoard, videos, validation results and atomic checkpoints.
 
-- [ ] **Step 1: Check** the existing sync5 evaluation at `/home/luke/luke－projects/UR１０SWEEP/runs/hybrid_dinov3_200k_eval120_sync5_seed2120000_20261016`; do not launch anything until status and summary both say 120/120 complete and the Task 4 queue validator confirms all videos, no active batch/encoder processes, and a free inference lease.
+- [ ] **Step 1: Check** the existing sync5 evaluation at `/home/luke/luke－projects/UR１０SWEEP/runs/hybrid_dinov3_200k_eval120_sync5_seed2120000_20261016`; do not launch anything until status and summary both say 120/120 complete and the Task 5 queue validator confirms all videos, no active batch/encoder processes, and a free inference lease.
 - [ ] **Step 2: Build** a new exclusions snapshot from the dataset manifest, old layout plan, residual schedule/ledger, current DINO sync5 `episodes.jsonl`, and every other known preflight/demonstration ledger. If any required source record cannot be located or verified, stop before physical acceptance; never fabricate an empty exclusion input.
 - [ ] **Step 3: Package** the local 200K checkpoint and verified exclusions into `<new-output-root>/bundle` using `scripts/package_pac_act.py`; run `--mode inspect` and require the manifest/checkpoint identity to match the completed evaluation source checkpoint.
 - [ ] **Step 4: Launch** the CPU-only queue once with `--bundle <bundle> --after-batch <sync5-run> --out <new-output-root>/preflight --queue-state <new-output-root>/preflight-queue --preflight-start-index 120 --dependency-profile dinov3_sync5_200k --device cpu`. Require exactly the PAC-ACT 24-opportunity acceptance and two PPO updates, within its resource limits. Do not run a separate physical smoke test.
@@ -153,6 +175,6 @@
 
 ## Execution Notes
 
-- The last read-only status snapshot for the sync5 run showed `running`, 59/120 completed, PID 200810 owning `recovery_launcher.py`. The queue profile must recognize that process and wait for a verified final state; do not stop it.
-- The exact residual seed schedule/ledger path is not in the PAC source checkout. Resolve it from local run evidence before Task 6 Step 2; missing evidence is a hard stop before CPU acceptance.
-- All `<...>` paths in Task 6 are values resolved from the one newly created run root; create that root once with exclusive creation, record it in queue authorization, and never reuse an existing output directory.
+- The latest read-only status snapshot at this plan update showed the sync5 run `running`, 64/120 complete, with `recovery_launcher.py` PID 200810, episode child PID 224737, and media pending for `hybrid_dinov3_200k:n5:l64`. The queue must wait for a verified final state; do not stop it or touch its outputs.
+- The exact residual seed schedule/ledger path is not in the PAC source checkout. Resolve it from local run evidence before Task 7 Step 2; missing evidence is a hard stop before CPU acceptance.
+- All `<...>` paths in Task 7 are values resolved from the one newly created run root; create that root once with exclusive creation, record it in queue authorization, and never reuse an existing output directory.
