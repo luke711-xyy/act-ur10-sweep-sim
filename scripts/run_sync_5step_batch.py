@@ -120,7 +120,8 @@ def prepare_batch(root: Path, source: Path, project: Path) -> dict:
         "episode_entrypoint_sha256": sha256(project / "scripts" / "evaluate_sync_5step_episode.py"),
         "batch_entrypoint_sha256": sha256(project / "scripts" / "run_sync_5step_batch.py"),
         "source_plan_sha256": sha256(source / "episode_plan.json"),
-        "layout_seed_mode": "reuse_exact_frozen_source_plan",
+        "layout_seed_mode": "independent_per_episode",
+        "layout_plan_source": "copied byte-for-byte from the approved completed 120-layout plan",
         "image_retention": "one MP4 per completed physical attempt; retain source replay per existing batch policy",
     })
     (root / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
