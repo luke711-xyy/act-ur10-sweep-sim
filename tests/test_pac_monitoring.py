@@ -68,6 +68,27 @@ def test_phase_curves_never_mix_arms_or_administrative_cuts(tmp_path):
     assert result['effect_groups']['preflight:old_hybrid']['summary']['strict_success_rate']==1
 
 
+def test_process_observer_recognizes_run_scoped_training_adapter(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from pac_act import dashboard
+
+    process = SimpleNamespace(info={
+        'pid': 54321,
+        'cmdline': ['python', str(tmp_path/'runtime_adapters/no_video_training_direct.py'),
+                    '--mode', 'train', '--out', str(tmp_path)],
+        'memory_info': SimpleNamespace(rss=1234),
+        'cpu_times': SimpleNamespace(user=2., system=1.),
+    })
+    monkeypatch.setitem(sys.modules, 'psutil', SimpleNamespace(
+        process_iter=lambda fields: [process], Error=RuntimeError,
+    ))
+    dashboard._process_cache.clear()
+    result = dashboard._process(tmp_path)
+    dashboard._process_cache.clear()
+    assert result == {'alive': True, 'pid': 54321, 'rss_bytes': 1234, 'cpu_seconds': 3.}
+
+
 def test_filtered_pagination_covers_every_episode_without_replacing_unknowns(tmp_path):
     from pac_act.dashboard import snapshot
     for i in range(63):
