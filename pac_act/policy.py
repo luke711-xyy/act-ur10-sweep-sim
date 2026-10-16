@@ -3,8 +3,10 @@
 Uses the LeRobot 0.6.1 ACT modules directly, not an upstream PAC-ACT source copy.
 """
 import copy
+import hashlib
 import json
 from pathlib import Path
+from collections.abc import Mapping
 
 import numpy as np
 import torch
@@ -21,6 +23,18 @@ DINO_TYPE='act_dinov3'
 DINO_BACKBONE='dinov3_vits16'
 DINO_CAMERA_ORDER=('corner_xminus_yminus','corner_xminus_yplus',
                    'corner_xplus_yminus','corner_xplus_yplus','wrist')
+DINO_BASE_IDENTITY_KEY='__dino_base_identity__'
+
+
+def _module_sha256(module):
+    digest=hashlib.sha256()
+    for name,value in sorted(module.state_dict().items()):
+        value=value.detach().cpu().contiguous()
+        digest.update(name.encode())
+        digest.update(str(value.dtype).encode())
+        digest.update(str(tuple(value.shape)).encode())
+        digest.update(value.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _normalization_name(value):
@@ -187,6 +201,7 @@ class ChunkPolicy(BasePolicy):
             'observation.environment_state':spaces.Box(-np.inf,np.inf,(1,),np.float32)})
         super().__init__(obs_space,spaces.Box(-np.inf,np.inf,(5,3),np.float32),normalize_images=False)
         self.image_keys=image_keys; self.obs_keys=tuple(obs_space.spaces)
+        self.is_dinov3=is_dino
         frozen.config.device=device
         self.preprocessor,self.postprocessor=build_act_processors(frozen.config,pretrained_path=str(base_path))
         self.actor=strip_vae(copy.deepcopy(frozen.model)).requires_grad_(True)
@@ -204,6 +219,52 @@ class ChunkPolicy(BasePolicy):
         self.register_buffer('action_scale',scales.clone())
         self.noise=PhysicalNoise(scales[list(ACTIVE)])
         self.to(device)
+        if self.is_dinov3:
+            self._seal_dino_encoders()
+
+    def _dino_encoder_modules(self):
+        modules=[]
+        for name,owner in (
+            ('actor',self.actor),
+            ('reference',self.reference),
+            ('critic',self.critic.model if self.critic is not None else None),
+        ):
+            if owner is None:
+                continue
+            backbone=getattr(owner,'backbone',None)
+            encoder=getattr(backbone,'encoder',None)
+            if encoder is None:
+                raise ValueError(f'DINOv3 {name} is missing its frozen encoder')
+            modules.append((name,backbone,encoder))
+        if not modules or modules[0][0]!='actor' or not any(name=='reference' for name,_,_ in modules):
+            raise ValueError('DINOv3 requires actor and reference encoder copies')
+        return modules
+
+    def _seal_dino_encoders(self):
+        baselines={}
+        for name,backbone,encoder in self._dino_encoder_modules():
+            encoder.requires_grad_(False)
+            encoder.eval()
+            backbone.eval()
+            baselines[name]=_module_sha256(encoder)
+        if len(set(baselines.values()))!=1:
+            raise ValueError('DINOv3 actor, reference and critic encoders differ from the base')
+        self._dino_encoder_baselines=baselines
+        self._dino_base_identity=baselines['actor']
+
+    def _assert_dino_encoders_unchanged(self):
+        current={name:_module_sha256(encoder)
+                 for name,_backbone,encoder in self._dino_encoder_modules()}
+        if current!=self._dino_encoder_baselines:
+            raise ValueError('a frozen DINOv3 encoder changed from its base identity')
+
+    def train(self,mode=True):
+        super().train(mode)
+        if getattr(self,'is_dinov3',False):
+            for _name,backbone,encoder in self._dino_encoder_modules():
+                encoder.eval()
+                backbone.eval()
+        return self
 
     def prepare(self,observations):
         if set(observations)!=set(self.obs_keys):
@@ -240,10 +301,48 @@ class ChunkPolicy(BasePolicy):
         return self.distribution(observation,lengths).sample(deterministic)
 
     def learned_state(self):
-        # Never duplicate the 100K reference in checkpoints.
-        return {k:v for k,v in self.state_dict().items() if not k.startswith('reference.')}
+        # Never duplicate the frozen reference or a frozen DINO encoder.
+        state={key:value for key,value in self.state_dict().items()
+               if not key.startswith('reference.')
+               and not (self.is_dinov3 and '.backbone.encoder.' in key)}
+        if self.is_dinov3:
+            identity=bytes.fromhex(self._dino_base_identity)
+            state[DINO_BASE_IDENTITY_KEY]=torch.tensor(list(identity),dtype=torch.uint8)
+        return state
 
-    def load_learned(self,state):
+    def load_learned(self,state:Mapping[str,torch.Tensor]):
+        if self.is_dinov3:
+            if not isinstance(state,Mapping):
+                raise ValueError('DINOv3 learner checkpoint must be a tensor mapping')
+            payload=dict(state)
+            identity=payload.pop(DINO_BASE_IDENTITY_KEY,None)
+            expected_identity=torch.tensor(list(bytes.fromhex(self._dino_base_identity)),dtype=torch.uint8)
+            if (not isinstance(identity,torch.Tensor)
+                    or identity.dtype!=torch.uint8
+                    or not torch.equal(identity.detach().cpu(),expected_identity)):
+                raise ValueError('learner checkpoint DINOv3 base identity differs')
+            self._assert_dino_encoders_unchanged()
+
+            current=self.state_dict()
+            excluded={key for key in current
+                      if key.startswith('reference.') or '.backbone.encoder.' in key}
+            expected=set(current)-excluded
+            missing=expected-set(payload)
+            unexpected=set(payload)-expected
+            if missing or unexpected:
+                raise ValueError(
+                    'DINOv3 learner checkpoint has incompatible learned modules '
+                    f'(missing={sorted(missing)}, unexpected={sorted(unexpected)})')
+            for key,value in payload.items():
+                if not isinstance(value,torch.Tensor):
+                    raise ValueError(f'DINOv3 learner state {key} is not a tensor')
+                if value.shape!=current[key].shape or value.dtype!=current[key].dtype:
+                    raise ValueError(f'DINOv3 learner state {key} has an incompatible tensor contract')
+            missing_keys,unexpected_keys=self.load_state_dict(payload,strict=False)
+            if unexpected_keys or set(missing_keys)!=excluded:
+                raise ValueError('DINOv3 learner checkpoint has incompatible frozen modules')
+            self._assert_dino_encoders_unchanged()
+            return
         if self.critic is None:
             state={k:v for k,v in state.items() if not k.startswith('critic.')}
         missing,unexpected=self.load_state_dict(state,strict=False)

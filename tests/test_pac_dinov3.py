@@ -46,6 +46,14 @@ def _dino_config():
     values.update(
         vision_backbone="dinov3_vits16",
         pretrained_backbone_weights=None,
+        dim_model=16,
+        n_heads=4,
+        dim_feedforward=32,
+        n_encoder_layers=1,
+        n_decoder_layers=1,
+        latent_dim=4,
+        n_vae_encoder_layers=1,
+        dropout=0.0,
         normalization_mapping={
             "VISUAL": NormalizationMode.IDENTITY,
             "STATE": NormalizationMode.MEAN_STD,
@@ -107,7 +115,12 @@ def _install_test_policy_base(monkeypatch):
             parameter = next(self.parameters(), None)
             return parameter.device if parameter is not None else torch.device("cpu")
 
+    class PPO:
+        def __init__(self, *args, **kwargs):
+            self._test_init = (args, kwargs)
+
     policies.BasePolicy = BasePolicy
+    package.PPO = PPO
     monkeypatch.setitem(sys.modules, "stable_baselines3", package)
     monkeypatch.setitem(sys.modules, "stable_baselines3.common", common)
     monkeypatch.setitem(sys.modules, "stable_baselines3.common.policies", policies)
@@ -117,12 +130,87 @@ class _TinyACTModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.backbone = _TinyDINOBackbone()
         self.output = nn.Linear(1, 4)
 
     def forward(self, batch):
         state = batch["observation.state"]
         value = self.output(state[:, :1])
         chunk = value[:, None, :].expand(-1, 25, -1)
+        return chunk, None
+
+
+class _TinyDINOEncoder(nn.Module):
+    def __init__(self, scale=1.0):
+        super().__init__()
+        self.projection = nn.Linear(3, 3, bias=False)
+        with torch.no_grad():
+            self.projection.weight.copy_(torch.eye(3) * scale)
+        self.requires_grad_(False)
+
+    def forward(self, image):
+        pooled = image.mean(dim=(2, 3))
+        return self.projection(pooled).unsqueeze(-1).unsqueeze(-1)
+
+
+class _TinyDINOBackbone(nn.Module):
+    def __init__(self, scale=1.0):
+        super().__init__()
+        self.encoder = _TinyDINOEncoder(scale)
+        self.encoder.eval()
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.encoder.eval()
+        return self
+
+    def forward(self, image):
+        return {"feature_map": self.encoder(image)}
+
+
+class _TinyTokenEncoder(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.projection = nn.Linear(dim, dim)
+
+    def forward(self, tokens, *, pos_embed):
+        return self.projection(tokens + pos_embed)
+
+
+class _TinyCameraPosition(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.projection = nn.Conv2d(3, dim, 1)
+
+    def forward(self, feature_map):
+        # ACT positional embeddings have a singleton batch axis and broadcast.
+        return self.projection(feature_map[:1])
+
+
+class _TinyPPOACTModel(nn.Module):
+    """Small ACT-shaped model exercising the real ChunkPolicy/critic wiring."""
+
+    def __init__(self, config, encoder_scale=1.0):
+        super().__init__()
+        self.config = config
+        dim = config.dim_model
+        self.backbone = _TinyDINOBackbone(encoder_scale)
+        self.encoder_img_feat_input_proj = nn.Conv2d(3, dim, 1)
+        self.encoder_cam_feat_pos_embed = _TinyCameraPosition(dim)
+        self.encoder_latent_input_proj = nn.Linear(config.latent_dim, dim)
+        self.encoder_1d_feature_pos_embed = nn.Embedding(3, dim)
+        self.encoder_robot_state_input_proj = nn.Linear(36, dim)
+        self.encoder_env_state_input_proj = nn.Linear(1, dim)
+        self.encoder = _TinyTokenEncoder(dim)
+        self.action_head = nn.Linear(dim, 4)
+        self.decoder = nn.Linear(dim, dim)
+        self.decoder_pos_embed = nn.Embedding(25, dim)
+
+    def forward(self, batch):
+        from pac_act.policy import encoder_features
+
+        pooled = encoder_features(self, batch)
+        chunk = self.action_head(pooled)[:, None, :].expand(-1, 25, -1)
         return chunk, None
 
 
@@ -142,7 +230,7 @@ def _processor_stats(config):
     return stats
 
 
-def _fake_local_checkpoint(root, monkeypatch):
+def _fake_local_checkpoint(root, monkeypatch, model_factory=_TinyACTModel):
     from safetensors.torch import save_file
 
     config = _dino_config()
@@ -157,13 +245,24 @@ def _fake_local_checkpoint(root, monkeypatch):
 
     def from_pretrained(cls, path, *, config, **kwargs):
         loads.append((str(path), kwargs.copy()))
-        return types.SimpleNamespace(config=config, model=_TinyACTModel(config))
+        return types.SimpleNamespace(config=config, model=model_factory(config))
 
     monkeypatch.setattr(dino.DINOv3ACTPolicy, "from_pretrained",
                         classmethod(from_pretrained))
     _install_test_policy_base(monkeypatch)
     pac_policy = importlib.import_module("pac_act.policy")
     return config, pac_policy, loads
+
+
+def _encoder_digest(module):
+    digest = hashlib.sha256()
+    for name, value in sorted(module.state_dict().items()):
+        value = value.detach().cpu().contiguous()
+        digest.update(name.encode())
+        digest.update(str(value.dtype).encode())
+        digest.update(str(tuple(value.shape)).encode())
+        digest.update(value.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _observation(config):
@@ -267,3 +366,87 @@ def test_dinov3_processor_preserves_camera_order_and_identity_visual_stats(tmp_p
     torch.testing.assert_close(physical[..., 1], torch.full((1, 5), 2.0))
     torch.testing.assert_close(physical[..., 2], torch.zeros((1, 5)))
     torch.testing.assert_close(physical[..., 3], torch.full((1, 5), 2.0))
+
+
+def test_dino_encoder_is_absent_from_actor_and_critic_optimizer_groups(tmp_path, monkeypatch):
+    _install_test_policy_base(monkeypatch)
+    checkpoint = tmp_path / "optimizer-checkpoint"
+    checkpoint.mkdir()
+    _config, pac_policy, _loads = _fake_local_checkpoint(
+        checkpoint, monkeypatch, model_factory=_TinyPPOACTModel)
+    policy = pac_policy.ChunkPolicy(checkpoint, device="cpu", build_critic=True)
+
+    from pac_act.ppo import ChunkPPO
+
+    trainer = ChunkPPO(policy)
+    encoders = {
+        "actor": policy.actor.backbone.encoder,
+        "reference": policy.reference.backbone.encoder,
+        "critic": policy.critic.model.backbone.encoder,
+    }
+    optimizer_parameters = {
+        group["role"]: {id(parameter) for parameter in group["params"]}
+        for group in trainer.optimizer.param_groups
+    }
+
+    assert [group["role"] for group in trainer.optimizer.param_groups] == ["actor", "critic"]
+    for role in ("actor", "critic"):
+        encoder_ids = {id(parameter) for parameter in encoders[role].parameters()}
+        assert not encoder_ids & optimizer_parameters[role]
+        assert all(not parameter.requires_grad for parameter in encoders[role].parameters())
+    assert all(not parameter.requires_grad for parameter in encoders["reference"].parameters())
+    assert any(parameter.requires_grad for parameter in policy.actor.parameters())
+    assert any(parameter.requires_grad for parameter in policy.critic.parameters())
+
+
+def test_dino_learner_snapshot_round_trips_without_storing_base_encoder(tmp_path, monkeypatch):
+    _install_test_policy_base(monkeypatch)
+    checkpoint = tmp_path / "snapshot-checkpoint"
+    checkpoint.mkdir()
+    _config, pac_policy, _loads = _fake_local_checkpoint(
+        checkpoint, monkeypatch, model_factory=_TinyPPOACTModel)
+    policy = pac_policy.ChunkPolicy(checkpoint, device="cpu", build_critic=True)
+    encoders = (
+        policy.actor.backbone.encoder,
+        policy.reference.backbone.encoder,
+        policy.critic.model.backbone.encoder,
+    )
+    before_hashes = tuple(_encoder_digest(encoder) for encoder in encoders)
+    snapshot = {key: value.detach().clone()
+                for key, value in policy.learned_state().items()}
+
+    assert not any(key.startswith("reference.") for key in snapshot)
+    assert not any(".backbone.encoder." in key for key in snapshot)
+    assert "actor.action_head.weight" in snapshot
+    assert "critic.head.0.weight" in snapshot
+    assert "action_mean" in snapshot and "action_scale" in snapshot
+    assert "noise.log_std" in snapshot
+
+    with torch.no_grad():
+        policy.actor.action_head.weight.add_(3.0)
+        policy.critic.head[-1].bias.add_(2.0)
+    policy.load_learned(snapshot)
+    for key, value in snapshot.items():
+        if key != "__dino_base_identity__":
+            torch.testing.assert_close(policy.state_dict()[key], value)
+    assert tuple(_encoder_digest(encoder) for encoder in encoders) == before_hashes
+
+    incomplete = dict(snapshot)
+    incomplete.pop("actor.action_head.weight")
+    with pytest.raises(ValueError, match="missing|incompatible"):
+        policy.load_learned(incomplete)
+
+    missing_identity = dict(snapshot)
+    missing_identity.pop("__dino_base_identity__")
+    with pytest.raises(ValueError, match="base identity"):
+        policy.load_learned(missing_identity)
+
+    other_checkpoint = tmp_path / "different-base-checkpoint"
+    other_checkpoint.mkdir()
+    _config, other_pac_policy, _loads = _fake_local_checkpoint(
+        other_checkpoint, monkeypatch,
+        model_factory=lambda config: _TinyPPOACTModel(config, encoder_scale=2.0))
+    other_policy = other_pac_policy.ChunkPolicy(
+        other_checkpoint, device="cpu", build_critic=True)
+    with pytest.raises(ValueError, match="base identity"):
+        other_policy.load_learned(snapshot)

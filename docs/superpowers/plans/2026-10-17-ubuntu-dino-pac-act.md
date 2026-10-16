@@ -86,15 +86,15 @@
 - Modify: `tests/test_pac_recovery_contract.py`
 
 **Interfaces:**
-- `ChunkPolicy.learned_state() -> dict[str, Tensor]` contains learnable Actor/Critic tensors, PPO noise and normalization buffers, but omits the frozen reference and DINO encoder weights.
+- `ChunkPolicy.learned_state() -> dict[str, Tensor]` contains learnable Actor/Critic tensors, PPO noise and normalization buffers plus a tensor-encoded DINO base identity, but omits the frozen reference and DINO encoder weights.
 - `ChunkPolicy.load_learned(state: Mapping[str, Tensor]) -> None` restores only those tensors, rejects unknown/missing learnable keys, and leaves each frozen DINO copy byte-identical to the base.
 - PPO optimizer groups include only parameters with `requires_grad=True`; their existing actor/critic learning rates and role names stay unchanged.
 
-- [ ] **Step 1: Write failing tests** `test_dino_encoder_is_absent_from_actor_and_critic_optimizer_groups`, `test_ppo_updates_act_modules_without_changing_any_dino_encoder`, and `test_dino_learner_snapshot_round_trips_without_storing_base_encoder`.
-- [ ] **Step 2: Run** the three tests by name; confirm optimizer inclusion, state size/keys, or restore behavior fails before the fix.
-- [ ] **Step 3: Implement** frozen DINO enforcement after Actor and Critic construction; filter each PPO parameter group by `requires_grad`; omit frozen DINO and reference tensors from `learned_state`; make restore fail closed on missing learnable tensors or changed DINO base identity.
-- [ ] **Step 4: Run** `python -m pytest -q tests/test_pac_dinov3.py tests/test_pac_policy.py tests/test_pac_ppo.py tests/test_pac_recovery_contract.py`; expect the Actor, Critic, optimizer, accepted update and rollback contracts to pass.
-- [ ] **Step 5: Commit** with message `fix: keep DINOv3 frozen across PAC updates and restores`.
+- [x] **Step 1: Write failing tests** `test_dino_encoder_is_absent_from_actor_and_critic_optimizer_groups`, `test_ppo_updates_act_modules_without_changing_any_dino_encoder`, and `test_dino_learner_snapshot_round_trips_without_storing_base_encoder`.
+- [x] **Step 2: Run** the three tests by name; confirm optimizer inclusion, state size/keys, or restore behavior fails before the fix.
+- [x] **Step 3: Implement** frozen DINO enforcement after Actor and Critic construction; filter each PPO parameter group by `requires_grad`; omit frozen DINO and reference tensors from `learned_state`; make restore fail closed on missing learnable tensors or changed DINO base identity.
+- [x] **Step 4: Run** `python -m pytest -q tests/test_pac_dinov3.py tests/test_pac_policy.py tests/test_pac_ppo.py tests/test_pac_recovery_contract.py`; expect the Actor, Critic, optimizer, accepted update and rollback contracts to pass.
+- [x] **Step 5: Commit** with message `fix: keep DINOv3 frozen across PAC updates and restores`.
 
 ### Task 4: Portable DINOv3 200K bundle and pinned runtime dependency
 

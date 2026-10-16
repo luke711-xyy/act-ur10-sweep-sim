@@ -92,9 +92,14 @@ class ChunkPPO(PPO):
             device=str(policy.device),_init_setup_model=False)
         self.policy=policy; self.config=config
         self.poll=poll or (lambda:None)
+        actor_parameters=[parameter for parameter in
+            list(policy.actor.parameters())+list(policy.noise.parameters())
+            if parameter.requires_grad]
+        critic_parameters=[parameter for parameter in policy.critic.parameters()
+            if parameter.requires_grad]
         self.optimizer=torch.optim.Adam([
-            {'params':list(policy.actor.parameters())+list(policy.noise.parameters()),'lr':config.actor_lr,'role':'actor'},
-            {'params':list(policy.critic.parameters()),'lr':config.critic_lr,'role':'critic'}],eps=1e-5)
+            {'params':actor_parameters,'lr':config.actor_lr,'role':'actor'},
+            {'params':critic_parameters,'lr':config.critic_lr,'role':'critic'}],eps=1e-5)
         self._n_updates=0; self.last_audit=None;self.audit_sink=audit_sink
         self.last_distribution_audit=None
         self.last_accepted_audit=None;self._rejected_exception=None
