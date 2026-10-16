@@ -111,12 +111,12 @@
 - Add a fail-closed DINO base manifest identity: `model_type=act_dinov3`, `vision_backbone=dinov3_vits16`, `base_step=200000`, pinned DINO model/revision/digest, and per-file SHA-256 entries.
 - Keep the existing 100K ResNet bundle contract passing; DINO run artifacts identify only the 200K checkpoint.
 
-- [ ] **Step 1: Write failing tests** `test_dinov3_200k_bundle_copies_and_hashes_every_checkpoint_file`, `test_dinov3_bundle_rejects_wrong_step_type_or_tampered_file`, and `test_existing_resnet_100k_bundle_contract_is_unchanged`.
-- [ ] **Step 2: Run** `python -m pytest -q tests/test_pac_bundle.py tests/test_pac_runtime_identity.py`; confirm DINO 200K packaging is rejected by the existing 100K guard.
-- [ ] **Step 3: Implement** an explicit DINO 200K bundle path that recursively copies and hashes all checkpoint files, including `training_state.pt` and the exact processor/statistics files, and records the DINO identity in the manifest. Preserve existing bundle paths and include the new model code in the sealed portable source.
-- [ ] **Step 4: Add** `timm==1.0.30` to the PAC-ACT optional dependencies and lock; update `docs/PAC_ACT.md` with the DINO 200K bundle command, strict offline load, and frozen encoder contract.
-- [ ] **Step 5: Run** `python -m pytest -q tests/test_pac_bundle.py tests/test_pac_runtime_identity.py`; expect both existing and DINO bundle checks to pass.
-- [ ] **Step 6: Commit** with message `feat: package the frozen DINOv3 ACT 200K base`.
+- [x] **Step 1: Write failing tests** `test_dinov3_200k_bundle_copies_and_hashes_every_checkpoint_file`, `test_dinov3_bundle_rejects_wrong_step_type_or_tampered_file`, and `test_existing_resnet_100k_bundle_contract_is_unchanged`.
+- [x] **Step 2: Run** `python -m pytest -q tests/test_pac_bundle.py tests/test_pac_runtime_identity.py`; confirm DINO 200K packaging is rejected by the existing 100K guard.
+- [x] **Step 3: Implement** an explicit DINO 200K bundle path that recursively copies and hashes all checkpoint files, including `training_state.pt` and the exact processor/statistics files, and records the DINO identity in the manifest. Preserve existing bundle paths and include the new model code in the sealed portable source.
+- [x] **Step 4: Add** `timm==1.0.30` to the PAC-ACT optional dependencies and lock; update `docs/PAC_ACT.md` with the DINO 200K bundle command, strict offline load, and frozen encoder contract.
+- [x] **Step 5: Run** `python -m pytest -q tests/test_pac_bundle.py tests/test_pac_runtime_identity.py`; expect both existing and DINO bundle checks to pass.
+- [x] **Step 6: Commit** with message `feat: package the frozen DINOv3 ACT 200K base`.
 
 ### Task 5: Explicit completion queue for the current DINOv3 sync5 batch
 

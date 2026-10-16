@@ -1,4 +1,4 @@
-# Python 3.12. Minimal, isolated ACT/PPO runtime verified on macOS arm64.
+# Python 3.12. Minimal isolated PAC-ACT runtime pins; match the torch wheel to the host.
 # Install with --no-deps; all transitive runtime dependencies are listed here.
 # On Linux CUDA install torch/torchvision from the official matching CUDA
 # index first, then this lock with --no-deps. Never reuse the SAC environment.
@@ -71,6 +71,7 @@ sympy==1.14.0
 tensorboard==2.21.0
 tensorboard-data-server==0.7.2
 termcolor==3.3.0
+timm==1.0.30
 toml==0.10.2
 torch==2.11.0
 torchvision==0.26.0

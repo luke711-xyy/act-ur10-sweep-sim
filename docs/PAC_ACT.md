@@ -10,7 +10,9 @@ SAC controller and does not reuse its replay pool or train its frozen ACT.
 
 - The 67 `sim/` sources, `hybrid_trial4_snapshot/`, existing evaluation
   entry points and historical experiments are unchanged.
-- Start from five-view **ResNet ACT step_100000**, not DINO. The trainable
+- The legacy package path starts from five-view **ResNet ACT step_100000**. The
+  separate DINO extension below uses only the local **DINOv3 ACT step_200000**
+  checkpoint. The trainable
   Actor uses its zero-latent inference path without the CVAE encoder.
   Backbone, Transformer and action head receive gradients with dropout off.
   The Critic has a separate copied visual/Transformer encoder and
@@ -150,6 +152,33 @@ Registered streams are train6M, validation7M and preflight8M; initial-pose
 fingerprints are checked before task execution. Old120 and the full residual5M
 interval are excluded. A* uses one geometry candidate, no physical screening,
 no seed replacement, no recovery route and no failure retry.
+
+### DINOv3 ACT 200K base
+
+Package the exact local `step_200000` directory with the same numeric exclusion
+manifest. The DINO bundle recursively copies and hashes every checkpoint file,
+including `training_state.pt` and the saved processor/statistics states, and
+binds the pinned DINOv3 model id, revision and weight digest. It also carries
+the explicit `dinov3_sync5` control profile and its paired evaluation config.
+The ResNet `step_100000` manifest and package layout remain unchanged.
+
+```sh
+.venv/bin/python -B scripts/package_pac_act.py \
+  --model /path/to/checkpoints/step_200000 \
+  --exclusions /new/path/exclusions.json --out /new/path/dinov3_pac_bundle
+.venv/bin/python -B scripts/train_pac_act.py --mode inspect \
+  --bundle /new/path/dinov3_pac_bundle
+```
+
+The DINO loader dispatches only the serialized `act_dinov3` /
+`dinov3_vits16` pair and loads weights and processors from the bundle with
+local-only loading. It never downloads or substitutes a DINO encoder. Actor,
+reference and Critic use byte-identical frozen DINO encoders; PPO optimizes
+only the ACT trainable modules and exploration scales. Frozen encoders are
+omitted from learner snapshots, which carry a DINO base-identity marker for
+strict restore. The five-view RGB processor, saved normalization statistics,
+25-to-5 chunk schedule, and Z-admittance ownership stay bound to the checkpoint
+and sync5 bundle profile.
 
 ## Mac acceptance (not formal training)
 
