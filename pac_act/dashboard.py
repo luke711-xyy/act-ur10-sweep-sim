@@ -155,7 +155,9 @@ def _process(root):
         for process in psutil.process_iter(['pid', 'cmdline', 'memory_info', 'cpu_times']):
             try:
                 info = process.info; command = info['cmdline'] or []
-                direct_entry=any(Path(a).name=='train_pac_act.py' for a in command)
+                direct_entry=any(Path(a).name in (
+                    'train_pac_act.py', 'resume_no_video_skip_acceptance_baseline.py')
+                    for a in command)
                 adapter_entry=('--mode' in command and command[command.index('--mode')+1]=='train')
                 if not (direct_entry or adapter_entry) or '--out' not in command: continue
                 if str(Path(command[command.index('--out')+1]).resolve()) != key: continue

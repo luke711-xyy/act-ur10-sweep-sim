@@ -89,6 +89,27 @@ def test_process_observer_recognizes_run_scoped_training_adapter(tmp_path, monke
     assert result == {'alive': True, 'pid': 54321, 'rss_bytes': 1234, 'cpu_seconds': 3.}
 
 
+def test_process_observer_recognizes_run_scoped_resume_adapter(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from pac_act import dashboard
+
+    process = SimpleNamespace(info={
+        'pid': 54322,
+        'cmdline': ['python', str(tmp_path/'runtime_adapters/resume_no_video_skip_acceptance_baseline.py'),
+                    '--bundle', str(tmp_path/'bundle'), '--out', str(tmp_path)],
+        'memory_info': SimpleNamespace(rss=2345),
+        'cpu_times': SimpleNamespace(user=4., system=2.),
+    })
+    monkeypatch.setitem(sys.modules, 'psutil', SimpleNamespace(
+        process_iter=lambda fields: [process], Error=RuntimeError,
+    ))
+    dashboard._process_cache.clear()
+    result = dashboard._process(tmp_path)
+    dashboard._process_cache.clear()
+    assert result == {'alive': True, 'pid': 54322, 'rss_bytes': 2345, 'cpu_seconds': 6.}
+
+
 def test_filtered_pagination_covers_every_episode_without_replacing_unknowns(tmp_path):
     from pac_act.dashboard import snapshot
     for i in range(63):
