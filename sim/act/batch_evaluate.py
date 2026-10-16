@@ -111,10 +111,12 @@ def effective_replay_config(cfg, physical):
     """Reapply the exact inference overlay when replaying an already measured result."""
     if physical.get('inference_strategy') != 'hybrid_astar_act_trial4_dinov3_frozen':
         return cfg
-    from .hybrid_trial4 import PROFILE, formal
-    if physical.get('hybrid_control_profile') != PROFILE:
+    from .hybrid_trial4 import configure_admittance, formal, runtime
+    effective = formal.candidate_config(cfg, int(cfg.task.target_count))
+    profile = configure_admittance(runtime(), effective)
+    if physical.get('hybrid_control_profile') != profile:
         raise RuntimeError('measured Hybrid control profile differs from the replay implementation')
-    return formal.candidate_config(cfg, int(cfg.task.target_count))
+    return effective
 
 
 def parse_episode_output(output: str, returncode: int, *, require_media=True) -> dict:

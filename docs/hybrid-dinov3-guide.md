@@ -39,6 +39,57 @@
 这两项属于接线/异常保护修复，不能把新版本与旧正式结果的差异全部归因于视觉编码器。
 旧快照、结果、模型保持原样；未回写或重新评测旧批次。
 
+## 显式接触导纳调参
+
+本地接触/扫动诊断可在配置中设置 `act.hybrid_admittance`，例如：
+
+```yaml
+act:
+  hybrid_admittance:
+    seek_MBK: [10.0, 400.0, 10.0]
+    maintain_MBK: [10.0, 800.0, 10.0]
+    force_compliance_m_per_N: 0.00005
+controller:
+  overforce_relief:
+    activation_force: 1.5
+    release_force: 1.1
+    upward_rate: 0.0005
+    return_rate: 0.0005
+    max_offset: 0.00025
+```
+
+此设置在创建导纳环之前生效，离散稳定性检查通过后才创建物理环境。
+寻找、稳定和 ACT 扫动复用同一个导纳状态，阶段切换保留位移和速度。
+省略 `act.hybrid_admittance` 时仍使用上述归档 M/B/K。额外卸载参数沿用
+`controller.overforce_relief` 配置入口；示例采用较早、较平缓的卸载与恢复。
+显式配置的执行记录 `hybrid_control_profile` 写入实际增益和卸载参数，
+媒体恢复也校验同一配置。1 N 目标力、±2 mm 总 Z 限制、
+5 Hz 腕力滤波、20 N / 3 步保护以及 A* / ACT 的 XY 执行方式保留。
+
+可选 `force_compliance_m_per_N` 只在 `maintain` 阶段增加弹性腕力反馈，
+不重置 M/B/K 环的积分状态。示例为 0.05 mm/N，额外位移限于 ±0.5 mm，
+最终 Z 仍受原有 ±2 mm 总边界和速度限制约束。力上升时更早卸载，回落时
+释放该项以恢复贴桌；省略或设置为 0 则关闭。支持范围为 0–0.3 mm/N。
+真实执行 profile 和媒体恢复校验都包含这一项，不能将其标作未修改的归档控制器。
+
+如接管 2 秒后 ACT 目标转向突变仍引起贴桌冲击，可显式设置：
+
+```yaml
+act:
+  hybrid_sweep_smoothing:
+    xy_acceleration_m_s2: 0.1
+    yaw_acceleration_rad_s2: 0.5
+```
+
+此选项让接管后的 XY/yaw 继续跟随 ACT 目标，同时限制速度为 0.08 m/s、0.35 rad/s，
+使用上述连续加速度限制。原始 2 秒接管段保留 0.05 m/s²、0.5 rad/s² 的限制。
+扫动会减速，实际执行轨迹会改变；ACT 仍决定目标，Z 仍属于导纳。
+这时 profile 明确记录 `sweep_smoothing` 和持续限加速度模式，逐个物理步审计，
+不能称为 2 秒后完全恢复原生 ACT。省略该选项则保留归档行为。
+
+调参应分别报告落刷/扫动的力峰、未滤波腕力、低力比例与贴桌诊断。
+刷头与槽壁的碰撞峰值不能直接当成导纳跟踪误差；小幅扫动改善也不能替代完整任务评测。
+
 ## DINO 与训练准备
 
 五路 320×320 RGB → 同一个冻结 DINOv3 ViT-S/16 → 384×10×10 空间图 →

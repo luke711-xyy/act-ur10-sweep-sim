@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+from collections.abc import Mapping
 
 import numpy as np
 
@@ -77,10 +78,123 @@ def require_dinov3_checkpoint(model_path):
     return str(path)
 
 
+def configure_admittance(module, cfg):
+    """Apply explicit contact gains before creating the continuous Z loop.
+
+    Omission retains the archived trial-4 profile. Configured runs report the
+    actual gains and keep the same wrist feedback, gate, Z bounds and XY path.
+    """
+    profile = dict(PROFILE)
+    from dataclasses import asdict
+    from ..evaluate import _overforce_relief_loop
+    from .contact_motion import configure as configure_motion
+    relief = asdict(_overforce_relief_loop(cfg).params)
+    base = getattr(module, '_unconfigured_admittance_type', module.TwoStageAdmittance)
+    module._unconfigured_admittance_type = base
+    module.TwoStageAdmittance = base
+    values = cfg.get_path('act.hybrid_admittance')
+    if values is None:
+        module.TRIAL_SPEC = type(module.TRIAL_SPEC)(PROFILE['target_force_N'],
+            tuple(PROFILE['seek_MBK']), tuple(PROFILE['maintain_MBK']))
+        archived_relief = dict(activation_force=10., release_force=7., upward_rate=.02,
+                               return_rate=.1, max_offset=.00025)
+        if cfg.get_path('act.hybrid_sweep_smoothing') is not None or relief != archived_relief:
+            profile['overforce_relief'] = relief
+        return configure_motion(module, cfg, profile)
+    allowed = {'seek_MBK', 'maintain_MBK', 'force_compliance_m_per_N'}
+    if not isinstance(values, Mapping) or set(values) - allowed:
+        raise ValueError('unknown hybrid_admittance parameter')
+    try:
+        compliance = float(values.get('force_compliance_m_per_N', 0.))
+        if not np.isfinite(compliance) or not 0. <= compliance <= .0003:
+            raise ValueError('outside 0 to 0.3 mm/N')
+    except (TypeError, ValueError) as error:
+        raise ValueError(f'invalid force compliance: {error}') from error
+    try:
+        spec = type(module.TRIAL_SPEC)(
+            PROFILE['target_force_N'],
+            tuple(values.get('seek_MBK', PROFILE['seek_MBK'])),
+            tuple(values.get('maintain_MBK', PROFILE['maintain_MBK'])))
+        spec.check_clock(1. / float(cfg.sim.control_hz))
+    except (TypeError, ValueError) as error:
+        raise ValueError(f'invalid configured Hybrid admittance: {error}') from error
+    module.TRIAL_SPEC = spec
+    if compliance:
+        class ContactCompliantAdmittance(base):
+            """Bounded elastic wrist feedback alongside the continuous M/B/K loop.
+
+            Acquisition and its gain-switch state remain intact. Once contact
+            is maintained, this term reacts before the slower force integral
+            builds pressure. It releases immediately as pressure falls so the
+            brush can recover contact. The existing limiter owns actual Z rate.
+            """
+            def step(self, desired_force, wrist_force):
+                correction = super().step(desired_force, wrist_force)
+                if self.phase == 'maintain':
+                    elastic = np.clip(compliance * (wrist_force - desired_force),
+                                      -.0005, .0005)
+                    correction = float(np.clip(correction + elastic, -.002, .002))
+                return correction
+
+        module.TwoStageAdmittance = ContactCompliantAdmittance
+        profile['maintain_force_compliance'] = {
+            'gain_m_per_N': compliance, 'offset_cap_m': .0005,
+            'active_phase': 'maintain', 'feedback': 'compensated_filtered_wrist_Fz'}
+    profile.update(seek_MBK=list(spec.seek), maintain_MBK=list(spec.maintain),
+                   admittance_configuration='act.hybrid_admittance',
+                   overforce_relief=relief)
+    return configure_motion(module, cfg, profile)
+
+
 def _audit_result(module, context, result):
     if context['step_failures'] or context['invalid_samples']:
         raise RuntimeError('invalid Hybrid execution; no fallback or retry permitted')
+    limits = getattr(module, '_contact_sweep_limits', None)
+    if limits is not None:
+        governor = context.get('handoff_governor')
+        for row in result.trace:
+            p = row.get('handoff_smoothing', {})
+            if governor is not None and governor.started_at is not None:
+                proposal_time = float(row['t']) - governor.dt
+                due = (row.get('control_step_advanced', True)
+                       and proposal_time >= governor.started_at + 2. - 1e-8)
+                elapsed = p.get('elapsed_s')
+                if due and (elapsed is None or not np.isfinite(elapsed)
+                            or abs(elapsed-(proposal_time-governor.started_at)) > 1e-8):
+                    raise RuntimeError('invalid continuous contact sweep elapsed time')
+                if due and (not p.get('advanced') or p.get('started_at') != governor.started_at):
+                    raise RuntimeError('missing continuous contact sweep telemetry')
+            if not p.get('advanced') or p.get('started_at') is None:
+                continue
+            elapsed = p.get('elapsed_s')
+            if elapsed is None or not np.isfinite(elapsed):
+                raise RuntimeError('invalid continuous contact sweep clock telemetry')
+            if elapsed >= 2.-1e-9:
+                if (p.get('mode') != 'contact_sweep' or not p.get('acceleration_bounds_apply')
+                        or any(p.get(k) != v for k, v in limits.items())
+                        or not np.isfinite(np.r_[p.get('velocity_xy_m_s', np.nan),
+                            p.get('acceleration_xy_m_s2', np.nan),
+                            p.get('yaw_velocity_rad_s', np.nan),
+                            p.get('yaw_acceleration_rad_s2', np.nan)]).all()):
+                    raise RuntimeError('invalid continuous contact sweep mode or limit telemetry')
     audit = module.handoff.metrics(result.trace)
+    sweep = [r for r in result.trace if r.get('handoff_smoothing', {}).get('advanced')
+             and r['handoff_smoothing']['mode'] == 'contact_sweep']
+    if sweep:
+        violations = []
+        for row in sweep:
+            p = row['handoff_smoothing']
+            if (np.linalg.norm(p['acceleration_xy_m_s2']) > p['xy_acceleration_limit_m_s2']+1e-8
+                    or abs(p['yaw_acceleration_rad_s2']) > p['yaw_acceleration_limit_rad_s2']+1e-8
+                    or np.linalg.norm(p['velocity_xy_m_s']) > .08+1e-8
+                    or abs(p['yaw_velocity_rad_s']) > .35+1e-8):
+                violations.append(row['t'])
+        audit.update(contact_sweep_steps=len(sweep), contact_sweep_limit_violations=violations,
+                     contact_sweep_peak_wrist_N=max(float(r['normal_force']) for r in sweep),
+                     acceleration_limit_applies_only_inside_two_seconds=False)
+        audit['accepted_ACT_control_steps'] += sum(r['handoff_smoothing']['accepted'] for r in sweep)
+        if violations:
+            raise RuntimeError('continuous contact sweep acceleration audit failed')
     if audit['active_limit_violations'] or audit['rejected_advanced_rows']:
         raise RuntimeError('handoff acceleration/accepted-command audit failed')
     rows = [r for r in result.trace if r.get('handoff_smoothing', {}).get('advanced')]
@@ -147,6 +261,7 @@ def run_hybrid_episode(cfg, seed=0, model_path=None, preview=False, capture_repl
     checkpoint = require_dinov3_checkpoint(model_path)
     cfg = formal.candidate_config(cfg, int(cfg.task.target_count))
     module = runtime()
+    control_profile = configure_admittance(module, cfg)
     module.TRIAL_SPEC.check_clock(1. / float(cfg.sim.control_hz))
     env = None
     context = None
@@ -194,7 +309,7 @@ def run_hybrid_episode(cfg, seed=0, model_path=None, preview=False, capture_repl
                 result.planner_attempts = 1
             result.initial_object_poses = initial
             result.planner_strategy = 'hybrid_astar_act_trial4_dinov3_frozen'
-            result.control_profile = dict(PROFILE)
+            result.control_profile = control_profile
             result.inference_config = cfg
             result.model_checkpoint = checkpoint
             return result
