@@ -12,6 +12,8 @@ def parser():
     p.add_argument('--acceptance-report',type=Path)
     p.add_argument('--device',choices=['cpu','mps','cuda'],default='cpu')
     p.add_argument('--acknowledge-gpu-training',action='store_true')
+    p.add_argument('--continue-authorized-from',type=Path,
+        help='one explicit pre-update preflight continuation; path to unchanged original bundle')
     p.add_argument('--seed',type=int)
     p.add_argument('--target',type=int,choices=range(1,7))
     return p
@@ -19,6 +21,8 @@ def parser():
 
 def main(argv=None):
     p=parser(); args=p.parse_args(argv)
+    if args.continue_authorized_from is not None and args.mode!='preflight':
+        p.error('--continue-authorized-from is only valid for preflight')
     if args.mode=='inspect':
         from .lifecycle import inspect
         print(json.dumps(inspect(args.bundle),indent=2)); return 0
@@ -32,7 +36,7 @@ def main(argv=None):
         train(args.bundle,args.out,args.acceptance_report,resume=args.mode=='resume')
     elif args.mode=='preflight':
         from .acceptance import preflight
-        preflight(args.bundle,args.out,args.device)
+        preflight(args.bundle,args.out,args.device,continue_from=args.continue_authorized_from)
     else:
         if args.run is None: p.error('evaluate/infer requires --run for checkpoint identity')
         if args.mode=='infer' and (args.seed is None or args.target is None): p.error('infer requires --seed and --target')

@@ -1,4 +1,7 @@
-"""Reconstruct media from stored integration states, never rerun ACT or IK."""
+"""Replay saved states, never rerun ACT or trajectory-command IK.
+
+Scene initialization still performs native reset IK and settling.
+"""
 import gzip
 import json
 from pathlib import Path
@@ -6,6 +9,13 @@ from pathlib import Path
 import numpy as np
 
 from .storage import sha256,write_json
+
+
+def configure_replay_framebuffer(model,size):
+    """Replay-only render capacity; no XML/config/control/physics edits."""
+    width,height=map(int,size)
+    model.vis.global_.offwidth=max(int(model.vis.global_.offwidth),width)
+    model.vis.global_.offheight=max(int(model.vis.global_.offheight),height)
 
 
 def render_episode(folder,guard):
@@ -21,11 +31,13 @@ def render_episode(folder,guard):
     if (folder/'media.json').exists(): raise FileExistsError('media opportunity already recorded')
     config=json.loads((folder/'configuration.json').read_text())
     cfg=Config(config)
-    env=SweepEnv(cfg,seed=result['seed']); env.reset(seed=result['seed'])
-    initial=json.loads((folder/'layout.json').read_text())
-    np.testing.assert_array_equal(np.c_[env.component_positions(),env.component_quats()].astype('<f4'),np.asarray(initial['poses'],dtype='<f4'))
+    env=SweepEnv(cfg,seed=result['seed'])
     path=folder/'replay.mp4'; frames=0; times=[]; forces=[]; errors=[]; physical_rows=0
     try:
+        env.reset(seed=result['seed'])
+        initial=json.loads((folder/'layout.json').read_text())
+        np.testing.assert_array_equal(np.c_[env.component_positions(),env.component_quats()].astype('<f4'),np.asarray(initial['poses'],dtype='<f4'))
+        configure_replay_framebuffer(env.model,(960,640))
         with imageio.get_writer(path,fps=25,codec='libx264',macro_block_size=16) as writer:
             with gzip.open(folder/'physical_trace.jsonl.gz','rt') as stream:
                 pending=None
@@ -49,7 +61,8 @@ def render_episode(folder,guard):
     _curves(folder,times,forces,errors)
     record=dict(file=path.name,sha256=sha256(path),bytes=path.stat().st_size,
         frames=frames,physical_rows=physical_rows,verification=verification,
-        rendering='saved_integration_state_only',policy_reexecuted=False,IK_reexecuted=False)
+        rendering='saved_integration_state_only',policy_reexecuted=False,trajectory_IK_reexecuted=False,
+        scene_initialization_runs_native_reset_IK_and_settling=True)
     write_json(folder/'media.json',record)
     return record
 

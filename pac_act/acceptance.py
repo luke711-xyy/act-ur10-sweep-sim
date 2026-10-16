@@ -8,7 +8,7 @@ from .lifecycle import Collection,cfg_for,experiment_lock,make_guard,require_loc
 from .storage import Checkpoints,RunStore,append_json,write_json
 
 
-def preflight(bundle,out,device='cpu'):
+def preflight(bundle,out,device='cpu',continue_from=None):
     began=time.time()
     # Check before model loading, output creation or any physics/layout claim.
     require_local_slot()
@@ -18,17 +18,27 @@ def preflight(bundle,out,device='cpu'):
     from .hybrid import HybridEpisode
     from .media import render_episode
     frozen=verify_bundle(bundle); out=Path(out).resolve()
-    out.mkdir(parents=True,exist_ok=False)
+    out.mkdir(parents=True,exist_ok=continue_from is not None)
     with experiment_lock(out,local=True):
-        guard=make_guard(out,'mac',started_at=began)
+        continuation=None
+        if continue_from is not None:
+            from .preflight_continuation import continuation_state,verify_replacement,claim_continuation
+            original=verify_replacement(continue_from,frozen)
+            continuation=continuation_state(out,original['identity'])
+        guard=make_guard(out,'mac',original=continuation['budget'] if continuation else None,started_at=began)
         from .identity import watch_bundle
         guard.identity_check=watch_bundle(bundle,frozen); guard.poll()
         torch.manual_seed(42)
         store=RunStore(out); registry=LayoutRegistry(json.loads((Path(bundle)/'exclusions.json').read_text()))
+        if continuation:
+            for row in continuation['rows']: registry.register(row,row['layout_fingerprint'])
+            claim_continuation(out,continuation,frozen['identity'])
         policy=ChunkPolicy(frozen['model'],device); trainer=ChunkPPO(policy,poll=guard.poll)
         counters=dict(sampled_actions=0,used_actions=0,discarded_actions=0,updates=0)
         collection=Collection(bundle,policy,store,registry,guard,counters)
-        checks={}; summaries=[]
+        checks=dict(continuation['checks']) if continuation else {}; summaries=list(continuation['rows']) if continuation else []
+        from .preflight_continuation import pending_comparisons
+        pending={RunStore.key(s) for s in pending_comparisons(summaries)}
         write_json(out/'status.json',dict(state='preflight',training_started=False))
         try:
             # Same new layouts for all three arms. Each arm has its own one-shot
@@ -37,6 +47,7 @@ def preflight(bundle,out,device='cpu'):
                 for index in (0,5):
                     guard.poll()
                     spec=seed_spec('preflight',index,arm)
+                    if RunStore.key(spec) not in pending: continue
                     world=HybridEpisode(cfg_for(bundle,spec['target_count']),policy,spec,store,registry,guard)
                     try:
                         if arm=='old_hybrid' and not world.done:
@@ -134,7 +145,7 @@ def _old_hybrid(world,policy,model_path):
 
 def _audit_saved_Z(out,checks):
     import gzip
-    max_error=0.; act_rows=0; invalid=0
+    max_error=0.; act_rows=0; invalid=0; missing_nominal=0
     for trace in (Path(out)/'episodes').glob('*/physical_trace.jsonl.gz'):
         with gzip.open(trace,'rt') as f:
             for line in f:
@@ -142,7 +153,8 @@ def _audit_saved_Z(out,checks):
                 if row.get('phase') in ('PAC_ACT','ACT_warmup'):
                     act_rows+=1
                     invalid+=row.get('z_owner')!='admittance'
-                    nominal=row.get('z_follow',{}).get('nominal_z')
+                    nominal=row.get('pac_nominal_z_m',row.get('z_follow',{}).get('nominal_z'))
                     if nominal is not None: max_error=max(max_error,abs(row['command'][2]-nominal))
+                    else: missing_nominal+=1
     checks['Z_admittance_only']=act_rows>0 and invalid==0
-    checks['Z_total_2mm_bound']=max_error<=.00200001
+    checks['Z_total_2mm_bound']=act_rows>0 and missing_nominal==0 and max_error<=.00200001

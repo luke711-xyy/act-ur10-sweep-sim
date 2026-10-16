@@ -239,6 +239,8 @@ class HybridEpisode:
         self.measured_count=int(env.collected_mask().sum())
 
     def _save_row(self,row):
+        if row.get('phase') in ('PAC_ACT','ACT_warmup'):
+            row['pac_nominal_z_m']=float(self.context['z_nominal'])
         self.last_trace=copy.deepcopy(row)
         self.trace.append(row)
         force=float(row['normal_force']); error=abs(float(row['tcp'][2])-float(row['command'][2]))
