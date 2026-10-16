@@ -48,6 +48,35 @@ def test_nonfinite_proposal_is_still_rejected_and_rolled_back():
     assert state_hashes(before)==state_hashes(trainer.snapshot())
 
 
+def test_nonfinite_aggregate_KL_after_an_optimizer_step_is_rejected_and_restored():
+    from pac_act.config import DEFAULT
+    from pac_act.ppo import ChunkPPO,UpdateRejected
+    from pac_act.update_audit import state_hashes
+    policy=TinyPolicy();trainer=ChunkPPO(policy,replace(DEFAULT,epochs=1));data=batch(policy)
+    before=trainer.snapshot();exact=trainer.exact_kl;calls=[]
+    def overflow_after_update(data):
+        value=exact(data);calls.append(value)
+        if len(calls)>1:
+            finite=torch.full((4,),1e38)
+            assert torch.isfinite(finite).all()
+            return float(finite.sum())  # Each value finite, aggregate overflows float32.
+        return value
+    trainer.exact_kl=overflow_after_update
+    with pytest.raises(UpdateRejected,match='nonfinite'):trainer.train(data)
+    assert trainer.last_audit['optimizer_steps']==1
+    assert trainer.last_audit['rollback_verified'] is True
+    assert state_hashes(before)==state_hashes(trainer.snapshot())
+
+
+@pytest.mark.parametrize('device',['mps','cuda'])
+def test_fresh_acceptance_is_CPU_only_before_resource_claim_or_model_load(tmp_path,monkeypatch,device):
+    import pac_act.acceptance as module
+    def forbidden():raise AssertionError('must reject device before claiming resources')
+    monkeypatch.setattr(module,'require_local_slot',forbidden)
+    with pytest.raises(ValueError,match='CPU'):module.preflight(tmp_path/'bundle',tmp_path/'out',device,start_index=120)
+    assert not (tmp_path/'out').exists()
+
+
 def test_fresh_preflight_offset_never_falls_back_to_old_or_training_seeds(tmp_path):
     from pac_act.lifecycle import next_spec
     from pac_act.storage import RunStore

@@ -178,6 +178,8 @@ Engineering pass is not a claim that strict success has improved.
 An explicitly authorized new acceptance can select a fresh six-aligned
 preflight substream with `--preflight-start-index 120`. It cannot change the
 training/validation streams or give an existing opportunity another attempt.
+This fresh acceptance and its queue enforce CPU execution before resource
+claims/output creation; no accelerator learner is authorized in this workflow.
 Known prior layout seeds/fingerprints must be in the new bundle exclusions;
 all earlier run directories and bundles stay unchanged. The new 2 h budget
 begins at actual preflight entry (including model loading), not while queued.
@@ -197,6 +199,9 @@ inference lease. It never stops or changes that batch. Set
 running from a portable bundle. Dependency errors, drift, child failure or
 an expired 24 h queue deadline stop the queue without recovery/retry. No path
 in this queue invokes formal training. A passed preflight ends and reports.
+Dependency evidence is revalidated after waiting for a lease and immediately
+before launch. Queue/preflight outputs must be disjoint from each other and
+from both sealed input/dependency trees, including resolved symlink aliases.
 
 Exploration remains independently learned per executed position/component:
 initial XY0.10mm/yaw0.10degree, bounded0.01–0.30mm/degree. These are exploration

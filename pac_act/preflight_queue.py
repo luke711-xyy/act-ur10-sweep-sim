@@ -75,43 +75,51 @@ def dependency_ready(root,*,active_pids):
             raise RuntimeError('dependency retained media is unverified or changed')
     return dict(episodes=120,verified_videos=120,ledger_sha256=sha256(root/'episodes.jsonl'),
         summary_sha256=sha256(root/'summary.json'),metadata_sha256=sha256(root/'metadata.json'),
-        plan_sha256=sha256(plan_path),strict_successes=summary['strict_successes'])
+        status_sha256=sha256(root/'status.json'),plan_sha256=sha256(plan_path),strict_successes=summary['strict_successes'])
 
 
 def run_queue(bundle,after_batch,out,queue,*,start_index=120,device='cpu',poll_seconds=30.):
     bundle,after_batch,out,queue=map(lambda p:Path(p).resolve(),(bundle,after_batch,out,queue))
     if type(start_index) is not int or start_index<6 or start_index%6 or start_index>=1_000_000-5:
         raise ValueError('new preflight needs a fresh six-aligned registered start index')
-    if device not in ('cpu','mps'):raise ValueError('queue cannot launch GPU training')
-    if any(p==after_batch or p.is_relative_to(after_batch) or after_batch.is_relative_to(p) for p in (out,queue)):
-        raise ValueError('preflight/queue output must not overlap the running batch')
+    if device!='cpu':raise ValueError('authorized acceptance queue is CPU-only')
+    def overlap(a,b):return a==b or a.is_relative_to(b) or b.is_relative_to(a)
+    if overlap(out,queue) or any(overlap(p,protected) for p in (out,queue) for protected in (bundle,after_batch)):
+        raise ValueError('preflight/queue destinations must not overlap each other, bundle or running batch')
     if out.exists():raise FileExistsError('preflight output must be new; no automatic resume')
     queue.mkdir(parents=True,exist_ok=False)
-    started=time.time();deadline=started+24*3600
-    protected={p:sha256(p) for p in (bundle/'manifest.json',after_batch/'metadata.json',after_batch/'episode_plan.json')}
-    identity=dict(bundle=str(bundle),after_batch=str(after_batch),out=str(out),start_index=start_index,
-        device=device,queued_at=started,queue_deadline=deadline,waiting_counts_against_preflight_budget=False,
-        preflight_limits=dict(hours=2,opportunities=24,output_gib=5,free_gib=8),formal_training_authorized=False,
-        inference_lock_paths=os.environ.get('PAC_ACT_INFERENCE_LOCKS','').split(os.pathsep),
-        protected_sha256={str(p):h for p,h in protected.items()})
-    write_json(queue/'authorization.json',identity)
     def publish(state,**extra):
         value=dict(state=state,pid=os.getpid(),time=time.time(),training_started=False,**extra)
         write_json(queue/'status.json',value);return value
     try:
+        started=time.time();deadline=started+24*3600
+        protected={p:sha256(p) for p in (bundle/'manifest.json',after_batch/'metadata.json',after_batch/'episode_plan.json')}
+        identity=dict(bundle=str(bundle),after_batch=str(after_batch),out=str(out),start_index=start_index,
+            device=device,queued_at=started,queue_deadline=deadline,waiting_counts_against_preflight_budget=False,
+            preflight_limits=dict(hours=2,opportunities=24,output_gib=5,free_gib=8),formal_training_authorized=False,
+            inference_lock_paths=os.environ.get('PAC_ACT_INFERENCE_LOCKS','').split(os.pathsep),
+            protected_sha256={str(p):h for p,h in protected.items()})
+        write_json(queue/'authorization.json',identity)
         while True:
             if time.time()>=deadline:raise RuntimeError('queue deadline reached; no automatic extension')
             if any(sha256(p)!=h for p,h in protected.items()):raise RuntimeError('queued identity changed')
             active=dependency_pids(after_batch)
+            status=json.loads((after_batch/'status.json').read_text())
+            if status.get('state')=='complete' and not active and not local_slot_available():
+                publish('waiting_for_local_slot');time.sleep(poll_seconds);continue
             ready=dependency_ready(after_batch,active_pids=active)
-            if ready is not None:break
-            publish('waiting_for_120_batch',dependency_pids=active)
-            time.sleep(poll_seconds)
+            if ready is None:
+                publish('waiting_for_120_batch',dependency_pids=active);time.sleep(poll_seconds);continue
+            # Every wait comes back through fresh status/results/media/process
+            # validation. Never reuse a certificate from before a slot wait.
+            if dependency_pids(after_batch) or not local_slot_available():
+                publish('waiting_for_clear_handoff');time.sleep(poll_seconds);continue
+            break
         write_json(queue/'dependency_verified.json',ready)
-        while not local_slot_available():
-            if time.time()>=deadline:raise RuntimeError('queue deadline reached waiting for local inference slot')
-            publish('waiting_for_local_slot');time.sleep(poll_seconds)
         if any(sha256(p)!=h for p,h in protected.items()):raise RuntimeError('queued identity changed before launch')
+        stable={'episodes.jsonl':'ledger_sha256','summary.json':'summary_sha256','status.json':'status_sha256'}
+        if dependency_pids(after_batch) or any(sha256(after_batch/name)!=ready[key] for name,key in stable.items()):
+            raise RuntimeError('dependency changed immediately before preflight; no automatic launch')
         command=[sys.executable,'-B',str(bundle/'source/scripts/train_pac_act.py'),'--mode','preflight',
             '--bundle',str(bundle),'--out',str(out),'--device',device,'--preflight-start-index',str(start_index)]
         with (queue/'preflight_started.json').open('x') as stream:
@@ -126,7 +134,9 @@ def run_queue(bundle,after_batch,out,queue,*,start_index=120,device='cpu',poll_s
                 or report.get('GPU_training_started') is not False):raise RuntimeError('preflight did not pass engineering checks')
         return publish('preflight_complete',engineering_passed=True,report=str(out/'acceptance.json'))
     except BaseException as error:
-        from .update_audit import write_failure_reports
-        write_failure_reports(error,{queue/'status.json':dict(state='needs_attention',error=repr(error),
-            automatic_retry=False,training_started=False,pid=os.getpid())})
+        try:
+            write_json(queue/'status.json',dict(state='needs_attention',error=f'{type(error).__name__}: {error}',
+                original_exception_repr=repr(error),
+                automatic_retry=False,training_started=False,pid=os.getpid()))
+        except BaseException as reporting:error.add_note('queue failure report: '+repr(reporting))
         raise

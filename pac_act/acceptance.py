@@ -15,6 +15,7 @@ def preflight(bundle,out,device='cpu',continue_from=None,*,start_index=0):
     from .identity import RANGES
     if type(start_index) is not int or start_index<0 or start_index%6 or start_index+5>=RANGES['preflight'][1]-RANGES['preflight'][0]:
         raise ValueError('preflight start index must be six-aligned within its reserved stream')
+    if start_index and device!='cpu':raise ValueError('fresh local acceptance is CPU-only')
     if continue_from is not None and start_index:raise ValueError('legacy continuation cannot change layout stream')
     # Check before model loading, output creation or any physics/layout claim.
     require_local_slot()

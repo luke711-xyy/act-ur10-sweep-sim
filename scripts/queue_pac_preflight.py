@@ -11,7 +11,7 @@ def main():
     parser.add_argument('--out',type=Path,required=True)
     parser.add_argument('--queue-state',type=Path,required=True)
     parser.add_argument('--preflight-start-index',type=int,required=True)
-    parser.add_argument('--device',choices=('cpu','mps'),default='cpu')
+    parser.add_argument('--device',choices=('cpu',),default='cpu')
     args=parser.parse_args()
     source=args.bundle.resolve()/'source'
     sys.path.insert(0,str(source))

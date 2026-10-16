@@ -175,7 +175,9 @@ class ChunkPPO(PPO):
             old_means.append(data['old_means'].cpu());new_means.append(proposed.cpu())
             old_logs.append(old.log_std.cpu())
             finite=bool(torch.isfinite(value).all())
-            if finite:total+=float(value.sum())
+            if finite:
+                total+=float(value.sum())
+                finite=bool(np.isfinite(total))
             # Capture the offending microbatch BEFORE rejecting it. This is
             # partial evidence, not a successful whole-rollout KL pass.
             before=torch.cat(old_means);after=torch.cat(new_means);count=len(after)
@@ -208,7 +210,9 @@ class ChunkPPO(PPO):
         self.last_distribution_audit=None;stage='initial_distribution'
         try:
             self.poll()
-            self.exact_kl(batch);before_dist=copy.deepcopy(self.last_distribution_audit)
+            initial_kl=self.exact_kl(batch)
+            if not np.isfinite(initial_kl):raise UpdateRejected('nonfinite aggregate rollout KL')
+            before_dist=copy.deepcopy(self.last_distribution_audit)
             for epoch in range(self.config.epochs):
                 indices=torch.randperm(len(batch))
                 for start in range(0,len(batch),self.config.batch):
@@ -216,6 +220,7 @@ class ChunkPPO(PPO):
                     records.append(self.update_minibatch(batch,indices[start:start+self.config.batch]))
                 completed_epochs=epoch+1;stage=f'epoch_{epoch+1}_whole_rollout_KL'
                 kl=self.exact_kl(batch)
+                if not np.isfinite(kl):raise UpdateRejected('nonfinite aggregate rollout KL')
                 # Finite KL is a diagnostic and differentiable loss term, not
                 # an early-stop/rejection gate. Nonfinite values still raise.
             self._n_updates+=1
