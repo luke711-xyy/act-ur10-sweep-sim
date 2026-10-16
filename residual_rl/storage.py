@@ -42,8 +42,16 @@ class BoundedCheckpointWriter:
     def __init__(self,stream,*,max_bytes,deadline,check):
         self.stream=stream; self.max_bytes=max_bytes; self.deadline=deadline
         self.check=check; self.written=0; self.next_sample=0; self.remaining=0
+        self.failure=None
 
     def write(self,value):
+        if self.failure is not None: raise self.failure
+        try: return self._write(value)
+        except BaseException as error:
+            self.failure=error
+            raise
+
+    def _write(self,value):
         if time.monotonic()>=self.deadline: raise RuntimeError('checkpoint deadline exhausted')
         if self.written+len(value)>self.max_bytes: raise RuntimeError('checkpoint byte allowance exhausted')
         view=memoryview(value)
@@ -53,7 +61,9 @@ class BoundedCheckpointWriter:
             if self.written>=self.next_sample:
                 self.remaining,_=self.check(); self.next_sample=self.written+2**20
             if len(block)>self.remaining: raise RuntimeError('checkpoint resource headroom exhausted')
-            count=self.stream.write(block); self.written+=count; self.remaining-=count
+            count=self.stream.write(block)
+            if count!=len(block): raise OSError('short checkpoint write')
+            self.written+=count; self.remaining-=count
         return len(value)
 
     def flush(self): self.stream.flush()
@@ -63,11 +73,94 @@ class BoundedCheckpointWriter:
     def tell(self): return self.written
 
 
+def save_checkpoint_payload(payload,sink):
+    """Keep the original resource/IO exception if ZIP cleanup also fails."""
+    import torch
+    try: torch.save(payload,sink)
+    except BaseException:
+        if sink.failure is not None: raise sink.failure
+        raise
+
+
+def pack_replay(state):
+    """Store large numeric arrays as streamed tensor records, not data.pkl bytes.
+
+    The NumPy snapshot already owns detached writable arrays. Sharing them with
+    CPU tensors does not change replay or add another full-size copy.
+    """
+    import torch
+    value=dict(state,episodes=[dict(e) for e in state['episodes']])
+    for episode in value['episodes']:
+        for key in ('actor_obs','critic_obs','actions','rewards','terminated','learn_mask'):
+            episode[key]=torch.from_numpy(episode[key])
+    return dict(encoding='tensor_records_v1',state=value)
+
+
+def replay_sampling_state(replay):
+    import copy
+    from .config import DEFAULT
+    return dict(schema_version=2,action_contract=DEFAULT.action_contract,
+        reward_contract=DEFAULT.reward_contract,capacity=replay.capacity,
+        seen_ids=sorted(replay._seen_ids),dimensions=replay._dimensions,
+        goal_cursor=replay._goal_cursor,rng_state=copy.deepcopy(replay._rng.bit_generator.state))
+
+
+def reference_replay(root,replay):
+    """Reference already-fsynced per-episode numeric blocks with exact hashes."""
+    root=Path(root).resolve()
+    rows={r['episode_id']:r for r in RunStore(root).rows()}
+    records=[]
+    for episode in replay._episodes:
+        row=rows[episode.episode_id];ref=row['experience']
+        path=(root/'episodes'/episode.episode_id/'experience.npz').resolve()
+        if (Path(ref['path']).resolve()!=path or not path.is_relative_to(root)
+                or path.stat().st_size!=ref['bytes'] or sha256(path)!=ref['sha256']):
+            raise ValueError('durable replay evidence mismatch')
+        records.append(dict(episode_id=episode.episode_id,target_count=episode.target_count,
+            path=str(path.relative_to(root)),bytes=ref['bytes'],sha256=ref['sha256']))
+    return dict(encoding='durable_records_v1',state=replay_sampling_state(replay),records=records)
+
+
+def unpack_replay(payload,*,root=None):
+    if payload.get('encoding')=='durable_records_v1':
+        if root is None:raise ValueError('durable replay needs its original run directory')
+        root=Path(root).resolve();state=dict(payload['state'],episodes=[])
+        for record in payload['records']:
+            path=(root/record['path']).resolve()
+            if (not path.is_relative_to(root) or path.stat().st_size!=record['bytes']
+                    or sha256(path)!=record['sha256']):
+                raise ValueError('durable replay evidence mismatch')
+            with np.load(path,allow_pickle=False) as arrays:
+                state['episodes'].append(dict(episode_id=record['episode_id'],
+                    target_count=record['target_count'],**{k:arrays[k] for k in
+                        ('actor_obs','critic_obs','actions','rewards','terminated','learn_mask')}))
+        return state
+    if payload.get('encoding')!='tensor_records_v1': return payload
+    import torch
+    state=payload['state'];value=dict(state,episodes=[dict(e) for e in state['episodes']])
+    for episode in value['episodes']:
+        for key in ('actor_obs','critic_obs','actions','rewards','terminated','learn_mask'):
+            tensor=episode[key]
+            if not isinstance(tensor,torch.Tensor) or tensor.device.type!='cpu':
+                raise ValueError('replay checkpoint must contain CPU numeric records')
+            episode[key]=tensor.detach().numpy()
+    return value
+
+
 def checkpoint_evidence(path):
     path=Path(path)
     evidence=json.loads(path.with_suffix('.json').read_text())
     if path.stat().st_size!=evidence['bytes'] or sha256(path)!=evidence['sha256']:
         raise ValueError('checkpoint evidence does not match complete file')
+    if evidence.get('kind')=='reference_full':
+        root=path.resolve().parent.parent
+        if Path(evidence['replay_root']).resolve()!=root:
+            raise ValueError('checkpoint replay root evidence mismatch')
+        for record in evidence['replay_dependencies']:
+            block=(root/record['path']).resolve()
+            if (not block.is_relative_to(root) or block.stat().st_size!=record['bytes']
+                    or sha256(block)!=record['sha256']):
+                raise ValueError('checkpoint replay dependency evidence mismatch')
     return dict(evidence,checkpoint=str(path))
 
 
@@ -193,9 +286,9 @@ class RunStore:
 
 class TraceWriter:
     """Append numerical physical states, never RGB or live renderer handles."""
-    def __init__(self,path):
+    def __init__(self,path,*,append=False):
         self.path=Path(path); self.path.parent.mkdir(parents=True,exist_ok=True)
-        self.stream=gzip.open(self.path,'xt',encoding='utf-8')
+        self.stream=gzip.open(self.path,'at' if append else 'xt',encoding='utf-8')
         self.rows=0
 
     def append(self,row):

@@ -15,7 +15,7 @@ import numpy as np
 from .bridge import (RecentRows, closure_value, contact_mask, instrument_physics,
                      streaming_native)
 from .config import DEFAULT
-from .control import ResidualGovernor,ResidualReference
+from .relative_action import RelativeActionGenerator,continuous_probe_action
 from .features import FeatureMailbox,observed_scheduler
 from .observations import actor_observation,critic_observation
 from .rewards import ContactReward,classify_failure
@@ -140,7 +140,7 @@ class Collector:
         self.builder=ACTObservationBuilder(cfg,environment_state_dim=1)
         self.reward=ContactReward(spec['target_count']); self.context=None
         self.governor=None; self.scheduler=None
-        self.control=ResidualGovernor([[cfg.workspace.x_min,cfg.workspace.x_max],
+        self.control=RelativeActionGenerator([[cfg.workspace.x_min,cfg.workspace.x_max],
                                       [cfg.workspace.y_min,cfg.workspace.y_max]])
         from .shadow import ZeroResidualShadow
         self.shadow=(ZeroResidualShadow(self.control.bounds)
@@ -157,9 +157,12 @@ class Collector:
         self.z_error_sum=0.; self.z_error_max=0.; self.active_frames=0
         self.probe_modes=set(); self.limit_errors=[]; self.first_physics_time=None
         self.accepted_velocity=np.zeros(3)
+        self.accepted_offset=np.zeros(3)
+        self.accepted_filter=np.zeros(3)
         self.residual_norm_sum=0.; self.residual_samples=0; self.nonzero_residual_samples=0
         self.probe_stage=None; self.previous_command=None; self.command_before=None
         self.command_started_at=None; self.tcp_before=None; self.tcp_yaw_before=None
+        self.act_displacement=np.zeros(3)
 
     def is_active(self):
         return (self.governor is not None and self.governor.started_at is not None
@@ -173,7 +176,9 @@ class Collector:
             target_count=self.spec['target_count'],elapsed=float(self.env.time)-self.episode_started_at,
             feature_age=view['age'],chunk_index=view['index'],feature_available=view['available'],
             active=self.is_active(),nominal_velocity=self.nominal_velocity,
-            previous_action=self.previous_action,residual_velocity=self.control.velocity)
+            previous_action=self.previous_action,residual_velocity=self.control.velocity,
+            residual_offset=self.control.offset,act_displacement=self.act_displacement,
+            filtered_action=self.control.filtered_action)
         c=self.context or {}; timer=c.get('collection_timer'); loop=c.get('admittance')
         limiter=c.get('z_limiter'); gate=c.get('force_gate')
         first=getattr(timer,'first_entry_time',None)
@@ -206,14 +211,8 @@ class Collector:
         if not self.active: action=np.zeros(3)
         if self.active and self.mode=='probe':
             elapsed=self.env.time-self.governor.started_at-2.
-            if elapsed<.4:
-                action=np.array([.05,0.,0.]); label='small_start'
-            elif elapsed<1.:
-                action=-self.nominal_velocity/np.array([.16,.16,.7]); label='brake'
-            elif elapsed<2.5:
-                action=-2*self.nominal_velocity/np.array([.16,.16,.7]); label='reverse'
-            else: action=np.zeros(3); label='release'
-            action=np.clip(action,-1.,1.); self.probe_modes.add(label)
+            action=continuous_probe_action(max(0.,elapsed));label='continuous_micro_adjust'
+            self.probe_modes.add(label)
             self.probe_stage=label
         elif self.mode in {'native','zero'}: action=np.zeros(3)
         self.raw_action=action.copy(); self.actions.append(action.copy()); self.rewards.append(0.)
@@ -244,6 +243,8 @@ class Collector:
         self.control_steps+=1; self.steps_in_frame+=1
         if self.governor is not None: self.ACT_control_steps+=1
         self.accepted_velocity=self.control.velocity.copy()
+        self.accepted_offset=self.control.offset.copy()
+        self.accepted_filter=self.control.filtered_action.copy()
         if self.active:
             norm=float(np.linalg.norm(self.control.velocity[:2]))
             self.residual_norm_sum+=norm; self.residual_samples+=1
@@ -253,7 +254,8 @@ class Collector:
         applied=np.array([command.x,command.y,command.z,command.yaw],dtype=np.float32)
         audit=self.control.last_audit.copy() if self.active and self.mode!='native' and self.control.last_audit else None
         if audit is not None:
-            audit['filter_accepted']=bool(np.array_equal(applied,audit['applied']))
+            audit['applied']=applied.copy()
+            audit['filter_accepted']=True
             audit['filter_after_accepted']=self.accepted_velocity.copy()
         self.command_digest.update(applied.tobytes()); self.z_digest.update(applied[2:3].tobytes())
         force=float(env.normal_force()); error=abs(float(env.tcp()[2])-float(command.z))
@@ -271,6 +273,7 @@ class Collector:
             ACT_feature_sources=getattr(self.scheduler,'feature_components',[]),
             zero_shadow_audit=self.shadow.last_audit if self.shadow is not None else None,
             residual_velocity=self.control.velocity.copy(),
+            residual_offset=self.control.offset.copy(),action_contract=DEFAULT.action_contract,
             replay_state=dict(spec=int(mujoco.mjtState.mjSTATE_INTEGRATION),values=values),
             control_audit=audit))
         self.previous_command=applied.copy()
@@ -285,6 +288,8 @@ class Collector:
                 self.actor_rows.pop(); self.critic_rows.pop()
                 self.previous_action=self.actions[-1].copy() if self.actions else np.zeros(3)
                 self.control.velocity=self.accepted_velocity.copy()
+                self.control.offset=self.accepted_offset.copy()
+                self.control.filtered_action=self.accepted_filter.copy()
         else:
             terminal=self.reward.finish(outcome)
         if not self.actions: return None,terminal
@@ -335,17 +340,30 @@ def install_driver(formal,module,cfg,context,collector,cache):
     ns['build_act_policy']=lambda cfg,pretrained_path:cache.build(base_builder,cfg,pretrained_path)
     ns['ActionChunkScheduler']=observed_scheduler(base_scheduler,collector.mailbox,
         on_created=lambda scheduler:setattr(collector,'scheduler',scheduler))
-    composition=ResidualReference(collector.control)
+    generated_target=None
     def reference(start,target,substep,substeps,dt,max_xy_speed,max_z_speed,max_yaw_rate,
                   contact_latched,admittance_z=None):
+        nonlocal generated_target
         active=collector.is_active()
         if int(substep)==1:
+            scheduler=getattr(collector,'scheduler',None)
+            holding=(scheduler is not None and scheduler.observation_chunk is None)
+            actual_xy=np.asarray(collector.env.tcp(),dtype=float)[:2].copy()
+            actual_yaw=float(collector.env.ee.tcp_yaw())
+            collector.act_displacement=np.r_[np.asarray(target)[:2]-actual_xy,
+                np.arctan2(np.sin(float(target[3])-actual_yaw),np.cos(float(target[3])-actual_yaw))]
             endpoint=native(start,target,substeps,substeps,dt,max_xy_speed,max_z_speed,
                 max_yaw_rate,contact_latched,admittance_z)
             delta=endpoint-np.asarray(start)
             collector.begin(np.r_[delta[:2],np.arctan2(np.sin(delta[3]),np.cos(delta[3]))]/(dt*substeps))
-            composition.begin_frame(start)
+            generated_target=collector.control.generate(actual_xy,target,
+                np.zeros(3) if collector.mode=='native' else collector.raw_action,
+                dt=dt*substeps,active=active,allow_motion=not holding)
+            collector.control.last_audit['frame_started_at']=float(collector.env.time)
+            if collector.mode=='native' and generated_target.tobytes()!=np.asarray(target).tobytes():
+                raise RuntimeError('zero relative target changed native ACT target')
             if getattr(collector,'shadow',None) is not None: collector.shadow.begin_frame(start)
+        collector.current_phase='ACT_residual' if active else 'ACT_handoff'
         if not active or collector.mode=='native':
             actual=old_reference(start,target,substep,substeps,dt,max_xy_speed,max_z_speed,
                                  max_yaw_rate,contact_latched,admittance_z)
@@ -354,17 +372,19 @@ def install_driver(formal,module,cfg,context,collector,cache):
                             contact_latched,admittance_z) if active else actual)
                 collector.shadow.check(actual,raw,dt=dt,active=active)
             return actual
-        raw=native(start,target,substep,substeps,dt,max_xy_speed,max_z_speed,max_yaw_rate,
-                   contact_latched,admittance_z)
-        result=composition.step(raw,collector.raw_action,dt=dt,active=True)
+        result=old_reference(start,generated_target,substep,substeps,dt,max_xy_speed,max_z_speed,max_yaw_rate,
+                             contact_latched,admittance_z)
+        collector.control.last_audit.update(execution_start=np.asarray(start).copy(),
+            substep=int(substep),substeps=int(substeps),control_dt=float(dt),
+            admittance_z=float(admittance_z),contact_latched=bool(contact_latched),
+            control_reference=np.asarray(result).copy(),
+            residual_elapsed=max(0.,float(collector.env.time)-float(governor.started_at)-2.-(int(substep)-1)*float(dt)))
         collector.current_phase='ACT_residual' if active else 'ACT_handoff'
         return result
     def record(row,env):
-        if collector.is_active() and collector.mode!='native':
-            # Genuine applied row, original Z acknowledgement, no falsified
-            # native-command audit after residual begins owning XY/yaw.
-            base_record(row,env)
-        else: old_record(row,env)
+        # The unmodified native proposer also runs after the 2s handoff. Keep
+        # its genuine physical clock/acknowledgement chain for generated targets.
+        old_record(row,env)
     ns.update(_policy_reference_substep=reference,_trial_record=record)
     return adapted
 
@@ -432,7 +452,7 @@ class HybridRuntime:
                             else context.get('terminal_reason','no_handoff'))
                 else: reason='no_plan'
         except BudgetStop as stop:
-            if str(stop)=='stop_collection' and spec['phase']=='train' and collector is not None:
+            if str(stop) in {'stop_collection','stop_step_budget'} and spec['phase']=='train' and collector is not None:
                 outcome='budget_truncated'; reason=str(stop)
             else: raise
         except Exception as failure:
@@ -484,7 +504,7 @@ class HybridRuntime:
             wrist_force_is_not_table_only_force=True,metrics_rate_hz=100,
             actor_dim=episode.actor_obs.shape[1] if episode is not None else None,
             critic_dim=episode.critic_obs.shape[1] if episode is not None else None,
-            layout_fingerprint=fingerprint,configuration_frozen=True,
+            layout_fingerprint=fingerprint,configuration_frozen=True,action_contract=DEFAULT.action_contract,
             accepted_ACT_chunks=(collector.context or {}).get('accepted_chunks',0))
         row=self.store.commit_episode(row,episode,self.guard)
         if identity()!=self.frozen: raise RuntimeError('frozen inputs drifted during rollout')

@@ -41,9 +41,9 @@ def test_missing_or_bad_feature_binding_fails_closed():
 def test_actor_boundary_rejects_privileged_reward_and_has_explicit_missing_features():
     kwargs=dict(robot_state=np.zeros(36),feature=np.ones(512),target_count=3,
         elapsed=4.,feature_age=0.,chunk_index=0,feature_available=False,active=False,
-        nominal_velocity=np.zeros(3),previous_action=np.zeros(3),residual_velocity=np.zeros(3))
+        nominal_velocity=np.zeros(3),previous_action=np.zeros(3),residual_velocity=np.zeros(3),residual_offset=np.zeros(3))
     obs=call('observations','actor_observation',**kwargs)
-    assert obs.shape==(563,) and not obs[36:548].any()
+    assert obs.shape==(572,) and not obs[36:548].any()
     for forbidden in ('reward','collected','object_positions','seen'):
         with pytest.raises(TypeError): call('observations','actor_observation',**kwargs,**{forbidden:1})
 

@@ -25,8 +25,8 @@ def test_production_reference_composition_retains_zero_and_nonzero_route_behavio
     native_before=raw.copy()
     raw2=raw+np.array([.0008,0.,.000001,.0035],np.float32)
     output2=composer.step(raw2,np.array([-1.,0.,-1.]),dt=.01,active=True)
-    assert output2[0]==pytest.approx(float(output[0])+.00078,abs=1e-9)
-    assert output2[3]==pytest.approx(float(output[3])+.00345,abs=2e-8)
+    assert output2[0]==pytest.approx(float(output[0])+.00075,abs=1e-9)
+    assert output2[3]==pytest.approx(float(output[3])+.0035-np.pi/6000,abs=2e-8)
     assert output2[2]==raw2[2] and np.array_equal(composer.control.last_audit['native_before'],native_before)
 
 

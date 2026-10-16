@@ -1,5 +1,35 @@
 # Hybrid ACT + recurrent residual SAC pilot
 
+**Latest training authorization:** [long training contract](../docs/residual_long_training_20261016.md).
+Success/failure terminal reward0; contact shaping and safety-60 retained.
+New training-only entry: `scripts/train_residual_long.py` (default inspect).
+72h/1M effective RL steps,50K full-checkpoint milestones,20GiB output,8GiB disk
+reserve. No new preflight or six-layout validation. Older execution boundaries
+below describe historical runs and do not override this explicit new request.
+
+**Latest contract (2026-10-16): relative XY B/80%, yaw correction +/-45 degrees.**
+Use [ACT-conditioned relative targets](../docs/residual_relative_action.md).
+At 25Hz, XY correction norm <=80% of the displacement from measured TCP XY to
+the accepted ACT target. Direct square-to-disk generation, not post-clipping;
+original native 100Hz speed/workspace/wrist/Z protections remain unchanged.
+The user authorized implementation/tests and ONE new zero/continuous target1
+pair with videos/curves/IK evidence. NO training, resume or GitHub push.
+The fixed-5mm/3-degree helpers in `control.py` are legacy characterization only;
+their descriptions below are historical, not the current execution interface.
+
+The authorized new target1 pair is complete (seed3158000): both arms retained
+exactly one part, with no IK exception. The zero shadow matched all1758 native
+ACT controls byte-for-byte. The continuous arm exercised390 changed 25Hz targets;
+the saved-trace audit checked all1563 active100Hz controls. No learner initialized,
+training/update counts remain0. Evidence:
+`exports/residual_relative80_preflight_20261016_115913/videos/edit/`
+(under the user's zhe workspace, not this Git checkout).
+
+Current residual Actor input is572 dimensions; current action contract is
+`relative_xy80_yaw45_v1`. Old fixed-pose/velocity snapshots are rejected. The
+following pilot/pose sections retain historical design context; they do not
+override the current relative-action specification or authorize new execution.
+
 This is a new isolated runner, not a replacement of historical evaluation code.
 `docs/residual_rl_pilot.md` is the approved implementation contract. Importing
 the package or running the default command does not load ACT or start physics.
@@ -79,15 +109,14 @@ an occupied manual inference lease fails without stopping the user's task.
 ## Control, observations, and learning
 
 The native Hybrid prefix and two-second handoff are reused through source-checked
-process-local adapters. After that window the residual owns XY/yaw velocity only.
+process-local adapters. After that window the residual requests bounded XY/yaw pose offsets only.
 Zero residual preserves the exact original float32 command path; Z loop state is
-not reset. Residual slew is separate from native ACT acceleration. Per-control
-audit records contain raw action, desired and filtered residual, acceleration,
-filter state before/after acceptance, unmodified native reference, separately
-identified composition reference, actual prior/applied commands and physical
+not reset. Offset rate limits are separate from native ACT acceleration. Per-control
+audit records contain raw action, desired/applied offset, offset rate and prior
+state, unmodified native reference, actual prior/applied commands and physical
 timestamps, nominal velocity, probe stage and measured TCP pose/yaw. The probe
-auditor reconstructs XY/yaw command speed, residual slew/integration and clipping,
-and requires observed nonzero start, braking and reversal. It separately reports
+auditor reconstructs pose offset, XY/yaw command speed, rate and native progress,
+and requires actual small-offset motion, hold and return. It separately reports
 TCP motion; stage labels and low wrist force cannot establish continuous contact.
 The Actor receives sensor state, ACT action
 context, remaining hard-budget time and detached frozen action-head input tokens.
@@ -142,8 +171,26 @@ control/filter state in its observations. Whole-prefix burn-in reconstructs
 hidden states with current weights; learning is masked outside residual execution.
 The actor and independent twin critics are CPU GRU128 networks. Frozen ACT stays
 on MPS, is never placed in an optimizer, and is cached across episodes. Updates
-occur only between episodes, at one update/25 new residual decisions after
-256 valid steps AND representation of all six goals. No old trajectory imports.
+occur only between episodes. The 2026-10-16 stability revision requires 5,000
+learnable steps, two sample-bearing complete episodes and 256 learnable steps
+per goal. Warmup earns no update debt. Thereafter 25 new valid steps permit one
+Critic update, capped at10/episode, with excess permissions discarded. The first
+100 Critic updates freeze the Actor; afterwards one Actor update occurs every
+five Critic updates (max2/episode). Actor lr=3e-5, Critic lr=3e-4. No old
+trajectory imports. See `docs/residual_policy_stability.md` for exact guards.
+
+The Actor alone has a coefficient1 zero-request prior; environmental rewards
+are unchanged. A balanced fixed384-state real-history probe bank plus the new
+episode checks the entire between-episode round against a single reference:
+mean KL<=.01, deterministic requested XY pose change<=0.15625mm,
+yaw pose change<=0.107143degrees, and <=1%
+near-saturated deterministic or fixed-noise requests. Failed rounds restore
+Actor/Adam/counter/RNG and latch a stop, never an automatic zero-residual fallback.
+Learning checkpoint schema3 records independent optimizer counts, the guard
+contract and compact probe descriptors. Old schema1/schema2 learner checkpoints are
+rejected rather than silently interpreted under different settings. Inference
+does not need probe histories; subsequent learning must resolve their exact
+episode identities from replay or fail closed.
 
 ## Budgets, checkpointing and outcomes
 
@@ -212,3 +259,29 @@ wrist force, Z error, low-wrist-force contact proxy and residual intervention
 separate. Low wrist force is NOT proof of continuous table contact. The uncapped
 reward can prefer avoiding extra contacts over some successful recovery routes;
 six validation layouts cannot establish statistical improvement or convergence.
+# Historical fixed-pose interface — superseded by B/80% above
+
+At that earlier revision, only implementation/tests were authorized.
+Its action contract was `bounded_pose_xy5mm_yaw3deg_v1`, superseding velocity
+actions, and has now itself been replaced by `relative_xy80_yaw45_v1`.
+
+SAC requests a current absolute correction around the causal native ACT
+reference: radial XY <=5 mm, yaw +/-3 degrees, never Z. Requests are not summed
+over time. Offset updates use a 0.2 s response and <=5 mm/s / 3 deg/s rates;
+native XY motion retains >=80% forward progress inside a 10-degree cone, still
+bounded by 80 mm/s. Native idle freezes displacement rather than snapping back.
+Incompatible pose/rate/workspace constraints stop with diagnostics, not fallback.
+
+The isolated adapter removes its own applied offset from the reference at query
+submission and frame start, preventing corrected anchors from accumulating the
+same shift again. Original ACT observations, 5/25/100 Hz timing, temporal
+ensembling, Hybrid handoff and wrist-only Z admittance stay unchanged. The 5 mm
+bound is relative to the current causal native ACT reference, not a separate
+counterfactual zero-residual episode observing different images.
+
+Actor dimension is now566, adding applied pose offset separately from its rate.
+Replay schema2 and learner schema3 bind the action contract; old velocity-space
+snapshots are rejected. Policy-change checks now use metres/radians, preserving
+the prior fractional guard thresholds. Rewards/update cadence are unchanged.
+That revision's probes were small_offset / hold_offset / return_offset, not
+braking or reversal. See [the historical design](../docs/residual_pose_offset.md).

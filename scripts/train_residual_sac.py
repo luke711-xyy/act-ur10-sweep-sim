@@ -13,7 +13,7 @@ PROJECT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(PROJECT))
 
 
-def supervise(process,root,started_at):
+def supervise(process,root,started_at,*,attempt_token=None):
     """A wall watchdog also covers a stuck resource monitor or evidence write."""
     from residual_rl.config import DEFAULT
     from residual_rl.safety import worker_stop_signals
@@ -31,7 +31,7 @@ def supervise(process,root,started_at):
     signal.setitimer(signal.ITIMER_REAL,max(.001,started_at+DEFAULT.max_wall_seconds-began))
     try:
         with worker_stop_signals() as parent_request:
-            return _supervise(process,root,started_at,parent_request=parent_request)
+            return _supervise(process,root,started_at,parent_request=parent_request,attempt_token=attempt_token)
     except BaseException as error:
         # Also cover failure while writing a stop request or sending its signal.
         forced=process.poll() is None
@@ -40,7 +40,10 @@ def supervise(process,root,started_at):
             except ProcessLookupError as gone:
                 error.add_note(f'owned worker group already exited: {gone}')
             process.wait(timeout=5.)
-        if not (root/'supervisor_shutdown.json').exists():
+        previous_shutdown={}
+        try:previous_shutdown=json.loads((root/'supervisor_shutdown.json').read_text())
+        except (OSError,ValueError):pass
+        if not previous_shutdown or (attempt_token is not None and previous_shutdown.get('attempt_token')!=attempt_token):
             evidence,rejected=previous_checkpoint(root)
             try: initialized=json.loads((root/'checkpoint_state.json').read_text())['initialized']
             except (OSError,ValueError,KeyError,TypeError): initialized=None
@@ -48,10 +51,12 @@ def supervise(process,root,started_at):
                 checkpoint=evidence['checkpoint'] if evidence else None,evidence=evidence,
                 error=f'supervisor cleanup: {type(error).__name__}: {error}',
                 learner_initialized=initialized,rejected_checkpoints=rejected,no_automatic_resume=True)
+            if attempt_token is not None:save['attempt_token']=attempt_token
             write_json(root/'save_result.json',save)
             result=dict(state='supervisor_stopped',reason='supervisor_exception',forced=forced,
                 worker_returncode=process.returncode,worker_acknowledged=False,save=save,
                 monitor_error=f'{type(error).__name__}: {error}',complete=False,no_automatic_resume=True)
+            if attempt_token is not None:result['attempt_token']=attempt_token
             write_json(root/'supervisor_shutdown.json',result)
             write_json(root/'status.json',result)
         raise
@@ -62,7 +67,7 @@ def supervise(process,root,started_at):
             signal.setitimer(signal.ITIMER_REAL,max(.001,previous_timer[0]-(time.monotonic()-began)),previous_timer[1])
 
 
-def _supervise(process,root,started_at,*,parent_request=None):
+def _supervise(process,root,started_at,*,parent_request=None,attempt_token=None):
     """Own only the worker session created below; reserve cleanup within hard caps."""
     from residual_rl.config import DEFAULT
     from residual_rl.safety import BudgetGuard,STOP_RESERVE_SECONDS,resources
@@ -109,6 +114,8 @@ def _supervise(process,root,started_at,*,parent_request=None):
     acknowledged=False; failure=None
     try:
         save=json.loads((root/'save_result.json').read_text())
+        if attempt_token is not None and save.get('attempt_token')!=attempt_token:
+            raise ValueError('shutdown acknowledgement belongs to a previous attempt')
         if save['status'] in ('succeeded','previous_reused'):
             if checkpoint_evidence(save['checkpoint'])!=save['evidence']:
                 raise ValueError('worker save acknowledgement evidence mismatch')
@@ -125,10 +132,12 @@ def _supervise(process,root,started_at,*,parent_request=None):
             checkpoint=evidence['checkpoint'] if evidence else None,evidence=evidence,
             error='worker did not acknowledge shutdown save: '+failure,
             learner_initialized=initialized,rejected_checkpoints=rejected,no_automatic_resume=True)
+        if attempt_token is not None:save['attempt_token']=attempt_token
         write_json(root/'save_result.json',save)
     result=dict(state='supervisor_stopped' if reason else 'worker_exited',reason=reason,
         forced=forced,worker_returncode=process.returncode,worker_acknowledged=acknowledged,
         save=save,monitor_error=monitor_error,no_automatic_resume=True)
+    if attempt_token is not None:result['attempt_token']=attempt_token
     write_json(root/'supervisor_shutdown.json',result)
     if reason or not acknowledged:
         write_json(root/'status.json',dict(result,complete=False))

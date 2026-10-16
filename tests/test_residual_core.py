@@ -59,12 +59,25 @@ def test_simultaneous_contacts_are_identity_order_independent():
         assert event['reward'] == 0 and event['quota_events'] == 2 and event['excess_events'] == 1
 
 
-@pytest.mark.parametrize('outcome,expected',[('success',60),('failure',-20),('safety',-60)])
+@pytest.mark.parametrize('outcome,expected',[('success',0),('failure',0),('safety',-60)])
 def test_terminal_is_once_and_mutually_exclusive(outcome,expected):
     reward=construct('rewards','ContactReward',1)
     assert reward.finish(outcome) == expected
     with pytest.raises(RuntimeError): reward.finish('failure')
     with pytest.raises(RuntimeError): reward.observe(np.zeros(6,bool),.01,active=True)
+
+
+@pytest.mark.parametrize('outcome', ['success','failure'])
+def test_same_contacts_have_same_return_regardless_of_task_success(outcome):
+    reward=construct('rewards','ContactReward',2)
+    event=reward.observe(np.array([True,False,False,False,False,False]),.020,active=True)
+    assert event['reward']+reward.finish(outcome)==30.
+
+
+def test_safety_penalty_is_still_added_to_contact_return():
+    reward=construct('rewards','ContactReward',1)
+    event=reward.observe(np.array([True,False,False,False,False,False]),.020,active=True)
+    assert event['reward']+reward.finish('safety')==0.
 
 
 def test_infrastructure_is_not_scored_as_policy_failure():
@@ -89,20 +102,19 @@ def test_zero_residual_is_bit_exact_and_z_never_changes():
     assert np.array_equal(out,native)
 
 
-def test_residual_slew_and_total_limits_allow_full_braking_and_reverse():
+def test_pose_action_opposing_act_never_brakes_to_zero_or_reverses():
     control=governor(); current=np.array([0.,0.,.001,0.],np.float32)
-    velocities=[]; residuals=[]
+    velocities=[]; residuals=[]; previous_native=current.copy()
     for _ in range(100):
-        native=current+np.array([.0008,0.,.000001,.0035],np.float32)
-        out=control.step(current,native,np.array([-1.,0.,-1.]),dt=.01,active=True)
+        native=previous_native+np.array([.0008,0.,.000001,.0035],np.float32)
+        out=control.step(current,native,np.array([-1.,0.,-1.]),dt=.01,active=True,native_before=previous_native)
         velocities.append((out[0]-current[0])/.01); residuals.append(control.velocity.copy())
         assert out[2] == native[2]
         assert np.linalg.norm((out[:2]-current[:2])/.01) <= .080001
-        current=out
-    assert velocities[39] == pytest.approx(0.,abs=1e-5)
-    assert velocities[79] == pytest.approx(-.08,abs=1e-5)
-    assert np.max(np.linalg.norm(np.diff(residuals,axis=0)[:,:2],axis=1)) <= .00200001
-    assert np.max(np.abs(np.diff(residuals,axis=0)[:,2])) <= .00500001
+        current=out; previous_native=native
+        assert np.linalg.norm(control.offset[:2])<=.0050001
+    assert min(velocities)>.0749
+    assert np.max(np.linalg.norm(residuals,axis=1))<.053
 
 
 def test_workspace_safety_never_clamps_z_or_permits_outside_xy():

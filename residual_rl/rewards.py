@@ -46,7 +46,7 @@ class ContactReward:
         if outcome not in {'success', 'failure', 'safety'}:
             raise ValueError('infrastructure/budget interruptions have no terminal task reward')
         self.finished = True
-        return {'success': 60., 'failure': -20., 'safety': -60.}[outcome]
+        return {'success': 0., 'failure': 0., 'safety': -60.}[outcome]
 
 
 def classify_failure(error):

@@ -8,22 +8,28 @@ import warnings
 
 import numpy as np
 
-from .config import DEFAULT
+from .config import DEFAULT, STABILITY
 from .safety import BudgetStop,LiveGuard
 from .storage import (BoundedCheckpointWriter,RunStore,TraceWriter,checkpoint_evidence,
                       experience_reference,previous_checkpoint,sha256,write_json)
 
 
-def seed_schedule():
+def seed_schedule(*,preflight_seed_base=None):
+    base=DEFAULT.preflight_seed_base if preflight_seed_base is None else preflight_seed_base
+    if type(base) is not int or base<0 or base+101>=2**32:
+        raise ValueError('preflight seed base must yield valid uint32 seeds')
     validation=[dict(episode_id=f'validation_{i+1}',target_count=i+1,
                      seed=DEFAULT.validation_seed_base+i) for i in range(6)]
     preflight=[dict(episode_id=f'preflight_{i+1}',target_count=target,
-                    seed=DEFAULT.preflight_seed_base+i) for i,target in enumerate((1,6))]
+                    seed=base+i) for i,target in enumerate((1,6))]
     preflight += [dict(episode_id=f'probe_{i+1}',target_count=target,
-                      seed=DEFAULT.preflight_seed_base+100+i) for i,target in enumerate((1,6))]
+                      seed=base+100+i) for i,target in enumerate((1,6))]
     training=[dict(episode_id=f'train_{i:05}',target_count=i%6+1,
                    seed=DEFAULT.training_seed_base+i,phase='train')
               for i in range(DEFAULT.max_residual_steps)]
+    other_seeds={r['seed'] for r in training+validation}
+    if any(r['seed'] in other_seeds for r in preflight):
+        raise ValueError('preflight seeds overlap training or validation')
     return dict(training=training,validation=validation,preflight=preflight,
         layout_fingerprints='verified after deterministic reset, before any commanded execution')
 
@@ -60,21 +66,66 @@ def zero_residual_preflight(engine,plan):
     for spec in plan:
         item=dict(spec,episode_id=spec['episode_id']+'_shadow',phase='preflight_shadow')
         row=engine.run(item,'native').row
+        if row.get('outcome')=='safety' or row.get('error'):
+            raise RuntimeError('zero residual preflight stopped on physical failure: '+str(row.get('reason',row)))
         checks.append(dict(seed=spec['seed'],**require_shadow_equivalent(row)))
     return checks
 
 
 class UpdateSchedule:
     def __init__(self):
-        self.steps=0; self.updates=0
-    def observe(self,new_steps):
+        self.steps=0; self.updates=0; self.pending=0; self.remainder=0
+        self.ready_seen=False; self.discarded=0
+
+    def begin_episode(self,new_steps,*,ready):
         if type(new_steps) is not int or new_steps<0: raise ValueError('invalid new step count')
+        if type(ready) is not bool: raise ValueError('readiness must be boolean')
         self.steps+=new_steps
-    def due(self,*,ready):
-        return bool(ready and self.updates<self.steps//25)
+        self.discarded+=self.pending; self.pending=0
+        if not ready or not self.ready_seen:
+            self.ready_seen=ready; self.remainder=0
+            return
+        permissions,self.remainder=divmod(self.remainder+new_steps,STABILITY.steps_per_critic)
+        self.pending=min(permissions,STABILITY.critics_per_episode)
+        self.discarded+=permissions-self.pending
+
+    def due(self):
+        return self.pending>0
+
     def completed(self):
-        if self.updates>=self.steps//25: raise RuntimeError('update has no newly collected step budget')
-        self.updates+=1
+        if not self.pending: raise RuntimeError('update has no fresh-data episode permission')
+        self.pending-=1; self.updates+=1
+
+
+def learn_after_episode(learner,replay,schedule,episode,poll):
+    """Only complete, actually executed masked transitions earn new permissions.
+
+    Metrics are published only after the entire Actor transaction commits, so a
+    rejected second Actor step cannot leave the first step looking deployed.
+    """
+    if episode is not None:
+        replay.add(episode)
+        if not episode.terminated[-1]:
+            # Administrative partial data may be retained for bootstrap, but
+            # it is not a completed episode and never earns update permissions.
+            schedule.begin_episode(0,ready=False)
+            return []
+    valid_steps=int(episode.learn_mask.sum()) if episode is not None else 0
+    schedule.begin_episode(valid_steps,ready=replay.training_ready())
+    if not schedule.due():
+        return []
+    metrics=[]
+    with learner.update_round(replay,latest_episode=episode) as policy_guard:
+        while schedule.due():
+            poll()
+            values=learner.update(replay)
+            if values['skipped']:
+                raise RuntimeError('fresh-data learning permission lacks eligible replay')
+            schedule.completed()
+            metrics.append(values)
+    for values in metrics:
+        values['round_policy_guard']=policy_guard.last_report
+    return metrics
 
 
 def summarize(rows):
@@ -99,6 +150,8 @@ def summarize(rows):
 def own_code_hashes():
     project=Path(__file__).resolve().parents[1]
     paths=list((project/'residual_rl').glob('*.py'))+[project/'scripts/train_residual_sac.py']
+    long_entry=project/'scripts/train_residual_long.py'
+    if long_entry.exists():paths.append(long_entry)
     return {str(p.relative_to(project)):sha256(p) for p in sorted(paths)}
 
 
@@ -145,11 +198,11 @@ def native_check_consumed_layout(previous):
                  source_sha256={str(marker): sha256(marker), str(layout): sha256(layout)})]
 
 
-def prepare(root):
+def prepare(root,*,preflight_seed_base=None):
     from .runtime import EXPORTS,identity
     root=validate_output_path(root)
     baseline=identity()  # Must fail BEFORE writing a new run on frozen-source drift.
-    schedule=seed_schedule()
+    schedule=seed_schedule(preflight_seed_base=preflight_seed_base)
     schedule['prior_consumed_layouts']=sum((prior_consumed_layouts(EXPORTS/name) for name in (
         'residual_sac_pilot_pre_dino_20261015_2143',
         'residual_sac_pilot_ensemble_fixed_20261015_2200',
@@ -187,14 +240,18 @@ def verify_run(store):
     if json.loads((store.root/'configuration.json').read_text())!=DEFAULT.to_dict():
         raise RuntimeError('pilot configuration differs from approved constants')
     if own_code_hashes()!=json.loads((store.root/'code_hashes.json').read_text()):
-        raise RuntimeError('pilot source changed; no fingerprint rewrite/resume allowed')
+        from .resume import verify_repair
+        try: verify_repair(store.root)
+        except (OSError,ValueError,KeyError,TypeError) as error:
+            raise RuntimeError('pilot source changed without a valid persistence repair authorization') from error
     if identity()!=json.loads((store.root/'frozen_identity.json').read_text()):
         raise RuntimeError('baseline source/config/checkpoint identity changed')
     store.require_clean()
 
 
-def checkpoint(store,learner,replay,guard,label,*,compact=False,replace=False):
+def checkpoint(store,learner,replay,guard,label,*,compact=False,replace=False,resume_state=None):
     import torch
+    from .storage import pack_replay,save_checkpoint_payload,reference_replay,replay_sampling_state
     if not compact: guard.poll()
     max_bytes,deadline=guard.checkpoint_allowance(compact=compact)
     path=store.root/'checkpoints'/f'{label}.pt'; path.parent.mkdir(exist_ok=True)
@@ -204,20 +261,33 @@ def checkpoint(store,learner,replay,guard,label,*,compact=False,replace=False):
         numpy_rng=np.random.get_state(),torch_rng=torch.get_rng_state(),
         mps_rng=torch.mps.get_rng_state() if torch.backends.mps.is_available() else None,
         run_config=DEFAULT.to_dict(),code_hashes=own_code_hashes(),
-        durable_experience=experience_reference(store.root))
-    if not compact: payload['replay']=replay.state_dict()
+        durable_experience=experience_reference(store.root),
+        resume_state=(resume_state if resume_state is not None else getattr(guard,'resume_state',None)))
+    if hasattr(replay,'_rng'):
+        payload['replay_sampling']=replay_sampling_state(replay)
+    referenced=not compact and hasattr(replay,'_episodes') and bool(replay._episodes)
+    if not compact:
+        payload['replay']=(reference_replay(store.root,replay) if referenced else
+                           pack_replay(replay.state_dict()))
+    payload['replay_included']=not compact and not referenced
+    payload['replay_referenced']=referenced
     temporary=path.with_suffix('.tmp'); created=False
     try:
         with temporary.open('xb') as stream:
             created=True
             sink=BoundedCheckpointWriter(stream,max_bytes=max_bytes,deadline=deadline,
                 check=lambda:guard.checkpoint_allowance(compact=compact))
-            torch.save(payload,sink); stream.flush(); os.fsync(stream.fileno())
+            save_checkpoint_payload(payload,sink); stream.flush(); os.fsync(stream.fileno())
         guard.checkpoint_allowance(compact=compact)
         evidence=dict(sha256=sha256(temporary),bytes=temporary.stat().st_size,
             residual_decisions=guard.residual_steps,updates=learner.updates,
-            kind='compact' if compact else 'full',replay_included=not compact,
+            actor_updates=getattr(learner,'actor_updates',0),
+            kind='compact' if compact else 'reference_full' if referenced else 'full',
+            replay_included=payload['replay_included'],replay_referenced=referenced,
             scope='residual actor/twin critics only; frozen ACT untouched')
+        if referenced:
+            evidence.update(replay_root=str(store.root.resolve()),
+                            replay_dependencies=payload['replay']['records'])
         temporary.replace(path)
         write_json(path.with_suffix('.json'),evidence)
         checkpoint_evidence(path)
@@ -226,7 +296,7 @@ def checkpoint(store,learner,replay,guard,label,*,compact=False,replace=False):
     return path
 
 
-def shutdown_save(store,learner,replay,guard,last_checkpoint,*,complete=False):
+def shutdown_save(store,learner,replay,guard,last_checkpoint,*,complete=False,interrupted_label='interrupted'):
     """Every exit records successful save, verified reuse, failure, or no learner."""
     error=None; evidence=None; rejected=[]
     if learner is None:
@@ -234,7 +304,7 @@ def shutdown_save(store,learner,replay,guard,last_checkpoint,*,complete=False):
     else:
         try:
             path=(last_checkpoint if complete else
-                  checkpoint(store,learner,replay,guard,'interrupted',compact=True))
+                  checkpoint(store,learner,replay,guard,interrupted_label,compact=True))
             evidence=checkpoint_evidence(path); status='succeeded'
         except Exception as failure:
             error=f'{type(failure).__name__}: {failure}'
@@ -244,6 +314,8 @@ def shutdown_save(store,learner,replay,guard,last_checkpoint,*,complete=False):
         evidence=evidence,error=error,rejected_checkpoints=rejected,
         durable_experience=experience_reference(store.root),
         learner_initialized=learner is not None,no_automatic_resume=True)
+    if getattr(guard,'attempt_token',None) is not None:
+        result['attempt_token']=guard.attempt_token
     write_json(store.root/'save_result.json',result)
     return result
 
@@ -261,103 +333,109 @@ def write_derived_report(store):
 
 
 def audit_probe(rollout):
+    """Validate saved executed micro-offsets; never run another physical attempt."""
+    if rollout.row.get('action_contract')=='relative_xy80_yaw45_v1':
+        from .relative_audit import audit_relative_rollout
+        return audit_relative_rollout(rollout)
     import gzip
-    if (rollout.row['outcome']=='safety' or rollout.row.get('accepted_ACT_chunks',0)<1
-        or not {'small_start','brake','reverse'}<=set(rollout.row['probe_modes'])):
-        raise RuntimeError('real ACT probe did not safely exercise start/brake/reverse stages')
-    active=0; total=0; previous=None; previous_filter=np.zeros(3)
-    stages=[]; counts=dict(small_start=0,brake=0,reverse=0); tcp_reverse=0
-    maxima=np.zeros(4)
+    # Historical saved-pose fixtures keep their original, explicitly legacy audit.
+    from .config import LEGACY_POSE
+    cfg=LEGACY_POSE
+    required={'small_offset','hold_offset','return_offset'}
+    if (rollout.row['outcome']=='safety' or rollout.row.get('error')
+            or rollout.row.get('accepted_ACT_chunks',0)<1
+            or not required<=set(rollout.row['probe_modes'])):
+        raise RuntimeError('real ACT pose probe did not safely exercise small/hold/return offsets')
     def vector(value,shape):
         array=np.asarray(value,dtype=float)
         if array.shape!=shape or not np.isfinite(array).all(): raise ValueError('invalid vector')
         return array
-    def close(left,right,tolerance=1e-7):
-        if not np.allclose(left,right,atol=tolerance,rtol=0.): raise ValueError('inconsistent integration/filter')
-    def wrap(value): return np.arctan2(np.sin(value),np.cos(value))
-    def bound(value,maximum):
-        norm=np.linalg.norm(value)
-        return value*min(1.,maximum/norm) if norm else value
+    def close(a,b,tol=1e-7):
+        if not np.allclose(a,b,atol=tol,rtol=0.): raise ValueError('inconsistent pose audit')
+    def wrap(a): return np.arctan2(np.sin(a),np.cos(a))
+    total=active=nonzero=0; previous=None; offset=np.zeros(3); stages=[]
+    maxima=np.zeros(6); counts={s:0 for s in required}; return_start=None; return_end=None
     try:
         with gzip.open(rollout.trace_path,'rt') as stream:
             for line in stream:
                 row=json.loads(line); total+=1
                 if row['control_index']!=total: raise ValueError('missing control record')
-                t=float(row['t']); started=float(row['command_started_at'])
-                if not np.isfinite([t,started]).all() or abs(t-started-.01)>1e-7:
-                    raise ValueError('nonmonotonic or missing control timestamp')
+                t=float(row['t']); started=float(row['command_started_at']); dt=t-started
+                if not np.isfinite([t,started]).all() or abs(dt-.01)>1e-7: raise ValueError('invalid clock')
                 command=vector(row['command'],(4,)); before=vector(row['command_before'],(4,))
                 tcp=vector(row['tcp'],(3,)); tcp_before=vector(row['tcp_before'],(3,))
                 if previous is not None:
                     close(started,previous['t']); close(before,previous['command'])
                     close(tcp_before,previous['tcp']); close(row['tcp_yaw_before'],previous['tcp_yaw'])
                 if row['active']:
-                    active+=1; audit=row['control_audit']; dt=t-started
-                    if not audit or audit.get('active') is not True: raise ValueError('missing active audit')
-                    close(float(audit['dt']),dt); close(audit['start'],before)
-                    close(audit['applied'],command)
-                    if audit.get('filter_accepted',True) is not True: raise ValueError('unaccepted filter state')
-                    nominal=vector(row['nominal_velocity'],(3,))
-                    native=vector(audit['native'],(4,)); raw=vector(audit['raw_action'],(3,))
-                    composition=vector(audit.get('composition_native',native),(4,))
-                    native_before=vector(audit.get('native_before',before),(4,))
-                    residual=vector(audit['filtered_residual'],(3,))
-                    prior=vector(audit['filter_before'],(3,)); close(prior,previous_filter)
-                    if np.any(np.abs(raw)>1.+1e-7): raise ValueError('invalid raw action')
-                    desired=np.r_[bound(raw[:2],1.)*.16,raw[2]*.7]
-                    expected=prior+np.r_[bound(desired[:2]-prior[:2],.2*dt),
-                        np.clip(desired[2]-prior[2],-.5*dt,.5*dt)]
-                    close(audit['desired_residual'],desired); close(residual,expected)
-                    close(audit['residual_acceleration'],(residual-prior)/dt)
-                    if 'filter_after_accepted' in audit: close(audit['filter_after_accepted'],residual)
-                    native_velocity=np.r_[(native[:2]-native_before[:2])/dt,
-                                           wrap(native[3]-native_before[3])/dt]
-                    close(native_velocity,nominal,2e-5)
-                    close((composition[:2]-before[:2])/dt,native_velocity[:2],2e-5)
-                    close(wrap(composition[3]-before[3])/dt,native_velocity[2],2e-5)
-                    expected_command=composition.copy()
-                    if np.any(residual):
-                        bounds=vector(audit['bounds'],(2,2))
-                        if np.any(bounds[:,0]>=bounds[:,1]): raise ValueError('invalid bounds')
-                        expected_command[:2]=np.clip(before[:2]+bound(native_velocity[:2]+residual[:2],.08)*dt,
-                                                    bounds[:,0],bounds[:,1])
-                        expected_command[3]=before[3]+np.clip(native_velocity[2]+residual[2],-.35,.35)*dt
-                    close(command,expected_command)
-                    if command[2]!=native[2] or audit['Z_unchanged'] is not True:
-                        raise ValueError('Z changed')
-                    velocity=np.r_[(command[:2]-before[:2])/dt,wrap(command[3]-before[3])/dt]
-                    tcp_velocity=(tcp[:2]-tcp_before[:2])/dt
-                    tcp_yaw=wrap(float(row['tcp_yaw'])-float(row['tcp_yaw_before']))/dt
-                    speeds=np.array([np.linalg.norm(velocity[:2]),abs(velocity[2]),
-                                     np.linalg.norm(tcp_velocity),abs(tcp_yaw)])
-                    if not np.isfinite(speeds).all() or speeds[0]>.08+2e-5 or speeds[1]>.35+2e-5:
-                        raise ValueError('executed command speed exceeds limit')
-                    maxima=np.maximum(maxima,speeds)
+                    active+=1; audit=row['control_audit']
+                    if not audit or audit['active'] is not True or audit['action_contract']!=cfg.action_contract:
+                        raise ValueError('missing pose action contract/audit')
+                    if audit.get('filter_accepted',True) is not True: raise ValueError('unaccepted command')
+                    close(audit['dt'],dt); close(audit['start'],before); close(audit['applied'],command)
+                    raw=vector(audit['raw_action'],(3,)); native=vector(audit['native'],(4,))
+                    native_before=vector(audit['native_before'],(4,)); prior=vector(audit['offset_before'],(3,))
+                    close(prior,offset); close(native_before[:2]+prior[:2],before[:2])
+                    close(wrap(native_before[3]+prior[2]-before[3]),0.)
+                    if np.any(np.abs(raw)>1.+1e-7): raise ValueError('invalid raw pose action')
+                    wanted=np.r_[raw[:2]/max(1.,np.linalg.norm(raw[:2]))*DEFAULT.residual_xy_offset,
+                                 raw[2]*DEFAULT.residual_yaw_offset]
+                    close(audit['desired_offset'],wanted)
+                    offset=np.r_[command[:2]-native[:2],wrap(command[3]-native[3])]
+                    close(audit['applied_offset'],offset); close(audit['filtered_residual'],(offset-prior)/dt)
+                    if command[2]!=native[2] or audit['Z_unchanged'] is not True: raise ValueError('Z changed')
+                    bounds=vector(audit['bounds'],(2,2))
+                    if np.any(bounds[:,0]>=bounds[:,1]) or np.any(command[:2]<bounds[:,0]-1e-7) or np.any(command[:2]>bounds[:,1]+1e-7):
+                        raise ValueError('workspace violation')
+                    speed=(command[:2]-before[:2])/dt
+                    yaw=wrap(command[3]-before[3])/dt
+                    native_speed=(native[:2]-native_before[:2])/dt
+                    rate=(offset-prior)/dt
+                    if (np.linalg.norm(offset[:2])>DEFAULT.residual_xy_offset+1e-7
+                            or abs(offset[2])>DEFAULT.residual_yaw_offset+1e-7
+                            or np.linalg.norm(rate[:2])>DEFAULT.residual_xy_speed+2e-5
+                            or abs(rate[2])>DEFAULT.residual_yaw_speed+2e-5
+                            or np.linalg.norm(speed)>DEFAULT.total_xy_speed+2e-5
+                            or abs(yaw)>DEFAULT.total_yaw_speed+2e-5):
+                        raise ValueError('pose/rate/total limit exceeded')
+                    length=np.linalg.norm(native_speed)
+                    native_yaw=wrap(native[3]-native_before[3])/dt
+                    if abs(native_yaw)>1e-8:
+                        if np.sign(native_yaw)*yaw<DEFAULT.min_forward_fraction*abs(native_yaw)-2e-5:
+                            raise ValueError('residual stopped/reversed native yaw')
+                    elif length<=1e-8 and abs(yaw)>2e-5:
+                        raise ValueError('residual yaw moves during complete native idle')
+                    if length>1e-8:
+                        direction=native_speed/length; forward=speed@direction
+                        side=speed@np.array([-direction[1],direction[0]])
+                        if forward<DEFAULT.min_forward_fraction*length-2e-5 or abs(side)>np.tan(DEFAULT.direction_cone_radians)*forward+2e-5:
+                            raise ValueError('residual stopped/reversed/redirected native motion')
+                    elif np.linalg.norm(speed)>2e-5: raise ValueError('residual moves during native idle')
                     stage=row['probe_stage']
-                    if stage not in ('small_start','brake','reverse','release'): raise ValueError('invalid probe stage')
-                    if not stages or stage!=stages[-1]: stages.append(stage)
-                    if stage=='small_start' and np.linalg.norm(residual)>1e-4: counts[stage]+=1
-                    moving=np.linalg.norm(nominal[:2])>1e-3
-                    if stage=='brake' and moving and np.dot(residual[:2],nominal[:2])<0.:
-                        if speeds[0]<np.linalg.norm(nominal[:2])-.001: counts[stage]+=1
-                    if stage=='reverse' and moving and np.dot(velocity[:2],nominal[:2])<-1e-6:
-                        counts[stage]+=1
-                        if np.dot(tcp_velocity,nominal[:2])<-1e-6: tcp_reverse+=1
-                    previous_filter=residual.copy()
-                elif active: raise ValueError('active probe gate closed')
+                    if stage not in required: raise ValueError('invalid pose probe stage')
+                    if not stages or stages[-1]!=stage: stages.append(stage)
+                    counts[stage]+=1; nonzero+=int(np.linalg.norm(offset)>1e-6)
+                    if stage=='return_offset':
+                        scale=np.array([DEFAULT.residual_xy_offset]*2+[DEFAULT.residual_yaw_offset])
+                        if return_start is None: return_start=float(np.linalg.norm(prior/scale))
+                        return_end=float(np.linalg.norm(offset/scale))
+                    maxima=np.maximum(maxima,[np.linalg.norm(offset[:2]),abs(offset[2]),
+                        np.linalg.norm(speed),abs(yaw),np.linalg.norm((tcp[:2]-tcp_before[:2])/dt),
+                        abs(wrap(row['tcp_yaw']-row['tcp_yaw_before'])/dt)])
+                elif active: raise ValueError('active pose gate closed')
                 previous=row
-        if total!=rollout.row['control_steps']: raise ValueError('trace length differs from physical ledger')
-        if stages not in (['small_start','brake','reverse'],['small_start','brake','reverse','release']):
-            raise ValueError('missing or reordered probe stages')
-        if active<50 or min(counts.values())<5 or tcp_reverse<3:
-            raise ValueError('probe did not demonstrate nonzero start, braking and physical reversal')
+        if total!=rollout.row['control_steps']: raise ValueError('trace/ledger length mismatch')
+        if stages!=['small_offset','hold_offset','return_offset'] or min(counts.values())<5 or nonzero<5:
+            raise ValueError('missing actual small/hold/return pose motion')
+        if return_start is None or return_end>=return_start-1e-5:
+            raise ValueError('pose return not actually exercised; probe incomplete')
     except (KeyError,TypeError,ValueError,OSError,EOFError) as failure:
-        raise RuntimeError(f'residual physical command audit failed: {failure}') from failure
-    return dict(passed=True,audited_control_steps=active,braking_steps=counts['brake'],
-        reverse_steps=counts['reverse'],tcp_reverse_steps=tcp_reverse,
-        max_command_xy_m_s=float(maxima[0]),max_command_yaw_rad_s=float(maxima[1]),
-        max_tcp_xy_m_s=float(maxima[2]),max_tcp_yaw_rad_s=float(maxima[3]),
-        continuous_contact_verified=False)
+        raise RuntimeError(f'residual physical pose audit failed: {failure}') from failure
+    return dict(passed=True,audited_control_steps=active,nonzero_offset_steps=nonzero,
+        max_xy_offset_m=float(maxima[0]),max_yaw_offset_rad=float(maxima[1]),
+        max_command_xy_m_s=float(maxima[2]),max_command_yaw_rad_s=float(maxima[3]),
+        max_tcp_xy_m_s=float(maxima[4]),max_tcp_yaw_rad_s=float(maxima[5]),
+        continuous_contact_verified=False,action_contract=DEFAULT.action_contract)
 
 
 def execute(store,*,preflight_only=False,started_at=None,stop_request=None):
@@ -420,15 +498,16 @@ def execute(store,*,preflight_only=False,started_at=None,stop_request=None):
                     # Preserve checkpoint, mark interrupted, no final evaluation
                     # on an orphan physical episode.
                     raise
-                added=guard.residual_steps-before; training_steps+=added; updates.observe(added)
-                if result.episode is not None: replay.add(result.episode)
-                if result.row['outcome']=='budget_truncated': break
-                while updates.due(ready=replay.ready()):
-                    try: guard.poll()
-                    except BudgetStop as stop:
-                        if str(stop)=='stop_collection': break
-                        raise
-                    values=learner.update(replay); metrics.append(values); updates.completed()
+                added=guard.residual_steps-before; training_steps+=added
+                if result.row['outcome']=='budget_truncated':
+                    if result.episode is not None: replay.add(result.episode)
+                    break
+                try:
+                    learned=learn_after_episode(learner,replay,updates,result.episode,guard.poll)
+                except BudgetStop as stop:
+                    if str(stop)=='stop_collection': break
+                    raise
+                for values in learned: metrics.append(values)
                 recovery_slot=1-recovery_slot
                 last_checkpoint=checkpoint(store,learner,replay,guard,f'recovery_{recovery_slot}',
                                            compact=True,replace=True)
@@ -457,7 +536,8 @@ def execute(store,*,preflight_only=False,started_at=None,stop_request=None):
             residual_decisions=guard.residual_steps,no_automatic_resume=True))
     except BaseException as error:
         write_json(store.root/'exception.json',dict(type=type(error).__name__,error=str(error),
-            no_automatic_resume=True,training_steps=training_steps))
+            no_automatic_resume=True,training_steps=training_steps,
+            policy_guard=getattr(error,'report',None)))
         raise
     finally:
         cleanup_error=None
@@ -469,6 +549,7 @@ def execute(store,*,preflight_only=False,started_at=None,stop_request=None):
         write_json(store.root/'summary.json',dict(complete=outcome=='complete',by_phase=report,
             training_steps=training_steps,residual_decisions=guard.residual_steps,
             updates=learner.updates if learner else 0,last_checkpoint=str(last_checkpoint) if last_checkpoint else None,
+            actor_updates=learner.actor_updates if learner else 0,
             save=save,cleanup_error=cleanup_error,
             quantity_error_is_not_strict_success=True,small_validation_is_not_significance_proof=True))
         write_json(store.root/'status.json',dict(state=outcome,training_started=learner is not None,

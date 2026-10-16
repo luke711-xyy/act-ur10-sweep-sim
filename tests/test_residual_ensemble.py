@@ -167,13 +167,13 @@ import numpy as np
 from residual_rl.runtime import PROJECT,identity,load_formal,install_driver,PolicyCache
 from residual_rl.baseline import pre_dino_sources
 from residual_rl.features import FeatureMailbox
-from residual_rl.control import ResidualGovernor
+from residual_rl.relative_action import RelativeActionGenerator as ResidualGovernor
 from residual_rl.shadow import ZeroResidualShadow
 f=identity(); pre_dino_sources(PROJECT,f['source_fingerprints']).activate()
 from sim.config import load_config
 formal=load_formal(); module=formal.runtime()
 cfg=formal.candidate_config(load_config(str(formal.OLD/'evaluation_config.yaml')),1)
-env=SimpleNamespace(control_dt=.01,time=5.)
+env=SimpleNamespace(control_dt=.01,time=5.,tcp=lambda:np.r_[last[:2],0.],ee=SimpleNamespace(tcp_yaw=lambda:float(last[3])))
 c=dict(env=env,admittance=object(),force_gate=object(),collection_timer=object(),
        trace=[dict(t=4.99,command=np.zeros(4)),dict(t=5.,command=np.zeros(4))],
        last_reference=np.zeros(4),act_trace=[])

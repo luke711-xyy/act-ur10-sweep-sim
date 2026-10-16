@@ -218,7 +218,7 @@ def test_skip_is_explicit_and_does_not_modify_models_optimizers_rng_or_hidden():
     assert torch.equal(retained, hidden)
 
 
-def test_finite_real_update_changes_only_residual_weights_and_soft_updates_targets():
+def test_initial_real_critic_update_freezes_actor_and_soft_updates_targets():
     model, store = learner(), replay()
     before_data = store.state_dict()["episodes"]
     actor_before = {key: value.clone() for key, value in model.actor.state_dict().items()}
@@ -228,8 +228,9 @@ def test_finite_real_update_changes_only_residual_weights_and_soft_updates_targe
     metrics = model.update(store)
     assert metrics["skipped"] is False and metrics["updates"] == 1
     assert metrics["learned_transitions"] > 0
-    assert all(np.isfinite(metrics[key]) for key in ("actor_loss", "critic_loss"))
-    assert not torch.equal(actor_before["mean.weight"], model.actor.mean.weight)
+    assert np.isfinite(metrics['critic_loss'])
+    assert metrics['actor_loss'] is None and not metrics['actor_updated']
+    assert_tree_equal(actor_before, model.actor.state_dict())
     assert torch.equal(hidden, retained)
     for old, target, current in zip(targets_before, model.target_critics, model.critics):
         for key, actual in target.state_dict().items():
@@ -345,7 +346,7 @@ def test_squashed_log_probability_uses_raw_normalized_action_with_no_physical_sc
     gaussian = -0.5 * ((pre_tanh - mean.numpy()[0]) / np.exp(-4)) ** 2 + 4 - 0.5 * math.log(2 * math.pi)
     expected = np.sum(gaussian - np.log(1 - raw ** 2))
     assert log_probability.item() == pytest.approx(float(expected), abs=2e-5)
-    scaled = raw * np.array([0.16, 0.16, 0.7])
+    scaled = raw * np.array([.005, .005, math.pi/60])
     assert not np.allclose(raw, scaled)
 
 
@@ -388,7 +389,7 @@ def test_checkpoint_rejects_malformed_state_atomically(corruption):
     elif corruption == "target":
         payload["target_critics"][0]["gru.weight_ih_l0"] = torch.zeros(1)
     elif corruption == "optimizer":
-        state = next(iter(payload["actor_optimizer"]["state"].values()))
+        state = next(iter(payload["critic_optimizer"]["state"].values()))
         state["exp_avg"] = torch.zeros(1)
     else:
         payload["rng_state"] = torch.ones(2)
@@ -410,7 +411,7 @@ def test_checkpoint_rejects_optimizer_moment_dtype_instead_of_silently_coercing_
     model = learner()
     model.update(replay())
     payload = model.checkpoint()
-    state = next(iter(payload["actor_optimizer"]["state"].values()))
+    state = next(iter(payload["critic_optimizer"]["state"].values()))
     state["exp_avg"] = state["exp_avg"].double()
     with pytest.raises(ValueError):
         model.load_checkpoint(payload)

@@ -8,14 +8,18 @@ The caller owns episode hidden states, collection, and the update schedule.
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import math
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 from numbers import Integral
 
 import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
+
+from .config import DEFAULT, STABILITY
+from .policy_guard import ProbeBank, ProbeHistory, PolicyUpdateGuard, zero_residual_prior
 
 
 def _integer(value, name, minimum=1):
@@ -161,6 +165,18 @@ class EpisodicReplay:
         goals = {episode.target_count for episode in self._episodes if episode.learn_mask.any()}
         return self.learned_steps >= min_steps and goals == set(range(1, 7))
 
+    def training_ready(self):
+        """Stronger production gate; generic replay sampling keeps its small contract."""
+        counts = {goal: [0, 0] for goal in range(1, 7)}
+        for episode in self._episodes:
+            steps = int(episode.learn_mask.sum())
+            if episode.terminated[-1]:
+                counts[episode.target_count][0] += int(steps > 0)
+                counts[episode.target_count][1] += steps
+        return (sum(steps for _, steps in counts.values()) >= STABILITY.warmup_steps and
+                all(episodes >= STABILITY.episodes_per_goal and steps >= STABILITY.steps_per_goal
+                    for episodes, steps in counts.values()))
+
     def sample(self, batch_size=4, length=32):
         batch_size = _integer(batch_size, "batch_size")
         length = _integer(length, "length")
@@ -185,7 +201,8 @@ class EpisodicReplay:
         return result
 
     def state_dict(self):
-        return {"schema_version": 1, "capacity": self.capacity,
+        return {"schema_version": 2, "action_contract":DEFAULT.action_contract,
+                "reward_contract":DEFAULT.reward_contract,"capacity": self.capacity,
                 "episodes": [_episode_state(episode) for episode in self._episodes],
                 "seen_ids": sorted(self._seen_ids), "dimensions": self._dimensions,
                 "goal_cursor": self._goal_cursor,
@@ -194,7 +211,9 @@ class EpisodicReplay:
     def load_state_dict(self, state):
         """Validate an entire detached snapshot before replacing live state."""
         try:
-            if not isinstance(state, dict) or _integer(state["schema_version"], "schema_version") != 1:
+            if (not isinstance(state, dict) or _integer(state["schema_version"], "schema_version") != 2
+                    or state['action_contract']!=DEFAULT.action_contract
+                    or state['reward_contract']!=DEFAULT.reward_contract):
                 raise ValueError("unsupported replay schema")
             candidate = EpisodicReplay(state["capacity"])
             if not isinstance(state["episodes"], list):
@@ -284,10 +303,12 @@ class RecurrentSAC:
     """
 
     _CONFIG = {"hidden_dim": 128, "head_dim": 128, "gru_layers": 1,
-               "action_dim": 3, "lr": 3e-4, "tau": 0.005, "gamma": 1.0,
+               "action_dim": 3, "actor_lr": STABILITY.actor_lr,
+               "critic_lr": STABILITY.critic_lr, "tau": 0.005, "gamma": 1.0,
                "alpha": 0.001, "grad_clip": 5.0, "batch_size": 4,
                "length": 32, "min_steps": 256, "log_std_min": -5.0,
-               "log_std_max": 0.0, "device": "cpu"}
+               "log_std_max": 0.0, "device": "cpu", "prior_weight": STABILITY.prior_weight,
+               "action_contract":DEFAULT.action_contract,"reward_contract":DEFAULT.reward_contract}
 
     def __init__(self, actor_dim, critic_dim, seed=0):
         self.actor_dim = _integer(actor_dim, "actor_dim")
@@ -300,12 +321,23 @@ class RecurrentSAC:
             self.actor = _Actor(self.actor_dim).cpu()
             self.critics = nn.ModuleList([_Critic(self.critic_dim), _Critic(self.critic_dim)]).cpu()
         self.target_critics = copy.deepcopy(self.critics).requires_grad_(False)
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.config["lr"])
-        self.critic_optimizer = torch.optim.Adam(self.critics.parameters(), lr=self.config["lr"])
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.config["actor_lr"])
+        self.critic_optimizer = torch.optim.Adam(self.critics.parameters(), lr=self.config["critic_lr"])
         self._rng = torch.Generator(device="cpu").manual_seed(seed)
         self.updates = 0
+        self.actor_updates = 0
+        self.rolled_back_actor_updates = 0
+        self.failed_actor_updates = 0
+        self.guard_failed = False
+        self._probe_bank = None
+        self._probe_spec = None
+        self._round_guard = None
+        self._round_critic_updates = 0
+        self._round_actor_updates = 0
 
     def act(self, observation, hidden=None, deterministic=False):
+        if self.guard_failed:
+            raise RuntimeError('rejected residual policy is stopped; no automatic fallback/resume')
         observation = _array(observation, "observation")
         if observation.shape != (self.actor_dim,):
             raise ValueError(f"actor observation must have shape ({self.actor_dim},)")
@@ -323,7 +355,63 @@ class RecurrentSAC:
             action = mean.tanh() if deterministic else self.actor.sample(mean, log_std, self._rng)[0]
         return action.numpy().copy(), next_hidden.detach()
 
-    def _losses(self, sample):
+    @contextmanager
+    def update_round(self, replay, latest_episode=None):
+        """Atomic Actor transaction across a capped between-episode update burst.
+
+        Critics may learn, but no candidate Actor may be deployed unless the
+        WHOLE round passes. Rejection rolls back Actor+Adam+counter+local RNG
+        and latches a fatal state. No zero-action fallback is introduced.
+        """
+        if self.guard_failed or self._round_guard is not None:
+            raise RuntimeError('policy round is stopped or already active')
+        # Setup errors must also latch the stop. Take a restoration snapshot
+        # BEFORE resolving probes or evaluating the first recurrent history.
+        actor_before = copy.deepcopy(self.actor.state_dict())
+        optimizer_before = copy.deepcopy(self.actor_optimizer.state_dict())
+        actor_updates, rng = self.actor_updates, self._rng.get_state().clone()
+        guard = None
+        self._round_critic_updates = self._round_actor_updates = 0
+        try:
+            episodes = replay.episodes
+            if self._probe_bank is None:
+                self._probe_bank = (ProbeBank.from_spec(self._probe_spec, episodes)
+                                    if self._probe_spec is not None else ProbeBank.from_episodes(episodes))
+                self._probe_spec = self._probe_bank.spec()
+            latest = latest_episode if latest_episode is not None else episodes[-1]
+            histories = list(self._probe_bank.histories)
+            if latest.learn_mask.any():
+                histories.append(ProbeHistory.from_episode(latest))
+            guard = PolicyUpdateGuard(self.actor, self.actor_optimizer, histories)
+            self._round_guard = guard
+            guard.check()  # Reject an already-unsafe policy before any learning.
+            yield guard
+            guard.check()
+        except BaseException as failure:
+            if guard is not None:
+                guard.rollback()
+            else:
+                self.actor.load_state_dict(actor_before)
+                self.actor_optimizer.load_state_dict(optimizer_before)
+                self.actor_optimizer.zero_grad(set_to_none=True)
+            self.rolled_back_actor_updates += self.actor_updates-actor_updates
+            self.actor_updates = actor_updates
+            # A completed Critic step may be followed by an Actor operation
+            # that raises before Adam completes. Account for that scheduled
+            # slot explicitly, instead of hiding the Critic's real step count.
+            slots = max(0, self.updates-STABILITY.critic_only_updates)//STABILITY.critics_per_actor
+            self.failed_actor_updates = slots-self.actor_updates-self.rolled_back_actor_updates
+            self._rng.set_state(rng)
+            from .safety import BudgetStop
+            # A normal collection cutoff still needs its last committed Actor
+            # for final deterministic validation; it is not policy rejection.
+            self.guard_failed = not (isinstance(failure, BudgetStop) and
+                                     str(failure) == 'stop_collection')
+            raise
+        finally:
+            self._round_guard = None
+
+    def _losses(self, sample, update_actor=True):
         episode, start = sample.episode, sample.start
         if (episode.actor_obs.shape[1], episode.critic_obs.shape[1]) != (self.actor_dim, self.critic_dim):
             raise ValueError("replay dimensions do not match this learner")
@@ -335,8 +423,9 @@ class RecurrentSAC:
         critic_inputs = torch.cat((critic_obs, previous_actions), dim=-1)
         mask = torch.tensor(episode.learn_mask[start:stop])
         # No fabricated padded transitions: evaluate exactly the real n+1 states.
-        features = _unroll(self.actor.gru, actor_obs, start, stop + 1)
-        mean, log_std = self.actor.distribution(features)
+        with torch.set_grad_enabled(update_actor):
+            features = _unroll(self.actor.gru, actor_obs, start, stop + 1)
+            mean, log_std = self.actor.distribution(features)
         critic_features = [_unroll(critic.gru, critic_inputs, start, stop + 1)
                            for critic in self.critics]
         with torch.no_grad():
@@ -351,6 +440,8 @@ class RecurrentSAC:
         values = [critic.value(history[:, :-1], actions[:, start:stop])[0]
                   for critic, history in zip(self.critics, critic_features)]
         critic_loss = sum((value[mask] - targets[mask]).square().sum() for value in values)
+        if not update_actor:
+            return None, critic_loss, targets[mask].sum(), int(mask.sum())
         policy_action, logp = self.actor.sample(mean[:, :-1], log_std[:, :-1], self._rng)
         # Actor gets dQ/da but never changes critic parameters or replay history.
         self.critics.requires_grad_(False)
@@ -359,53 +450,86 @@ class RecurrentSAC:
                              for critic, history in zip(self.critics, critic_features)]
         finally:
             self.critics.requires_grad_(True)
-        actor_loss = (self.config["alpha"] * logp[0] - torch.minimum(*policy_values))[mask].sum()
+        actor_loss = (self.config["alpha"] * logp[0] - torch.minimum(*policy_values) +
+                      self.config['prior_weight'] * zero_residual_prior(policy_action)[0])[mask].sum()
         return actor_loss, critic_loss, targets[mask].sum(), int(mask.sum())
 
     def update(self, replay):
+        if self.guard_failed:
+            raise RuntimeError('policy check previously failed; learning cannot resume')
         if not replay.ready(min_steps=self.config["min_steps"]):
             return {"skipped": True, "reason": "replay_not_ready", "updates": self.updates}
+        actor_due = (self.updates + 1 > STABILITY.critic_only_updates and
+                     (self.updates + 1 - STABILITY.critic_only_updates) % STABILITY.critics_per_actor == 0)
+        if actor_due and self._round_guard is None:
+            with self.update_round(replay):
+                return self.update(replay)
+        if self._round_guard is not None:
+            if (self._round_critic_updates >= STABILITY.critics_per_episode or
+                    actor_due and self._round_actor_updates >= STABILITY.actors_per_episode):
+                raise RuntimeError('between-episode learning burst exceeded its cap')
         samples = replay.sample(batch_size=self.config["batch_size"], length=self.config["length"])
         if not samples:
             raise ValueError("ready replay returned no sequences")
-        losses = [self._losses(sample) for sample in samples]
+        losses = [self._losses(sample, update_actor=actor_due) for sample in samples]
         count = sum(loss[3] for loss in losses)
         if count < 1:
             raise ValueError("sample contains no learnable real transitions")
-        actor_loss = sum(loss[0] for loss in losses) / count
+        actor_loss = sum(loss[0] for loss in losses) / count if actor_due else None
         critic_loss = sum(loss[1] for loss in losses) / count
         target_mean = sum(loss[2] for loss in losses) / count
-        if not all(torch.isfinite(loss).item() for loss in (actor_loss, critic_loss, target_mean)):
+        checked_losses = (critic_loss, target_mean) + ((actor_loss,) if actor_due else ())
+        if not all(torch.isfinite(loss).item() for loss in checked_losses):
             raise ValueError("nonfinite SAC loss")
         self.actor_optimizer.zero_grad(set_to_none=True)
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss.backward()
-        actor_loss.backward()
-        actor_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.config["grad_clip"],
-                                              error_if_nonfinite=True)
+        actor_norm = None
+        if actor_due:
+            actor_loss.backward()
+            actor_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.config["grad_clip"],
+                                                  error_if_nonfinite=True)
         critic_norm = nn.utils.clip_grad_norm_(self.critics.parameters(), self.config["grad_clip"],
                                                error_if_nonfinite=True)
-        # Exactly one joint actor/twin-critic update, independently of length.
+        # Critic updates are independent of sequence length and Actor cadence.
         self.critic_optimizer.step()
-        self.actor_optimizer.step()
+        self.updates += 1
+        if self._round_guard is not None:
+            self._round_critic_updates += 1
         with torch.no_grad():
             for target, current in zip(self.target_critics.parameters(), self.critics.parameters()):
                 target.mul_(1 - self.config["tau"]).add_(current, alpha=self.config["tau"])
-        self.updates += 1
-        return {"skipped": False, "updates": self.updates, "actor_loss": actor_loss.item(),
+        if actor_due:
+            self.actor_optimizer.step()
+            self.actor_updates += 1
+            self._round_actor_updates += 1
+            self._round_guard.check()
+        return {"skipped": False, "updates": self.updates,
+                "actor_updates": self.actor_updates, "actor_updated": actor_due,
+                "rolled_back_actor_updates": self.rolled_back_actor_updates,
+                "failed_actor_updates": self.failed_actor_updates,
+                "actor_loss": actor_loss.item() if actor_loss is not None else None,
                 "critic_loss": critic_loss.item(), "target_q_mean": target_mean.item(),
-                "learned_transitions": count, "actor_grad_norm": actor_norm.item(),
+                "learned_transitions": count,
+                "actor_grad_norm": actor_norm.item() if actor_norm is not None else None,
                 "critic_grad_norm": critic_norm.item()}
 
     def checkpoint(self):
-        return copy.deepcopy({"schema_version": 1, "actor_dim": self.actor_dim,
+        if self._round_guard is not None:
+            raise RuntimeError('cannot publish a checkpoint from an uncommitted policy round')
+        return copy.deepcopy({"schema_version": 3, "actor_dim": self.actor_dim,
                               "critic_dim": self.critic_dim, "config": self.config,
+                              "stability_contract": asdict(STABILITY),
                               "actor": self.actor.state_dict(),
                               "critics": [critic.state_dict() for critic in self.critics],
                               "target_critics": [critic.state_dict() for critic in self.target_critics],
                               "actor_optimizer": self.actor_optimizer.state_dict(),
                               "critic_optimizer": self.critic_optimizer.state_dict(),
-                              "rng_state": self._rng.get_state(), "updates": self.updates})
+                              "rng_state": self._rng.get_state(), "updates": self.updates,
+                              "actor_updates": self.actor_updates, "guard_failed": self.guard_failed,
+                              "rolled_back_actor_updates": self.rolled_back_actor_updates,
+                              "failed_actor_updates": self.failed_actor_updates,
+                              "probe_spec": self._probe_spec})
 
     @staticmethod
     def _load_model(model, state):
@@ -460,7 +584,7 @@ class RecurrentSAC:
     def load_checkpoint(self, payload):
         """Strict, atomic load of models, targets, Adam states and local RNG."""
         try:
-            if not isinstance(payload, dict) or _integer(payload["schema_version"], "schema_version") != 1:
+            if not isinstance(payload, dict) or _integer(payload["schema_version"], "schema_version") != 3:
                 raise ValueError("unsupported learner checkpoint schema")
             actor_dim = _integer(payload["actor_dim"], "actor_dim")
             critic_dim = _integer(payload["critic_dim"], "critic_dim")
@@ -468,15 +592,32 @@ class RecurrentSAC:
                 raise ValueError("checkpoint dimensions do not match this learner")
             if payload["config"] != self._CONFIG:
                 raise ValueError("checkpoint configuration does not match the fixed SAC contract")
+            if payload['stability_contract'] != asdict(STABILITY):
+                raise ValueError('checkpoint policy stability contract differs')
             candidate = RecurrentSAC(actor_dim, critic_dim)
             candidate.updates = _integer(payload["updates"], "updates", 0)
+            candidate.actor_updates = _integer(payload['actor_updates'], 'actor_updates', 0)
+            candidate.rolled_back_actor_updates = _integer(payload['rolled_back_actor_updates'],
+                                                          'rolled_back_actor_updates', 0)
+            candidate.failed_actor_updates = _integer(payload['failed_actor_updates'], 'failed_actor_updates', 0)
+            allowed_actors = max(0, candidate.updates-STABILITY.critic_only_updates)//STABILITY.critics_per_actor
+            if candidate.actor_updates > allowed_actors or type(payload['guard_failed']) is not bool:
+                raise ValueError('invalid independent Actor count or guard state')
+            candidate.guard_failed = payload['guard_failed']
+            if (candidate.actor_updates + candidate.rolled_back_actor_updates +
+                    candidate.failed_actor_updates) != allowed_actors:
+                raise ValueError('Actor count disagrees with the frozen update cadence')
+            from .policy_guard import validate_probe_spec
+            candidate._probe_spec = validate_probe_spec(payload['probe_spec'])
+            if candidate.actor_updates and candidate._probe_spec is None:
+                raise ValueError('trained Actor lacks its fixed probe identity')
             self._load_model(candidate.actor, payload["actor"])
             for key in ("critics", "target_critics"):
                 if not isinstance(payload[key], list) or len(payload[key]) != 2:
                     raise ValueError("checkpoint requires two independent critics and targets")
                 for model, state in zip(getattr(candidate, key), payload[key]):
                     self._load_model(model, state)
-            self._load_optimizer(candidate.actor_optimizer, payload["actor_optimizer"], candidate.updates)
+            self._load_optimizer(candidate.actor_optimizer, payload["actor_optimizer"], candidate.actor_updates)
             self._load_optimizer(candidate.critic_optimizer, payload["critic_optimizer"], candidate.updates)
             rng = payload["rng_state"]
             if not isinstance(rng, torch.Tensor) or rng.dtype != torch.uint8 or rng.device.type != "cpu":

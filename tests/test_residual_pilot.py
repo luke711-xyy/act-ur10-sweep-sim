@@ -39,13 +39,16 @@ def test_preflight_requires_actual_act_not_merely_matching_empty_failures():
 
 def test_update_schedule_does_not_train_before_all_goals_or_repeat_old_steps():
     schedule=call('UpdateSchedule')
-    schedule.observe(100)
-    assert not schedule.due(ready=False)
-    assert schedule.due(ready=True)
+    schedule.begin_episode(100,ready=False)
+    assert not schedule.due()
+    schedule.begin_episode(100,ready=True)
+    assert not schedule.due()  # readiness transition never backpays warmup
+    schedule.begin_episode(100,ready=True)
+    assert schedule.due()
     for _ in range(4): schedule.completed()
-    assert not schedule.due(ready=True)
-    schedule.observe(24); assert not schedule.due(ready=True)
-    schedule.observe(1); assert schedule.due(ready=True)
+    assert not schedule.due()
+    schedule.begin_episode(24,ready=True); assert not schedule.due()
+    schedule.begin_episode(1,ready=True); assert schedule.due()
 
 
 def test_summary_keeps_prefix_failures_in_denominator_and_count_error_separate():
@@ -106,33 +109,33 @@ def test_output_cannot_be_nested_in_old_results_or_checkpoints(tmp_path):
 
 
 def constructed_probe(tmp_path,*,zero=False,jump=False,clipped=False):
-    """Hand-integrated 100 Hz commands: +.02 nominal, brake, then -.02 executed."""
+    """Independent hand-integrated pose offset, held then returned; no reversal."""
     from residual_rl.storage import TraceWriter
     path=tmp_path/'probe.jsonl.gz'; trace=TraceWriter(path)
-    applied=np.zeros(4); filtered=np.zeros(3)
-    nominal=np.array([.075,0.,.3]) if clipped else np.array([.02,0.,0.])
+    applied=np.zeros(4); offset=np.zeros(3); previous_native=applied.copy()
+    nominal=np.array([.079,0.,.3]) if clipped else np.array([.02,0.,0.])
     for i in range(240):
-        stage='small_start' if i<40 else 'brake' if i<100 else 'reverse'
-        desired=(np.zeros(3) if zero else
-                 np.array([.008,0.,.07 if clipped else 0.]) if i<40 else
-                 -nominal if i<100 else -2*nominal)
-        prior=filtered.copy(); filtered+=np.clip(desired-filtered,[-.002,-.002,-.005],[.002,.002,.005])
-        before=applied.copy(); native=before+np.r_[nominal[:2]*.01,0.,nominal[2]*.01]
-        applied=native.copy(); applied[0]=before[0]+np.clip(nominal[0]+filtered[0],-.08,.08)*.01
-        applied[3]=before[3]+np.clip(nominal[2]+filtered[2],-.35,.35)*.01
+        stage='small_offset' if i<40 else 'hold_offset' if i<100 else 'return_offset'
+        prior=offset.copy()
+        if not zero:
+            offset[1]=(i+1)*.00001 if i<40 else .0004 if i<100 else max(0.,.0004-(i-99)*.00001)
+        desired=np.zeros(3) if zero or i>=100 else np.array([0.,.001,0.])
+        before=applied.copy(); native=previous_native+np.r_[nominal[:2]*.01,0.,nominal[2]*.01]
+        applied=native+np.r_[offset[:2],0.,offset[2]]
         if jump: applied[0]=before[0]+1.
         trace.append(dict(t=(i+1)*.01,command=applied.copy(),tcp=applied[:3].copy(),active=True,
             nominal_velocity=nominal.copy(),probe_stage=stage,control_index=i+1,
             command_before=before.copy(),command_started_at=i*.01,
             tcp_before=before[:3].copy(),tcp_yaw_before=before[3],tcp_yaw=applied[3],
-            control_audit=dict(raw_action=desired/np.array([.16,.16,.7]),desired_residual=desired,
-                filtered_residual=filtered.copy(),filter_before=prior,
-                residual_acceleration=(filtered-prior)/.01,native=native,applied=applied.copy(),
+            control_audit=dict(raw_action=desired/np.array([.005,.005,np.pi/60]),desired_offset=desired,
+                applied_offset=offset.copy(),offset_before=prior,action_contract='bounded_pose_xy5mm_yaw3deg_v1',
+                filtered_residual=(offset-prior)/.01,native_before=previous_native.copy(),native=native,applied=applied.copy(),
                 Z_unchanged=True,active=True,start=before,dt=.01,
                 bounds=[[-10.,10.],[-10.,10.]])))
+        previous_native=native.copy()
     trace.close()
     return SimpleNamespace(trace_path=path,row=dict(outcome='failure',accepted_ACT_chunks=2,
-        probe_modes=['small_start','brake','reverse'],control_steps=240))
+        probe_modes=['small_offset','hold_offset','return_offset'],control_steps=240))
 
 
 @pytest.mark.parametrize('bad', ['zero','jump'])
@@ -141,17 +144,70 @@ def test_probe_rejects_all_zero_labels_and_100_m_s_command_jumps(tmp_path,bad):
     with pytest.raises(RuntimeError): call('audit_probe',rollout)
 
 
-def test_probe_accepts_independently_constructed_braking_and_reverse(tmp_path):
+def test_probe_accepts_independently_constructed_small_hold_return_offsets(tmp_path):
     result=call('audit_probe',constructed_probe(tmp_path))
     assert result['passed'] is True
-    assert result['braking_steps']>0 and result['reverse_steps']>0
-    assert result['max_command_xy_m_s']==pytest.approx(.028)
-    assert result['max_tcp_xy_m_s']==pytest.approx(.028)
+    assert result['nonzero_offset_steps']>0
+    assert result['max_xy_offset_m']==pytest.approx(.0004)
+    assert result['max_command_xy_m_s']==pytest.approx(np.hypot(.02,.001))
     assert result['continuous_contact_verified'] is False
 
 
+def test_pose_probe_requires_actual_return_not_just_return_stage_labels(tmp_path):
+    import gzip
+    rollout=constructed_probe(tmp_path)
+    with gzip.open(rollout.trace_path,'rt') as stream: rows=[json.loads(line) for line in stream]
+    # A perfectly valid bounded trajectory but the offset never returns.
+    for i,row in enumerate(rows):
+        if i<100: continue
+        previous=rows[i-1]
+        row['command'][1]=row['tcp'][1]=.0004
+        row['command_before']=previous['command'].copy(); row['tcp_before']=previous['tcp'].copy()
+        audit=row['control_audit']; audit['start']=row['command_before'].copy()
+        audit['applied']=row['command'].copy(); audit['applied_offset']=[0.,.0004,0.]
+        audit['offset_before']=[0.,.0004,0.]; audit['filtered_residual']=[0.,0.,0.]
+    with gzip.open(rollout.trace_path,'wt') as stream:
+        stream.write('\n'.join(json.dumps(row) for row in rows)+'\n')
+    with pytest.raises(RuntimeError): call('audit_probe',rollout)
+
+
+def test_pose_probe_rejects_cancelling_native_yaw_even_when_xy_keeps_moving(tmp_path):
+    import gzip
+    rollout=constructed_probe(tmp_path)
+    with gzip.open(rollout.trace_path,'rt') as stream: rows=[json.loads(line) for line in stream]
+    for i,row in enumerate(rows):
+        audit=row['control_audit']
+        audit['native_before'][3]=i*.0001; audit['native'][3]=(i+1)*.0001
+        audit['offset_before'][2]=-i*.0001; audit['applied_offset'][2]=-(i+1)*.0001
+        audit['filtered_residual'][2]=-.01
+    with gzip.open(rollout.trace_path,'wt') as stream:
+        stream.write('\n'.join(json.dumps(row) for row in rows)+'\n')
+    with pytest.raises(RuntimeError): call('audit_probe',rollout)
+
+
+def test_completed_probe_with_ik_failure_is_not_a_passing_preflight(tmp_path):
+    rollout=constructed_probe(tmp_path)
+    rollout.row['error']="RuntimeError('UR10 IK target is unreachable')"
+    with pytest.raises(RuntimeError): call('audit_probe',rollout)
+
+
+@pytest.mark.parametrize('problem',[{'outcome':'safety'},{'error':'UR10 IK target is unreachable'}])
+def test_zero_preflight_stops_on_physical_anomaly_before_next_layout(monkeypatch,problem):
+    import residual_rl.pilot as pilot
+    calls=[]
+    def run(spec,mode):
+        calls.append(spec)
+        if len(calls)>1: raise AssertionError('second layout started after failed preflight')
+        return SimpleNamespace(row=problem)
+    monkeypatch.setattr(pilot,'require_shadow_equivalent',lambda row:{'zero_equivalent':True})
+    plan=[dict(episode_id='first',seed=1),dict(episode_id='second',seed=2)]
+    with pytest.raises(RuntimeError):
+        pilot.zero_residual_preflight(SimpleNamespace(run=run),plan)
+    assert len(calls)==1
+
+
 @pytest.mark.parametrize('bad',['missing_audit','missing_record','clock','nan','fake_filter',
-                              'no_reverse','applied_lie','yaw_jump','missing_stage','missing_tcp'])
+                              'missing_hold','applied_lie','yaw_jump','missing_stage','missing_tcp'])
 def test_probe_rejects_missing_malformed_and_nonmonotonic_records(tmp_path,bad):
     import gzip
     rollout=constructed_probe(tmp_path)
@@ -160,9 +216,9 @@ def test_probe_rejects_missing_malformed_and_nonmonotonic_records(tmp_path,bad):
     elif bad=='missing_record': rows.pop(120)
     elif bad=='clock': rows[120]['t']=rows[119]['t']
     elif bad=='nan': rows[120]['command'][0]=float('nan')
-    elif bad=='fake_filter': rows[120]['control_audit']['filtered_residual'][0]=0.
-    elif bad=='no_reverse':
-        for row in rows: row['probe_stage']='small_start'
+    elif bad=='fake_filter': rows[120]['control_audit']['filtered_residual'][1]=0.
+    elif bad=='missing_hold':
+        for row in rows: row['probe_stage']='small_offset'
     elif bad=='applied_lie': rows[120]['control_audit']['applied'][0]+=1.
     elif bad=='yaw_jump': rows[120]['command'][3]+=1.
     elif bad=='missing_stage': rows[120].pop('probe_stage')
@@ -174,11 +230,11 @@ def test_probe_rejects_missing_malformed_and_nonmonotonic_records(tmp_path,bad):
 
 def test_probe_derives_executed_xy_and_yaw_clipping(tmp_path):
     result=call('audit_probe',constructed_probe(tmp_path,clipped=True))
-    assert result['max_command_xy_m_s']==pytest.approx(.08)
-    assert result['max_command_yaw_rad_s']==pytest.approx(.35)
+    assert result['max_command_xy_m_s']==pytest.approx(np.hypot(.079,.001))
+    assert result['max_command_yaw_rad_s']==pytest.approx(.3)
 
 
-def test_probe_keeps_unshifted_native_separate_from_composition_reference(tmp_path):
+def test_probe_rejects_falsified_nominal_anchor(tmp_path):
     import gzip
     rollout=constructed_probe(tmp_path)
     with gzip.open(rollout.trace_path,'rt') as stream: rows=[json.loads(line) for line in stream]
@@ -189,7 +245,7 @@ def test_probe_keeps_unshifted_native_separate_from_composition_reference(tmp_pa
         audit['native_before']=(np.asarray(audit['start'])-offset).tolist()
     with gzip.open(rollout.trace_path,'wt') as stream:
         stream.write('\n'.join(json.dumps(row) for row in rows)+'\n')
-    assert call('audit_probe',rollout)['passed']
+    with pytest.raises(RuntimeError): call('audit_probe',rollout)
 
 
 def numeric_checkpoint_context(tmp_path,monkeypatch):
@@ -250,7 +306,8 @@ def test_failed_checkpoint_write_preserves_last_complete_full_checkpoint(tmp_pat
         output_bytes=0,rss=0,dangerous_memory=False))
     replay=SimpleNamespace(state_dict=lambda:dict(episodes=[],rng={'seed':7}))
     previous=call('checkpoint',store,learner,replay,guard,'previous')
-    assert torch.load(previous,weights_only=False)['replay']['rng']=={'seed':7}
+    from residual_rl.storage import unpack_replay
+    assert unpack_replay(torch.load(previous,weights_only=False)['replay'])['rng']=={'seed':7}
     before=previous.read_bytes()
     def fail(payload,stream):
         stream.write(b'partial'); raise OSError('synthetic write failure')
