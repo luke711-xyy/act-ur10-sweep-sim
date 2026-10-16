@@ -220,7 +220,8 @@ def snapshot(root, page=1, page_size=25, role='all', arm='all'):
     pages = max(1, math.ceil(len(selected)/page_size)); page = max(1, min(pages, int(page)))
     checkpoints = _document(root, 'checkpoints/index.json', warnings)
     result = dict(status=status, progress=counts, run=dict(path=str(root), name=root.name, phase=phase,
-            training_started=status.get('training_started'), budget=design.get('budget', run_doc.get('budget', {}))),
+            training_started=status.get('training_started'),cpu_acceptance=run_doc.get('cpu_acceptance'),
+            budget=design.get('budget', run_doc.get('budget', {}))),
         process=_process(root), observed_at=time.time(),
         episodes=[_episode(root, row, warnings) for row in selected[(page-1)*page_size:page*page_size]],
         total_episodes=len(rows) if rows.complete else None, parsed_episodes=len(rows), data_complete=rows.complete,

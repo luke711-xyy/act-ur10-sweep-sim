@@ -10,6 +10,8 @@ def parser():
     p.add_argument('--out',type=Path)
     p.add_argument('--run',type=Path,help='training run owning the verified checkpoint')
     p.add_argument('--acceptance-report',type=Path)
+    p.add_argument('--waive-cpu-acceptance',action='store_true',
+        help='explicitly skip CPU acceptance for this new formal training run; the waiver is recorded')
     p.add_argument('--device',choices=['cpu','mps','cuda'],default='cpu')
     p.add_argument('--acknowledge-gpu-training',action='store_true')
     p.add_argument('--continue-authorized-from',type=Path,
@@ -26,6 +28,8 @@ def main(argv=None):
     if args.continue_authorized_from is not None and args.mode!='preflight':
         p.error('--continue-authorized-from is only valid for preflight')
     if args.preflight_start_index and args.mode!='preflight':p.error('--preflight-start-index is only valid for preflight')
+    if args.waive_cpu_acceptance and args.mode!='train':
+        p.error('--waive-cpu-acceptance is only valid for a new formal training run')
     if args.mode=='inspect':
         from .lifecycle import inspect
         print(json.dumps(inspect(args.bundle),indent=2)); return 0
@@ -33,10 +37,17 @@ def main(argv=None):
     from .lifecycle import require_runtime
     require_runtime()
     if args.mode in ('train','resume'):
-        if not args.acknowledge_gpu_training or not args.acceptance_report:
-            p.error('GPU execution needs separate explicit launch authorization and --acceptance-report')
+        if not args.acknowledge_gpu_training:
+            p.error('GPU execution needs separate explicit launch authorization')
+        if args.mode=='resume' and args.waive_cpu_acceptance:
+            p.error('CPU acceptance can only be waived for a new training run, not resume')
+        if args.waive_cpu_acceptance and args.acceptance_report:
+            p.error('--waive-cpu-acceptance cannot be combined with --acceptance-report')
+        if not args.waive_cpu_acceptance and not args.acceptance_report:
+            p.error('GPU execution needs --acceptance-report unless --waive-cpu-acceptance is explicit')
         from .training import train
-        train(args.bundle,args.out,args.acceptance_report,resume=args.mode=='resume')
+        train(args.bundle,args.out,args.acceptance_report,resume=args.mode=='resume',
+            waive_cpu_acceptance=args.waive_cpu_acceptance)
     elif args.mode=='preflight':
         from .acceptance import preflight
         preflight(args.bundle,args.out,args.device,continue_from=args.continue_authorized_from,start_index=args.preflight_start_index)

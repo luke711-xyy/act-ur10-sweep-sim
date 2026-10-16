@@ -12,6 +12,35 @@ from .lifecycle import Collection,cfg_for,experiment_lock,make_guard,resume_coun
 from .storage import Checkpoints,RunStore,append_json,read_rows,write_json,iter_rows,audit_identity
 
 
+def cpu_acceptance_authorization(bundle_identity,acceptance_report,*,waive_cpu_acceptance=False):
+    if waive_cpu_acceptance:
+        if acceptance_report is not None:
+            raise ValueError('CPU acceptance waiver cannot be combined with an acceptance report')
+        return dict(schema=1,status='waived',engineering_passed=None,
+            bundle_identity=bundle_identity,acceptance_report=None,
+            scope='this formal training run only',
+            operator_direction='User directed formal training to start without CPU acceptance preflight.',
+            launch_flag='--waive-cpu-acceptance',recorded_at=time.time())
+    if acceptance_report is None:
+        raise ValueError('a matching CPU acceptance report is required unless the one-run waiver is explicit')
+    report_path=Path(acceptance_report).resolve()
+    acceptance=json.loads(report_path.read_text())
+    if acceptance.get('engineering_passed') is not True or acceptance.get('bundle_identity')!=bundle_identity:
+        raise RuntimeError('a passed matching CPU acceptance report is required before GPU training')
+    return dict(schema=1,status='passed',engineering_passed=True,bundle_identity=bundle_identity,
+        acceptance_report=str(report_path))
+
+
+def write_cpu_acceptance_waiver(out,authorization):
+    if authorization.get('status')!='waived' or authorization.get('engineering_passed') is not None:
+        raise ValueError('only an explicit non-passing waiver may be recorded here')
+    path=Path(out)/'cpu_acceptance_waiver.json'
+    if path.exists():
+        raise FileExistsError(path)
+    write_json(path,authorization)
+    return path
+
+
 def final_accepted_state(checkpoints,counters,registry):
     import copy
     value=dict(checkpoints.latest()['state'])
@@ -178,18 +207,19 @@ def _benchmark_backward(collection,trainer,observations,start):
             examples_per_second=6/max(.001,time.time()-start),optimizer_steps=0)
 
 
-def train(bundle,out,acceptance_report,*,resume=False):
+def train(bundle,out,acceptance_report=None,*,resume=False,waive_cpu_acceptance=False):
     began=time.time()
     import torch
     from .policy import ChunkPolicy
     from .ppo import audited_trainer
     from .safety import StopExperiment
     from torch.utils.tensorboard import SummaryWriter
+    if resume and waive_cpu_acceptance:
+        raise ValueError('CPU acceptance can only be waived for a new training run, not resume')
     if not torch.cuda.is_available(): raise RuntimeError('formal PAC-ACT training requires a CUDA GPU; no silent Mac/CPU fallback')
     frozen=verify_bundle(bundle)
-    acceptance=json.loads(Path(acceptance_report).read_text())
-    if acceptance.get('engineering_passed') is not True or acceptance.get('bundle_identity')!=frozen['identity']:
-        raise RuntimeError('a passed matching Mac acceptance report is required before GPU training')
+    authorization=cpu_acceptance_authorization(frozen['identity'],acceptance_report,
+        waive_cpu_acceptance=waive_cpu_acceptance)
     out=Path(out).resolve()
     if not resume: out.mkdir(parents=True,exist_ok=False)
     elif not (out/'run.json').is_file(): raise ValueError('resume needs an existing experiment, not a new run')
@@ -216,8 +246,11 @@ def train(bundle,out,acceptance_report,*,resume=False):
             recover_orphans(store)
             restore_registry(store,registry)
         else:
+            if authorization['status']=='waived':
+                write_cpu_acceptance_waiver(out,authorization)
             write_json(out/'run.json',dict(bundle_identity=frozen['identity'],checkpoint_identity=identity,
-                config=DEFAULT.asdict(),budget=guard.identity(),validation_seeds=[seed_spec('validation',i) for i in range(24)]))
+                config=DEFAULT.asdict(),budget=guard.identity(),validation_seeds=[seed_spec('validation',i) for i in range(24)],
+                cpu_acceptance=authorization))
         execution_id=uuid.uuid4().hex
         # A recovery fork gets a separate TensorBoard run. Historical orphaned
         # updates remain visible as history, never mixed into the new curve.
