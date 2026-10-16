@@ -131,10 +131,22 @@ Acceptance compares target1/6 old native temporal ensemble, new deterministic
 chunk schedule and new stochastic schedule on the same two new layouts.
 It then performs **two real PPO updates of32 blocks** and deterministic
 post-update checks. All opportunities, including native failures, are kept.
-Videos replay saved integration states only, without rerunning ACT, commands
-or IK. Outputs include `acceptance.json`, per-episode `result.json`,
+Videos initialize the same scene using native reset IK/settling, then replay
+saved integration states, without rerunning ACT or trajectory-command IK.
+Outputs include `acceptance.json`, per-episode `result.json`,
 `physical_trace.jsonl.gz`, `blocks.jsonl`, MP4 and wrist-force/Z curves.
 Engineering pass is not a claim that strict success has improved.
+
+If a presentation-layer error stops acceptance before any PPO update or
+stochastic comparison, continuation requires explicit human authorization.
+Keep the original bundle unchanged and package the authorized repair as a new
+bundle. `--continue-authorized-from /path/to/original_bundle` reuses the same
+output directory and original deadline/resource/opportunity budgets. It
+archives the failed report, verifies completed results and recovered media,
+and claims a single-use continuation owner. Only unattempted comparison arms
+execute. Orphan attempts, changed control/model inputs, stochastic history,
+previous updates, or an already-consumed authorization are refused. This is
+not generic learner resume and never re-executes a finished physical trial.
 
 ## Explicit GPU execution (separate authorization required)
 
