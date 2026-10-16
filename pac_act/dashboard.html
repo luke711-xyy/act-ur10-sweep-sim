@@ -158,7 +158,8 @@ function render(d){
   $('saves').replaceChildren(...d.checkpoint_records.map(s=>{const row=text('tr','');for(const v of [s.file,s.kind,fmt(s.actions),fmt(s.threshold),finite(s.bytes)?fmt(scaled(s.bytes,1/2**20),1)+' MiB':'—',s.verification==='metadata_and_file_size_only'?'索引 / 文件大小一致':'未完整落盘'])row.append(text('td',v));return row}));
   if(!d.checkpoint_records.length){const tr=text('tr',''),td=text('td',pre?'尚无验收 checkpoint；验收结束时保存。':'尚无 checkpoint 记录。','neutral');td.colSpan=6;tr.append(td);$('saves').append(tr)}
   $('checkpoint-count').textContent=d.checkpoint_records.length+' 份索引记录';
-  $('acceptance-summary').textContent=d.run.cpu_acceptance?.status==='waived'?'本次正式训练按明确指示豁免 CPU 验收；engineering_passed 未声明，结果不代表验收通过。':d.preflight.engineering_passed===true?'工程验收通过；不等于任务成功率已改善。':d.preflight.engineering_passed===false?'工程验收未通过，详见各项检查与终止原因。':'验收报告尚未完成；不据此启动正式训练。';
+  const notices=[];if(d.run.cpu_acceptance?.status==='waived')notices.push('本次正式训练按明确指示豁免 CPU 验收；engineering_passed 未声明，结果不代表验收通过。');else if(d.preflight.engineering_passed===true)notices.push('工程验收通过；不等于任务成功率已改善。');else if(d.preflight.engineering_passed===false)notices.push('工程验收未通过，详见各项检查与终止原因。');else notices.push('验收报告尚未完成。');
+  if(d.run.baseline_validation?.status==='skipped')notices.push('本次按明确指示跳过基线评估。');$('acceptance-summary').textContent=notices.join(' ');
   $('checks').replaceChildren(...Object.entries(d.preflight.checks).map(([k,v])=>text('span',(v?'✓ ':'× ')+k,v?'yes':'no')));
   $('validations').replaceChildren(...d.validations.map(v=>{const rate=scaled(v.strict_success_rate,100);const p=text('p',v.arm+' · 严格成功 '+(finite(rate)?fmt(rate,1)+'%':'—')+' · MAE '+fmt(v.mean_absolute_error,2)+' · '+fmt(v.episodes)+' 回合','subtle');const a=text('a',' 数量热力图 ↗');a.href='/validation_'+encodeURIComponent(v.arm)+'.png';a.target='_blank';a.rel='noopener';p.append(a);return p}));
 }

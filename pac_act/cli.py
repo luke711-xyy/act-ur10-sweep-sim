@@ -12,6 +12,8 @@ def parser():
     p.add_argument('--acceptance-report',type=Path)
     p.add_argument('--waive-cpu-acceptance',action='store_true',
         help='explicitly skip CPU acceptance for this new formal training run; the waiver is recorded')
+    p.add_argument('--skip-baseline-validation',action='store_true',
+        help='skip the initial baseline rollout for this new formal training run; the choice is recorded')
     p.add_argument('--device',choices=['cpu','mps','cuda'],default='cpu')
     p.add_argument('--acknowledge-gpu-training',action='store_true')
     p.add_argument('--continue-authorized-from',type=Path,
@@ -30,6 +32,8 @@ def main(argv=None):
     if args.preflight_start_index and args.mode!='preflight':p.error('--preflight-start-index is only valid for preflight')
     if args.waive_cpu_acceptance and args.mode!='train':
         p.error('--waive-cpu-acceptance is only valid for a new formal training run')
+    if args.skip_baseline_validation and args.mode!='train':
+        p.error('--skip-baseline-validation is only valid for a new formal training run')
     if args.mode=='inspect':
         from .lifecycle import inspect
         print(json.dumps(inspect(args.bundle),indent=2)); return 0
@@ -41,13 +45,16 @@ def main(argv=None):
             p.error('GPU execution needs separate explicit launch authorization')
         if args.mode=='resume' and args.waive_cpu_acceptance:
             p.error('CPU acceptance can only be waived for a new training run, not resume')
+        if args.mode=='resume' and args.skip_baseline_validation:
+            p.error('baseline validation can only be skipped for a new training run, not resume')
         if args.waive_cpu_acceptance and args.acceptance_report:
             p.error('--waive-cpu-acceptance cannot be combined with --acceptance-report')
         if not args.waive_cpu_acceptance and not args.acceptance_report:
             p.error('GPU execution needs --acceptance-report unless --waive-cpu-acceptance is explicit')
         from .training import train
         train(args.bundle,args.out,args.acceptance_report,resume=args.mode=='resume',
-            waive_cpu_acceptance=args.waive_cpu_acceptance)
+            waive_cpu_acceptance=args.waive_cpu_acceptance,
+            skip_baseline_validation=args.skip_baseline_validation)
     elif args.mode=='preflight':
         from .acceptance import preflight
         preflight(args.bundle,args.out,args.device,continue_from=args.continue_authorized_from,start_index=args.preflight_start_index)

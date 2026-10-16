@@ -41,6 +41,14 @@ def write_cpu_acceptance_waiver(out,authorization):
     return path
 
 
+def run_baseline_validation(validate,*,skip=False):
+    if skip:
+        return dict(status='skipped',scope='this formal training run only',
+            operator_direction='User directed formal training to skip the baseline evaluation.')
+    validate('baseline',media='all',baseline=True)
+    return dict(status='completed')
+
+
 def final_accepted_state(checkpoints,counters,registry):
     import copy
     value=dict(checkpoints.latest()['state'])
@@ -207,7 +215,8 @@ def _benchmark_backward(collection,trainer,observations,start):
             examples_per_second=6/max(.001,time.time()-start),optimizer_steps=0)
 
 
-def train(bundle,out,acceptance_report=None,*,resume=False,waive_cpu_acceptance=False):
+def train(bundle,out,acceptance_report=None,*,resume=False,waive_cpu_acceptance=False,
+          skip_baseline_validation=False):
     began=time.time()
     import torch
     from .policy import ChunkPolicy
@@ -216,6 +225,8 @@ def train(bundle,out,acceptance_report=None,*,resume=False,waive_cpu_acceptance=
     from torch.utils.tensorboard import SummaryWriter
     if resume and waive_cpu_acceptance:
         raise ValueError('CPU acceptance can only be waived for a new training run, not resume')
+    if resume and skip_baseline_validation:
+        raise ValueError('baseline validation can only be skipped for a new training run, not resume')
     if not torch.cuda.is_available(): raise RuntimeError('formal PAC-ACT training requires a CUDA GPU; no silent Mac/CPU fallback')
     frozen=verify_bundle(bundle)
     authorization=cpu_acceptance_authorization(frozen['identity'],acceptance_report,
@@ -248,9 +259,12 @@ def train(bundle,out,acceptance_report=None,*,resume=False,waive_cpu_acceptance=
         else:
             if authorization['status']=='waived':
                 write_cpu_acceptance_waiver(out,authorization)
+            baseline_record=(dict(status='skipped',scope='this formal training run only',
+                operator_direction='User directed formal training to skip the baseline evaluation.')
+                if skip_baseline_validation else dict(status='pending'))
             write_json(out/'run.json',dict(bundle_identity=frozen['identity'],checkpoint_identity=identity,
                 config=DEFAULT.asdict(),budget=guard.identity(),validation_seeds=[seed_spec('validation',i) for i in range(24)],
-                cpu_acceptance=authorization))
+                cpu_acceptance=authorization,baseline_validation=baseline_record))
         execution_id=uuid.uuid4().hex
         # A recovery fork gets a separate TensorBoard run. Historical orphaned
         # updates remain visible as history, never mixed into the new curve.
@@ -281,8 +295,13 @@ def train(bundle,out,acceptance_report=None,*,resume=False,waive_cpu_acceptance=
             audit=benchmark(collection,trainer)
             append_json(out/'gpu_startup_attempts.jsonl',audit)
             write_json(out/'gpu_startup.json',audit)
-            publish(phase='baseline_validation')
-            validation('baseline',media='all',baseline=True)
+            if not skip_baseline_validation:
+                publish(phase='baseline_validation')
+            baseline_record=run_baseline_validation(validation,skip=skip_baseline_validation)
+            if not resume:
+                run_metadata=json.loads((out/'run.json').read_text())
+                run_metadata['baseline_validation']=baseline_record
+                write_json(out/'run.json',run_metadata)
             # A checkpoint can precede its milestone validation. Resume that
             # protocol before sampling another rollout, without physical retries.
             for threshold in sorted(milestones):
