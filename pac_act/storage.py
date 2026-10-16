@@ -49,9 +49,23 @@ def read_rows(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line] if path.exists() else []
 
 
+def last_row(path):
+    """Bounded tail read for the million-action journal, including live writes."""
+    path=Path(path)
+    if not path.exists(): return None
+    with path.open('rb') as stream:
+        stream.seek(0,2); size=stream.tell()
+        stream.seek(max(0,size-65536)); data=stream.read()
+    complete=data[:data.rfind(b'\n')+1].splitlines()
+    for line in reversed(complete):
+        if line.strip(): return json.loads(line)
+    return None
+
+
 class Checkpoints:
-    def __init__(self,root,identity):
+    def __init__(self,root,identity,guard=None):
         self.root=Path(root); self.identity=identity
+        self.guard=guard
         self.root.mkdir(parents=True,exist_ok=True)
 
     def index(self):
@@ -68,7 +82,21 @@ class Checkpoints:
             # Direct file writer: no BytesIO, pickle.dumps, or whole-buffer copy.
             payload=dict(identity=self.identity,actions=int(actions),state=state)
             with tmp.open('xb') as stream:
-                (writer or torch.save)(payload,stream); stream.flush(); os.fsync(stream.fileno())
+                if writer is not None: writer(payload,stream)
+                else:
+                    import shutil
+                    from residual_rl.storage import BoundedCheckpointWriter,save_checkpoint_payload
+                    guard=self.guard
+                    reserve=(guard.free_gib if guard else 8)*2**30
+                    used=sum(p.stat().st_size for p in (guard.root if guard else self.root).rglob('*') if p.is_file() and not p.is_symlink())
+                    cap=(guard.output_gib*2**30-used) if guard else 4*2**30
+                    deadline=time.monotonic()+max(0.,guard.deadline-time.time()) if guard else time.monotonic()+300
+                    def check():
+                        if guard: guard.poll()
+                        return max(0,int(shutil.disk_usage(self.root).free-reserve)),None
+                    sink=BoundedCheckpointWriter(stream,max_bytes=int(cap),deadline=deadline,check=check)
+                    save_checkpoint_payload(payload,sink)
+                stream.flush(); os.fsync(stream.fileno())
             record=dict(file=name,bytes=tmp.stat().st_size,sha256=sha256(tmp),actions=int(actions),threshold=threshold,kind=kind)
             if record['bytes']<=0: raise OSError('empty checkpoint')
             # Verify deserialization too before publishing the index.
@@ -127,7 +155,11 @@ class RunStore:
 
     def claim(self,spec):
         key=self.key(spec)
-        with (self.root/'attempts'/f'{key}.json').open('x') as f:
+        marker=self.root/'attempts'/f'{key}.json'
+        if spec['role']=='preflight' and not marker.exists() and len(list((self.root/'attempts').glob('preflight_*.json')))>=24:
+            from .safety import StopExperiment
+            raise StopExperiment('24 preflight opportunity cap reached')
+        with marker.open('x') as f:
             json.dump(spec,f,allow_nan=False); f.flush(); os.fsync(f.fileno())
         path=self.root/'episodes'/key; path.mkdir(exist_ok=False)
         return path

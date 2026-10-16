@@ -33,6 +33,14 @@ def restore_rng(state):
     if 'mps' in state: torch.mps.set_rng_state(state['mps'])
 
 
+def cpu_tree(value):
+    if isinstance(value,torch.Tensor): return value.detach().cpu().clone()
+    if isinstance(value,dict): return {k:cpu_tree(v) for k,v in value.items()}
+    if isinstance(value,list): return [cpu_tree(v) for v in value]
+    if isinstance(value,tuple): return tuple(cpu_tree(v) for v in value)
+    return copy.deepcopy(value)
+
+
 def gae(rewards,values,next_values,terminated,lam=.95):
     rewards,values,next_values=np.asarray(rewards),np.asarray(values),np.asarray(next_values)
     done=np.asarray(terminated,dtype=bool)
@@ -73,13 +81,14 @@ class ChunkPPO(PPO):
     Never use inherited learn/collect_rollouts/save: the experiment lifecycle
     owns chunk collection, atomic checkpoints and resource limits explicitly.
     """
-    def __init__(self,policy,config=DEFAULT):
+    def __init__(self,policy,config=DEFAULT,*,poll=None):
         super().__init__(type(policy),None,learning_rate=config.actor_lr,n_steps=64,
             batch_size=config.batch,n_epochs=config.epochs,gamma=1.,gae_lambda=config.gae_lambda,
             clip_range=config.clip,ent_coef=config.entropy_coef,vf_coef=config.value_coef,
             max_grad_norm=config.max_grad_norm,target_kl=config.target_kl,
             device=str(policy.device),_init_setup_model=False)
         self.policy=policy; self.config=config
+        self.poll=poll or (lambda:None)
         self.optimizer=torch.optim.Adam([
             {'params':list(policy.actor.parameters())+list(policy.noise.parameters()),'lr':config.actor_lr,'role':'actor'},
             {'params':list(policy.critic.parameters()),'lr':config.critic_lr,'role':'critic'}],eps=1e-5)
@@ -92,7 +101,7 @@ class ChunkPPO(PPO):
 
     def snapshot(self):
         return {'model':{k:v.detach().cpu().clone() for k,v in self.policy.learned_state().items()},
-            'optimizer':copy.deepcopy(self.optimizer.state_dict()),
+            'optimizer':cpu_tree(self.optimizer.state_dict()),
             'rng':capture_rng(self.policy.device),'updates':self._n_updates}
 
     def restore(self,state):
@@ -121,6 +130,7 @@ class ChunkPPO(PPO):
         adv=(adv-adv.mean())/(adv.std(unbiased=False)+1e-8)
         self.optimizer.zero_grad(set_to_none=True); result={}
         for start in range(0,len(index),self.config.microbatch):
+            self.poll()
             end=min(start+self.config.microbatch,len(index)); weight=(end-start)/len(index)
             parts=self.objective(batch,index[start:end],adv[start:end])
             if not all(torch.isfinite(v).all() for v in parts.values()):
@@ -129,6 +139,7 @@ class ChunkPPO(PPO):
             for key in ('loss','actor_loss','value_loss','entropy','kl'):
                 result[key]=result.get(key,0.)+float(parts[key].detach())*weight
         parameters=[p for g in self.optimizer.param_groups for p in g['params']]
+        self.poll()
         norm=torch.nn.utils.clip_grad_norm_(parameters,self.config.max_grad_norm,error_if_nonfinite=True)
         self.optimizer.step(); self.policy.noise.project_()
         if any(not torch.isfinite(p).all() for p in parameters): raise UpdateRejected('nonfinite PPO parameters')
@@ -139,6 +150,7 @@ class ChunkPPO(PPO):
     def exact_kl(self,batch):
         total=0.
         for start in range(0,len(batch),self.config.microbatch):
+            self.poll()
             data=batch.take(torch.arange(start,min(start+self.config.microbatch,len(batch))),self.policy.device)
             old=PrefixGaussian(data['old_means'],data['old_log_std'],data['lengths'])
             value=old.kl(self.policy.means(data['observations']),self.policy.noise.log_std)
@@ -151,6 +163,7 @@ class ChunkPPO(PPO):
         if len(batch)<32 or len(batch)%32: raise ValueError('rollout must contain whole logical minibatches32')
         batch.consumed=True; saved=self.snapshot(); records=[]
         try:
+            self.poll()
             for epoch in range(self.config.epochs):
                 indices=torch.randperm(len(batch))
                 for start in range(0,len(batch),self.config.batch):
@@ -164,9 +177,14 @@ class ChunkPPO(PPO):
                    for k in records[0]} if records else {})
             return self.last_audit
         except BaseException as error:
-            self.restore(saved)
-            self.last_audit=dict(accepted=False,rolled_back=True,error=repr(error),updates=self._n_updates)
-            if isinstance(error,(KeyboardInterrupt,SystemExit,UpdateRejected)): raise
+            restored=False
+            try:
+                self.restore(saved); restored=True
+            except BaseException as restoration:
+                error.add_note(f'rollback could not be completed: {restoration!r}; last verified disk checkpoint remains authoritative')
+            self.last_audit=dict(accepted=False,rolled_back=restored,error=repr(error),updates=self._n_updates)
+            from .safety import StopExperiment
+            if isinstance(error,(KeyboardInterrupt,SystemExit,UpdateRejected,StopExperiment)): raise
             raise UpdateRejected(f'PPO update rolled back: {type(error).__name__}: {error}') from error
 
     def learn(self,*args,**kwargs):

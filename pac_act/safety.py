@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import contextmanager,ExitStack
 
 
 class StopExperiment(RuntimeError):
@@ -18,6 +19,7 @@ class Guard:
         self.free_gib,self.output_gib=free_gib,output_gib
         self.rss_gib,self.rss_dwell=rss_gib,rss_dwell
         self.high_since=None; self.pressure_since=None; self.last_poll=-float('inf')
+        self.identity_check=None
 
     def identity(self):
         return {k:getattr(self,k) for k in ('started_at','deadline','collect_deadline','free_gib','output_gib','rss_gib','rss_dwell')}
@@ -29,6 +31,7 @@ class Guard:
         injected=any(v is not None for v in (free_bytes,rss_bytes,output_bytes,pressure))
         if not injected and now-self.last_poll<1.: return
         self.last_poll=now
+        if self.identity_check: self.identity_check()
         if free_bytes is None: free_bytes=shutil.disk_usage(self.root).free
         if rss_bytes is None:
             import psutil
@@ -52,6 +55,32 @@ class Guard:
             raise StopExperiment('sustained dangerous memory pressure')
 
 
+def inference_lock_paths():
+    from .identity import PROJECT
+    paths={PROJECT/'runs/.act_inference.lock'}
+    # Original manual inference and SAC use this native lock. Sibling
+    # worktrees must share the lease even though their Git caches differ.
+    for sibling in PROJECT.parent.iterdir():
+        candidate=sibling/'runs/.act_inference.lock'
+        if candidate.is_file(): paths.add(candidate)
+    for path in os.environ.get('PAC_ACT_INFERENCE_LOCKS','').split(os.pathsep):
+        if path: paths.add(Path(path).resolve())
+    return sorted(paths)
+
+
+@contextmanager
+def local_inference_lease(paths=None):
+    import fcntl
+    with ExitStack() as stack:
+        for path in (inference_lock_paths() if paths is None else paths):
+            path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
+            stream=stack.enter_context(path.open('a+'))
+            try: fcntl.flock(stream,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RuntimeError('local inference lease busy; existing task not stopped: '+str(path)) from error
+        yield
+
+
 def local_inference_available():
     """Detect active original training across worktrees, not just a new local lock."""
     import psutil
@@ -59,6 +88,15 @@ def local_inference_available():
         if process.pid==os.getpid(): continue
         try: command=process.info['cmdline'] or []
         except (psutil.AccessDenied,psutil.NoSuchProcess): continue
-        if any(Path(arg).name in ('train_residual_long.py','train_residual_sac.py') for arg in command):
+        if any(Path(arg).name in ('train_residual_long.py','train_residual_sac.py','train_pac_act.py')
+               for arg in command) and '--mode' in command and any(mode in command for mode in ('train','resume','preflight','infer','evaluate')):
             return False,dict(pid=process.pid,command=command)
+    import fcntl
+    for path in inference_lock_paths():
+        if not path.is_file(): continue
+        try:
+            with path.open('r') as stream:
+                fcntl.flock(stream,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                fcntl.flock(stream,fcntl.LOCK_UN)
+        except BlockingIOError: return False,dict(pid='native-lock',path=str(path))
     return True,None

@@ -1,0 +1,294 @@
+"""Explicit GPU experiment lifecycle; no entry point starts this implicitly."""
+from dataclasses import replace
+import json
+from pathlib import Path
+import random
+import time
+
+from .config import DEFAULT,Config
+from .identity import LayoutRegistry,seed_spec,verify_bundle,bundle_digest
+from .lifecycle import Collection,cfg_for,experiment_lock,make_guard,resume_counters
+from .storage import Checkpoints,RunStore,append_json,read_rows,write_json
+
+
+def final_accepted_state(checkpoints,counters,registry):
+    import copy
+    value=dict(checkpoints.latest()['state'])
+    value['counters']=copy.deepcopy(counters)
+    value['registry']=copy.deepcopy(registry)
+    return value
+
+
+def restore_registry(store,registry):
+    for marker in sorted((store.root/'attempts').glob('*.json')):
+        spec=json.loads(marker.read_text()); path=store.root/'episodes'/store.key(spec)/'layout.json'
+        if not path.exists(): continue
+        fingerprint=json.loads(path.read_text())['layout_fingerprint']
+        prior=registry.used.get(fingerprint)
+        if prior and (prior['seed']!=spec['seed'] or prior['role']!=spec['role']):
+            raise ValueError('saved layout registry conflict')
+        registry.used[fingerprint]=spec
+
+
+def validation_pending(store,specs):
+    keys={store.key(s) for s in specs}
+    rows=[r for r in store.rows() if store.key(r) in keys]
+    completed={store.key(r) for r in rows}
+    for spec in specs:
+        key=store.key(spec)
+        if key not in completed and (store.root/'attempts'/f'{key}.json').exists():
+            raise RuntimeError('unresolved validation opportunity; explicit recovery required: '+key)
+    return [s for s in specs if store.key(s) not in completed],rows
+
+
+def reconcile_update_audit(root,state):
+    audit=state.get('last_update_audit')
+    if audit and not any(r.get('accepted') and r['update']==audit['update']
+                         for r in read_rows(Path(root)/'updates.jsonl')):
+        append_json(Path(root)/'updates.jsonl',audit)
+
+
+def commit_update(checkpoints,state,counts,audit,root):
+    """A loss curve and used-action count refer only to a durable update."""
+    state=dict(state,last_update_audit=audit.copy())
+    record=checkpoints.save(state,state['counters']['sampled_actions'])
+    counts.update(state['counters'])
+    reconcile_update_audit(root,state)
+    return record
+
+
+def evaluate_set(bundle,policy,store,registry,guard,*,arm,media='selected',specs=None,baseline=False):
+    previous=[r for r in read_rows(store.root/'validations.jsonl') if r['arm']==arm]
+    if previous: return previous[-1]
+    from .hybrid import HybridEpisode
+    from .media import heatmap,render_episode
+    collection=Collection(bundle,policy,store,registry,guard,{})
+    specs=specs or [seed_spec('validation',i,arm) for i in range(24)]
+    pending,rows=validation_pending(store,specs)
+    for spec in pending:
+        guard.poll()
+        world=HybridEpisode(cfg_for(bundle,spec['target_count']),policy,spec,store,registry,guard)
+        try:
+            while not world.done: collection.block(world,deterministic=True,baseline=baseline,learning=False)
+            rows.append(world.finish())
+        except BaseException as error:
+            world.interrupt(error); raise
+    # Resume media-only work from saved states, never execute a completed seed.
+    for i,spec in enumerate(specs):
+        folder=store.root/'episodes'/store.key(spec)
+        if (media=='all' or (media=='selected' and i in (0,5))) and not (folder/'media.json').exists():
+            if (folder/'configuration.json').exists(): render_episode(folder,guard)
+    known=[r for r in rows if r['final_collected'] is not None]
+    summary=dict(arm=arm,episodes=len(rows),strict_success_rate=sum(r['success'] is True for r in rows)/len(rows),
+        exact_count_rate=sum(r['final_collected']==r['target_count'] for r in known)/len(rows),
+        mean_absolute_error=sum(abs(r['final_collected']-r['target_count']) for r in known)/len(known) if known else None,
+        unknown_counts=len(rows)-len(known),safety_terminations=sum(r['outcome']=='safety' for r in rows),
+        IK_failures=sum(r.get('IK_error') is not None for r in rows),
+        protocol_complete=len(rows)==len(specs) and all(r.get('outcome')!='interrupted' for r in rows))
+    heatmap(rows,store.root/f'validation_{arm}.png')
+    append_json(store.root/'validations.jsonl',summary)
+    return summary
+
+
+def recover_orphans(store):
+    """Explicit resume only: retire interrupted opportunities, never rerun them."""
+    known={store.key(r) for r in store.rows()}
+    for marker in sorted((store.root/'attempts').glob('*.json')):
+        spec=json.loads(marker.read_text()); key=store.key(spec)
+        if key in known: continue
+        folder=store.root/'episodes'/key
+        result=folder/'result.json'
+        if result.exists():
+            # Measurement was durably written, only append-only ledger commit
+            # was interrupted. Reuse the actual result verbatim.
+            store.commit(json.loads(result.read_text())); continue
+        blocks=read_rows(folder/'blocks.jsonl'); count=blocks[-1].get('final_collected') if blocks else None
+        store.commit(dict(**spec,outcome='interrupted',success=None,final_collected=count,
+            active_actions=sum(r['executed'] for r in blocks if r['learned']),
+            reason='previous process interrupted; no physical continuation or retry'))
+
+
+def benchmark(collection,trainer):
+    """Actual six-world rendering and backward memory test; no optimizer step."""
+    import torch
+    from .ppo import capture_rng,restore_rng
+    start=time.time(); rng=capture_rng('cuda')
+    try:
+        from sim.environments.sweep_env import SweepEnv
+        from sim.act.interface import ACTObservationBuilder
+        worlds=[]
+        observations=[]
+        try:
+            for goal in range(1,7):
+                cfg=cfg_for(collection.bundle,goal); seed=8_100_000+goal-1
+                env=SweepEnv(cfg,seed=seed); worlds.append(env); env.reset(seed=seed)
+                import hashlib
+                import numpy as np
+                poses=np.c_[env.component_positions(),env.component_quats()].astype('<f4')
+                collection.registry.register(dict(role='preflight',seed=seed,target_count=goal,arm='GPU_memory_only'),hashlib.sha256(poses.tobytes()).hexdigest())
+                collection.guard.poll()
+                builder=ACTObservationBuilder(cfg,camera_views=[k.removeprefix('observation.images.') for k in collection.policy.image_keys],environment_state_dim=1)
+                raw=builder.observe(env,contact_latched=False)
+                obs={k:raw[k] for k in collection.policy.obs_keys}
+                for key in collection.policy.image_keys: obs[key]=np.rint(np.clip(obs[key],0,1)*255).astype(np.uint8)
+                observations.append(obs)
+                env.render_rgb('overhead_cam',size=(960,640))
+            # Keep all six actual rendering contexts alive during backward.
+            return _benchmark_backward(collection,trainer,observations,start)
+        finally:
+            for env in worlds: env.close()
+    finally:
+        trainer.optimizer.zero_grad(set_to_none=True); restore_rng(rng)
+
+
+def _benchmark_backward(collection,trainer,observations,start):
+        import torch
+        import numpy as np
+        batched={k:torch.as_tensor(np.stack([o[k] for o in observations])) for k in observations[0]}
+        selected=None; attempts=[]
+        for micro in (4,2,1):
+            torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
+            try:
+                trainer.optimizer.zero_grad(set_to_none=True)
+                for i in range(0,6,micro):
+                    obs={k:v[i:i+micro] for k,v in batched.items()}
+                    loss=collection.policy.means(obs).square().mean()+collection.policy.values(obs).square().mean()
+                    loss.backward(); collection.guard.poll()
+                torch.cuda.synchronize()
+                selected=micro; attempts.append(dict(microbatch=micro,passed=True,
+                    max_allocated=torch.cuda.max_memory_allocated(),max_reserved=torch.cuda.max_memory_reserved(),
+                    free_total=torch.cuda.mem_get_info()))
+                break
+            except torch.cuda.OutOfMemoryError as error:
+                attempts.append(dict(microbatch=micro,passed=False,error=repr(error)))
+                trainer.optimizer.zero_grad(set_to_none=True); torch.cuda.empty_cache()
+        if selected is None: raise RuntimeError('six environments/full model cannot fit microbatch1; design not reduced')
+        trainer.config=replace(trainer.config,microbatch=selected)
+        return dict(environments=6,microbatch=selected,attempts=attempts,seconds=time.time()-start,
+            examples_per_second=6/max(.001,time.time()-start),optimizer_steps=0)
+
+
+def train(bundle,out,acceptance_report,*,resume=False):
+    began=time.time()
+    import torch
+    from .policy import ChunkPolicy
+    from .ppo import ChunkPPO
+    from .safety import StopExperiment
+    from torch.utils.tensorboard import SummaryWriter
+    if not torch.cuda.is_available(): raise RuntimeError('formal PAC-ACT training requires a CUDA GPU; no silent Mac/CPU fallback')
+    frozen=verify_bundle(bundle)
+    acceptance=json.loads(Path(acceptance_report).read_text())
+    if acceptance.get('engineering_passed') is not True or acceptance.get('bundle_identity')!=frozen['identity']:
+        raise RuntimeError('a passed matching Mac acceptance report is required before GPU training')
+    out=Path(out).resolve()
+    if not resume: out.mkdir(parents=True,exist_ok=False)
+    elif not (out/'run.json').is_file(): raise ValueError('resume needs an existing experiment, not a new run')
+    with experiment_lock(out):
+        run=json.loads((out/'run.json').read_text()) if resume else None
+        if resume and run['bundle_identity']!=frozen['identity']: raise ValueError('resume bundle identity differs')
+        guard=make_guard(out,'gpu',run['budget'] if run else None,started_at=began)
+        from .identity import watch_bundle
+        guard.identity_check=watch_bundle(bundle,frozen)
+        guard.poll()
+        random.seed(42)
+        import numpy as np
+        np.random.seed(42); torch.manual_seed(42); torch.cuda.manual_seed_all(42)
+        store=RunStore(out); registry=LayoutRegistry(json.loads((Path(bundle)/'exclusions.json').read_text()))
+        policy=ChunkPolicy(frozen['model'],'cuda'); trainer=ChunkPPO(policy,poll=guard.poll)
+        identity=bundle_digest(dict(bundle=frozen['identity'],config=DEFAULT.asdict()))
+        cp=Checkpoints(out/'checkpoints',identity,guard)
+        counts=dict(sampled_actions=0,used_actions=0,discarded_actions=0,updates=0,used_blocks=0)
+        if resume:
+            latest=cp.latest()['state']; trainer.config=Config(**latest['config']); trainer.restore(latest['learner'])
+            counts=resume_counters(out,latest['counters'])
+            reconcile_update_audit(out,latest)
+            registry.used=latest['registry']
+            recover_orphans(store)
+            restore_registry(store,registry)
+        else:
+            write_json(out/'run.json',dict(bundle_identity=frozen['identity'],checkpoint_identity=identity,
+                config=DEFAULT.asdict(),budget=guard.identity(),validation_seeds=[seed_spec('validation',i) for i in range(24)]))
+        writer=SummaryWriter(str(out/'tensorboard'))
+        collection=Collection(bundle,policy,store,registry,guard,counts)
+        collection.version=trainer._n_updates
+        milestones={r['threshold'] for r in cp.index()['milestones'] if r['threshold'] is not None}
+        def publish(state='running',**extra):
+            write_json(out/'progress.json',counts)
+            write_json(out/'status.json',dict(state=state,updated_at=time.time(),pid=__import__('os').getpid(),**extra))
+        collection.on_status=lambda row:publish(phase='collection',last_seed=row['seed'])
+        last_audit=latest.get('last_update_audit') if resume else None
+        def state(next_counts=None):
+            return dict(learner=trainer.snapshot(),counters=(counts if next_counts is None else next_counts).copy(),
+                config=trainer.config.asdict(),registry=registry.used.copy(),budget=guard.identity(),last_update_audit=last_audit)
+        def validation(arm,**kwargs):
+            result=evaluate_set(bundle,policy,store,registry,guard,arm=arm,**kwargs)
+            if not result['protocol_complete']:
+                raise RuntimeError('validation contains interrupted opportunities; no automatic retry: '+arm)
+            return result
+        try:
+            if not resume:
+                cp.save(state(),0,kind='initial')
+            publish(phase='GPU_startup_benchmark')
+            audit=benchmark(collection,trainer)
+            append_json(out/'gpu_startup_attempts.jsonl',audit)
+            write_json(out/'gpu_startup.json',audit)
+            publish(phase='baseline_validation')
+            validation('baseline',media='all',baseline=True)
+            # A checkpoint can precede its milestone validation. Resume that
+            # protocol before sampling another rollout, without physical retries.
+            for threshold in sorted(milestones):
+                publish(phase=f'validation_{threshold}')
+                validation(f'step_{threshold}',media='selected')
+            while counts['sampled_actions']<DEFAULT.max_actions:
+                guard.poll(collecting=True); publish(phase='collecting384')
+                batch,records=collection.collect()
+                publish(phase='updating')
+                audit=trainer.train(batch)
+                next_counts=dict(counts,used_actions=counts['used_actions']+int(batch.lengths.sum()),
+                    used_blocks=counts['used_blocks']+len(batch),updates=trainer._n_updates)
+                next_counts['discarded_actions']=counts['sampled_actions']-next_counts['used_actions']
+                noise=policy.noise.physical_std().detach().cpu().numpy()
+                audit.update(sampled_actions=counts['sampled_actions'],used_actions=next_counts['used_actions'],
+                    prior_cost=float(np.mean([r['prior_cost'] for r in records])),
+                    environment_return=float(np.mean([r['environment_reward'] for r in records])),
+                    optimization_return=float(np.mean([r['reward'] for r in records])),
+                    std_xy_mm=float(noise[:,:2].mean()*1000),std_yaw_deg=float(np.degrees(noise[:,2]).mean()))
+                # Atomic checkpoint publication comes before curves/counters.
+                commit_update(cp,state(next_counts),counts,audit,out)
+                last_audit=audit.copy(); collection.version=trainer._n_updates
+                for k,v in audit.items():
+                    if isinstance(v,(int,float)): writer.add_scalar(k,v,trainer._n_updates)
+                writer.flush()
+                for threshold in range(DEFAULT.milestone,counts['sampled_actions']+1,DEFAULT.milestone):
+                    if threshold in milestones: continue
+                    cp.save(state(),counts['sampled_actions'],kind='milestone',threshold=threshold); milestones.add(threshold)
+                    publish(phase=f'validation_{threshold}')
+                    validation(f'step_{threshold}',media='selected')
+                del batch,records
+                publish(phase='update_committed')
+        except StopExperiment as stop:
+            collection.interrupt(stop)
+            counts['discarded_actions']=counts['sampled_actions']-counts['used_actions']
+            publish(state='budget_stopped',reason=str(stop))
+        except BaseException as error:
+            collection.interrupt(error)
+            counts['discarded_actions']=counts['sampled_actions']-counts['used_actions']
+            if trainer.last_audit and not trainer.last_audit.get('accepted',True):
+                append_json(out/'updates.jsonl',dict(trainer.last_audit,update=trainer._n_updates))
+            publish(state='needs_attention',error=repr(error),automatic_resume=False)
+            writer.close()
+            raise
+        else:
+            collection.interrupt(StopExperiment('effective action budget completed'))
+        finally: writer.close()
+        # Persist the accepted learning state, not an uncommitted partial batch.
+        # If the total deadline/resource reserve is already gone, the two
+        # previously verified rolling points remain authoritative.
+        try:
+            guard.poll()
+            cp.save(final_accepted_state(cp,counts,registry.used),counts['sampled_actions'],kind='final')
+            validation('final',media='all')
+            verify_bundle(bundle)
+            publish(state='complete',final_checkpoint='last_complete_accepted_update')
+        except StopExperiment as error:
+            publish(state='budget_stopped',reason=str(error),final_validation_complete=False)

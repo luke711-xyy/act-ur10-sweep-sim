@@ -32,12 +32,22 @@ web = [
     "fastapi>=0.115",
     "uvicorn>=0.34",
 ]
+pac-act = [
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "lerobot==0.6.1",
+    "mujoco==3.14.0",
+    "stable-baselines3==2.9.0",
+    "tensorboard==2.21.0",
+    "psutil==7.2.2",
+]
 
 [tool.setuptools.packages.find]
-include = ["sim*"]
+include = ["sim*", "pac_act*", "residual_rl*"]
 
 [tool.setuptools.package-data]
 sim = ["../configs/*.yaml"]
+pac_act = ["*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

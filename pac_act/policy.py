@@ -71,10 +71,16 @@ class EncoderCritic(nn.Module):
 class ChunkPolicy(BasePolicy):
     def __init__(self,base_path,device='cpu',build_critic=True):
         from lerobot.policies.act.modeling_act import ACTPolicy
+        from lerobot.policies.act.configuration_act import ACTConfig
         from sim.act.policy import build_act_processors
         from safetensors.torch import load_file
         base_path=Path(base_path)
-        frozen=ACTPolicy.from_pretrained(str(base_path),local_files_only=True)
+        configuration=ACTConfig.from_pretrained(str(base_path),local_files_only=True)
+        # Complete safetensors already contain the ResNet. Do not download
+        # ImageNet initialization on a new/offline GPU machine.
+        configuration.pretrained_backbone_weights=None
+        configuration.device=device
+        frozen=ACTPolicy.from_pretrained(str(base_path),config=configuration,local_files_only=True)
         cfg=frozen.config
         image_keys=tuple(cfg.image_features)
         if len(image_keys)!=5 or cfg.robot_state_feature.shape!=(36,) or cfg.env_state_feature.shape!=(1,):
@@ -137,6 +143,8 @@ class ChunkPolicy(BasePolicy):
         return {k:v for k,v in self.state_dict().items() if not k.startswith('reference.')}
 
     def load_learned(self,state):
+        if self.critic is None:
+            state={k:v for k,v in state.items() if not k.startswith('critic.')}
         missing,unexpected=self.load_state_dict(state,strict=False)
         if unexpected or any(not k.startswith('reference.') for k in missing):
             raise ValueError('checkpoint has incompatible learned modules')
