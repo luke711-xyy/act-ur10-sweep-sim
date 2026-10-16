@@ -69,12 +69,12 @@
 - DINO config/backbone exports `DINOv3ACTConfig`, `DINOv3ACTPolicy`, and `FrozenDINOv3Backbone`; DINO checkpoint dispatch is selected only by the exact serialized `type` and `vision_backbone` pair.
 - Keep the existing `ChunkPolicy.prepare`, `means`, `values`, and `physical_actions` contracts.
 
-- [ ] **Step 1: Write failing tests** `test_dinov3_config_keeps_pinned_identity_and_five_view_contract`, `test_frozen_backbone_keeps_dino_eval_and_rgb_feature_map`, `test_chunk_policy_loads_dinov3_locally_and_rejects_wrong_contract`, and `test_dinov3_processor_preserves_camera_order_and_identity_visual_stats` in `tests/test_pac_dinov3.py`.
-- [ ] **Step 2: Run** `python -m pytest -q tests/test_pac_dinov3.py`; confirm the new DINO module and dispatch tests fail before implementation.
-- [ ] **Step 3: Implement** the config/backbone contract from the approved local DINO ACT implementation: pinned ViT-S/16 identity, strict local weight restoration, frozen eval-only encoder, ImageNet RGB normalization once inside the backbone, and original 2x2 spatial pooling. Never download or substitute pretrained weights.
-- [ ] **Step 4: Implement** DINO dispatch in `ChunkPolicy`; load saved pre/postprocessors and preserve serialized camera order. Reject any config except five 320×320 RGB views, state36, target-count1, action4, chunk25 and execute5. Keep ResNet loading code unchanged.
-- [ ] **Step 5: Run** `python -m pytest -q tests/test_pac_dinov3.py tests/test_pac_policy.py`; expect PASS.
-- [ ] **Step 6: Commit** with message `feat: load frozen DINOv3 ACT in PAC policy`.
+- [x] **Step 1: Write failing tests** `test_dinov3_config_keeps_pinned_identity_and_five_view_contract`, `test_frozen_backbone_keeps_dino_eval_and_rgb_feature_map`, `test_chunk_policy_loads_dinov3_locally_and_rejects_wrong_contract`, and `test_dinov3_processor_preserves_camera_order_and_identity_visual_stats` in `tests/test_pac_dinov3.py`.
+- [x] **Step 2: Run** `python -m pytest -q tests/test_pac_dinov3.py`; confirm the new DINO module and dispatch tests fail before implementation.
+- [x] **Step 3: Implement** the config/backbone contract from the approved local DINO ACT implementation: pinned ViT-S/16 identity, strict local weight restoration, frozen eval-only encoder, ImageNet RGB normalization once inside the backbone, and original 2x2 spatial pooling. Never download or substitute pretrained weights.
+- [x] **Step 4: Implement** DINO dispatch in `ChunkPolicy`; load saved pre/postprocessors and preserve serialized camera order. Reject any config except five 320×320 RGB views, state36, target-count1, action4, chunk25 and execute5. Keep ResNet loading code unchanged.
+- [x] **Step 5: Run** `python -m pytest -q tests/test_pac_dinov3.py tests/test_pac_policy.py`; expect PASS.
+- [x] **Step 6: Commit** with message `feat: load frozen DINOv3 ACT in PAC policy`.
 
 ### Task 3: Frozen-weight optimizer and learner checkpoint semantics
 

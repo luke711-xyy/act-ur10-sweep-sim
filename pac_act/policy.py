@@ -3,6 +3,7 @@
 Uses the LeRobot 0.6.1 ACT modules directly, not an upstream PAC-ACT source copy.
 """
 import copy
+import json
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,81 @@ from .distribution import PhysicalNoise,PrefixGaussian
 VAE=('vae_encoder','vae_encoder_cls_embed','vae_encoder_robot_state_input_proj',
      'vae_encoder_action_input_proj','vae_encoder_latent_output_proj','vae_encoder_pos_enc')
 ACTIVE=(0,1,3)
+DINO_TYPE='act_dinov3'
+DINO_BACKBONE='dinov3_vits16'
+DINO_CAMERA_ORDER=('corner_xminus_yminus','corner_xminus_yplus',
+                   'corner_xplus_yminus','corner_xplus_yplus','wrist')
+
+
+def _normalization_name(value):
+    return getattr(value,'value',value)
+
+
+def _validate_dinov3_config(cfg):
+    from sim.act.configuration_dinov3 import (
+        DINO_MODEL_ID,DINO_REVISION,DINO_WEIGHT_SHA256,
+    )
+    images=tuple(cfg.image_features)
+    cameras=tuple(key.removeprefix('observation.images.') for key in images)
+    if cameras!=DINO_CAMERA_ORDER:
+        raise ValueError('DINOv3 requires the serialized five-camera order')
+    if any(tuple(cfg.input_features[key].shape)!=(3,320,320) for key in images):
+        raise ValueError('DINOv3 requires five 320x320 RGB camera features')
+    if (tuple(cfg.input_features['observation.state'].shape)!=(36,)
+            or tuple(cfg.input_features['observation.environment_state'].shape)!=(1,)
+            or tuple(cfg.output_features['action'].shape)!=(4,)):
+        raise ValueError('DINOv3 requires state36, target-count1 and action4')
+    if (cfg.n_obs_steps!=1 or cfg.chunk_size!=25 or cfg.n_action_steps!=5
+            or cfg.temporal_ensemble_coeff is not None):
+        raise ValueError('DINOv3 requires one observation, chunk25, execute5 and no temporal ensemble')
+    if (cfg.type!=DINO_TYPE or cfg.vision_backbone!=DINO_BACKBONE
+            or cfg.dino_model_id!=DINO_MODEL_ID or cfg.dino_revision!=DINO_REVISION
+            or cfg.dino_weight_sha256!=DINO_WEIGHT_SHA256 or cfg.dino_pool_stride!=2):
+        raise ValueError('DINOv3 checkpoint identity differs from the pinned contract')
+    if _normalization_name(cfg.normalization_mapping.get('VISUAL'))!='IDENTITY':
+        raise ValueError('DINOv3 saved processor must leave RGB values unnormalized')
+
+
+def _validate_dinov3_processors(base_path,cfg):
+    """Reject stale processor graphs before ACT sees any observation."""
+    root=Path(base_path).resolve()
+    expected_images=tuple(cfg.image_features)
+    expected_map={'VISUAL':'IDENTITY','STATE':'MEAN_STD','ACTION':'MEAN_STD'}
+    for filename,registry_name in (
+        ('policy_preprocessor.json','normalizer_processor'),
+        ('policy_postprocessor.json','unnormalizer_processor'),
+    ):
+        path=root/filename
+        if not path.is_file(): raise FileNotFoundError(f'missing saved DINO processor: {filename}')
+        saved=json.loads(path.read_text())
+        matches=[step for step in saved.get('steps',[])
+                 if step.get('registry_name')==registry_name]
+        if len(matches)!=1: raise ValueError(f'invalid saved DINO processor: {filename}')
+        settings=matches[0].get('config',{})
+        if settings.get('norm_map')!=expected_map:
+            raise ValueError('DINOv3 saved processor normalization differs')
+        features=settings.get('features',{})
+        image_features=tuple(key for key in features if key.startswith('observation.images.'))
+        if filename=='policy_preprocessor.json':
+            required_features=set(expected_images)|{
+                'observation.state','observation.environment_state','action'}
+            if set(features)!=required_features:
+                raise ValueError('DINOv3 preprocessor feature set differs')
+            if image_features!=expected_images:
+                raise ValueError('DINOv3 processor camera order differs from serialized ACT config')
+            if any(tuple(features[key].get('shape',()))!=(3,320,320) for key in expected_images):
+                raise ValueError('DINOv3 processor camera dimensions differ')
+            if (tuple(features.get('observation.state',{}).get('shape',()))!=(36,)
+                    or tuple(features.get('observation.environment_state',{}).get('shape',()))!=(1,)
+                    or tuple(features.get('action',{}).get('shape',()))!=(4,)):
+                raise ValueError('DINOv3 processor state/environment contract differs')
+        elif (image_features or tuple(features.get('action',{}).get('shape',()))!=(4,)):
+            raise ValueError('DINOv3 action unnormalizer contract differs')
+        state_file=matches[0].get('state_file')
+        if not isinstance(state_file,str): raise ValueError(f'missing processor state: {filename}')
+        state_path=(root/state_file).resolve()
+        if not state_path.is_relative_to(root) or not state_path.is_file():
+            raise FileNotFoundError(f'missing or unsafe saved DINO processor state: {filename}')
 
 
 def strip_vae(model):
@@ -75,18 +151,37 @@ class ChunkPolicy(BasePolicy):
         from sim.act.policy import build_act_processors
         from safetensors.torch import load_file
         base_path=Path(base_path)
-        configuration=ACTConfig.from_pretrained(str(base_path),local_files_only=True)
-        # Complete safetensors already contain the ResNet. Do not download
-        # ImageNet initialization on a new/offline GPU machine.
-        configuration.pretrained_backbone_weights=None
-        configuration.device=device
-        frozen=ACTPolicy.from_pretrained(str(base_path),config=configuration,local_files_only=True)
+        saved=json.loads((base_path/'config.json').read_text())
+        saved_type=saved.get('type','act')
+        saved_backbone=saved.get('vision_backbone','')
+        is_dino=saved_type==DINO_TYPE and saved_backbone==DINO_BACKBONE
+        if saved_type==DINO_TYPE or saved_backbone==DINO_BACKBONE:
+            if not is_dino:
+                raise ValueError('DINOv3 checkpoint requires the exact act_dinov3 / dinov3_vits16 identity pair')
+            from sim.act.configuration_dinov3 import DINOv3ACTConfig
+            from sim.act.dinov3 import DINOv3ACTPolicy
+            configuration=DINOv3ACTConfig.from_pretrained(str(base_path),local_files_only=True)
+            configuration.device=device
+            _validate_dinov3_config(configuration)
+            _validate_dinov3_processors(base_path,configuration)
+            frozen=DINOv3ACTPolicy.from_pretrained(
+                str(base_path),config=configuration,local_files_only=True)
+        else:
+            configuration=ACTConfig.from_pretrained(str(base_path),local_files_only=True)
+            # Complete safetensors already contain the ResNet. Do not download
+            # ImageNet initialization on a new/offline GPU machine.
+            configuration.pretrained_backbone_weights=None
+            configuration.device=device
+            frozen=ACTPolicy.from_pretrained(str(base_path),config=configuration,local_files_only=True)
         cfg=frozen.config
         image_keys=tuple(cfg.image_features)
-        if len(image_keys)!=5 or cfg.robot_state_feature.shape!=(36,) or cfg.env_state_feature.shape!=(1,):
-            raise ValueError('requires five-view ResNet, state36 and target1')
-        if 'resnet' not in cfg.vision_backbone or cfg.chunk_size!=25:
-            raise ValueError('pre-DINO ResNet ACT step100000 required')
+        if is_dino:
+            _validate_dinov3_config(cfg)
+        else:
+            if len(image_keys)!=5 or cfg.robot_state_feature.shape!=(36,) or cfg.env_state_feature.shape!=(1,):
+                raise ValueError('requires five-view ResNet, state36 and target1')
+            if 'resnet' not in cfg.vision_backbone or cfg.chunk_size!=25:
+                raise ValueError('pre-DINO ResNet ACT step100000 required')
         obs_space=spaces.Dict({**{k:spaces.Box(0,255,tuple(cfg.input_features[k].shape),np.uint8) for k in image_keys},
             'observation.state':spaces.Box(-np.inf,np.inf,(36,),np.float32),
             'observation.environment_state':spaces.Box(-np.inf,np.inf,(1,),np.float32)})
@@ -97,7 +192,13 @@ class ChunkPolicy(BasePolicy):
         self.actor=strip_vae(copy.deepcopy(frozen.model)).requires_grad_(True)
         self.reference=strip_vae(frozen.model).requires_grad_(False).eval()
         self.critic=EncoderCritic(self.actor) if build_critic else None
-        stats=load_file(str(next(base_path.glob('*unnormalizer*.safetensors'))))
+        if is_dino:
+            stats_paths=list(base_path.glob('*unnormalizer*.safetensors'))
+            if len(stats_paths)!=1: raise ValueError('DINOv3 requires exactly one saved action unnormalizer state')
+            stats_path=stats_paths[0]
+        else:
+            stats_path=next(base_path.glob('*unnormalizer*.safetensors'))
+        stats=load_file(str(stats_path))
         means=stats['action.mean']; scales=stats['action.std']
         self.register_buffer('action_mean',means.clone())
         self.register_buffer('action_scale',scales.clone())
