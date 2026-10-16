@@ -180,7 +180,7 @@ def train(bundle,out,acceptance_report,*,resume=False):
     began=time.time()
     import torch
     from .policy import ChunkPolicy
-    from .ppo import ChunkPPO
+    from .ppo import audited_trainer
     from .safety import StopExperiment
     from torch.utils.tensorboard import SummaryWriter
     if not torch.cuda.is_available(): raise RuntimeError('formal PAC-ACT training requires a CUDA GPU; no silent Mac/CPU fallback')
@@ -202,7 +202,7 @@ def train(bundle,out,acceptance_report,*,resume=False):
         import numpy as np
         np.random.seed(42); torch.manual_seed(42); torch.cuda.manual_seed_all(42)
         store=RunStore(out); registry=LayoutRegistry(json.loads((Path(bundle)/'exclusions.json').read_text()))
-        policy=ChunkPolicy(frozen['model'],'cuda'); trainer=ChunkPPO(policy,poll=guard.poll)
+        policy=ChunkPolicy(frozen['model'],'cuda'); trainer=audited_trainer(policy,guard.poll,out,frozen['identity'])
         identity=bundle_digest(dict(bundle=frozen['identity'],config=DEFAULT.asdict()))
         cp=Checkpoints(out/'checkpoints',identity,guard)
         counts=dict(sampled_actions=0,used_actions=0,discarded_actions=0,updates=0,used_blocks=0)
@@ -290,8 +290,12 @@ def train(bundle,out,acceptance_report,*,resume=False):
             collection.interrupt(error)
             counts['discarded_actions']=counts['sampled_actions']-counts['used_actions']
             if trainer.last_audit and not trainer.last_audit.get('accepted',True):
-                append_json(out/'updates.jsonl',dict(trainer.last_audit,update=trainer._n_updates))
-            publish(state='needs_attention',error=repr(error),cleanup_errors=collection.cleanup_errors,automatic_resume=False)
+                try:append_json(out/'updates.jsonl',dict(trainer.last_audit,update=trainer._n_updates))
+                except BaseException as failure:error.add_note('rejection history append: '+repr(failure))
+            from .update_audit import write_failure_reports
+            write_failure_reports(error,{out/'progress.json':counts,out/'status.json':dict(state='needs_attention',
+                error=repr(error),cleanup_errors=collection.cleanup_errors,automatic_resume=False,
+                rejected_update_audit=trainer.last_audit)})
             writer.close()
             raise
         else:

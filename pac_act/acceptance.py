@@ -14,7 +14,7 @@ def preflight(bundle,out,device='cpu',continue_from=None):
     require_local_slot()
     import torch
     from .policy import ChunkPolicy
-    from .ppo import ChunkPPO,capture_rng,restore_rng
+    from .ppo import audited_trainer
     from .hybrid import HybridEpisode
     from .media import render_episode
     frozen=verify_bundle(bundle); out=Path(out).resolve()
@@ -33,7 +33,7 @@ def preflight(bundle,out,device='cpu',continue_from=None):
         if continuation:
             for row in continuation['rows']: registry.register(row,row['layout_fingerprint'])
             claim_continuation(out,continuation,frozen['identity'])
-        policy=ChunkPolicy(frozen['model'],device); trainer=ChunkPPO(policy,poll=guard.poll)
+        policy=ChunkPolicy(frozen['model'],device); trainer=audited_trainer(policy,guard.poll,out,frozen['identity'])
         counters=dict(sampled_actions=0,used_actions=0,discarded_actions=0,updates=0)
         collection=Collection(bundle,policy,store,registry,guard,counters)
         checks=dict(continuation['checks']) if continuation else {}; summaries=list(continuation['rows']) if continuation else []
@@ -106,10 +106,11 @@ def preflight(bundle,out,device='cpu',continue_from=None):
             return report
         except BaseException as error:
             collection.interrupt(error)
-            write_json(out/'acceptance.json',dict(engineering_passed=False,incomplete=True,error=repr(error),
+            from .update_audit import write_failure_reports
+            write_failure_reports(error,{out/'acceptance.json':dict(engineering_passed=False,incomplete=True,error=repr(error),
                 bundle_identity=frozen['identity'],training_started=False,budget=guard.identity(),checks=checks,
-                cleanup_errors=collection.cleanup_errors))
-            write_json(out/'status.json',dict(state='needs_attention',error=repr(error),training_started=False,automatic_retry=False))
+                cleanup_errors=collection.cleanup_errors,rejected_update_audit=trainer.last_audit),
+                out/'status.json':dict(state='needs_attention',error=repr(error),training_started=False,automatic_retry=False)})
             raise
 
 
