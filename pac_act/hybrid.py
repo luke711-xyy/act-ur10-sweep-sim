@@ -111,6 +111,12 @@ class BlockClock:
         self.frames+=1
 
 
+def acquisition_outcome(context):
+    safety=context.get('safety_reason')
+    reason=safety or context.get('collection_reason') or context.get('terminal_reason') or 'no_handoff'
+    return ('safety' if safety else 'success' if reason=='exact target count reached' else 'failure'),reason
+
+
 class HybridEpisode:
     def __init__(self,cfg,model,spec,store,registry,guard,*,on_action=None):
         from residual_rl.bridge import contact_mask,instrument_physics
@@ -129,12 +135,13 @@ class HybridEpisode:
         self.active_actions=0; self.planning_calls=0; self.physical_attempts=0
         self.peak=None; self.forces=[]; self.z_errors=[]; self.measured_count=None
         self.ik_error=None; self.saved_actions=[]; self.last_trace=None
-        self.env=None; self.solver=None
+        self.env=None; self.solver=None; self.solver_entered=False
         self.started_wall=time.time()
         try:
             self.guard.poll(collecting=spec['role']=='train')
             self.solver=SolverLease(self.module,UR10CB3EndEffector)
             self.solver.__enter__()
+            self.solver_entered=True
             self.env=SweepEnv(cfg,seed=spec['seed']); self.env.reset(seed=spec['seed'])
             self.episode_start=float(self.env.time)
             initial=np.c_[self.env.component_positions(),self.env.component_quats()].astype('<f4')
@@ -178,8 +185,7 @@ class HybridEpisode:
             if self.physical_error is not None: raise self.physical_error
             self.formal.validate_acquisition(self.context)
             if not self.context['ready']:
-                safety=self.context.get('safety_reason')
-                self._terminal('safety' if safety else 'failure',self.context.get('terminal_reason','no_handoff'))
+                self._terminal(*acquisition_outcome(self.context))
                 return
             # Obtain the exact existing Z/reference/ack chain; do not invoke its
             # asynchronous ACT prediction loop for the new chunk scheduler.
@@ -239,6 +245,13 @@ class HybridEpisode:
         self.forces.append(force); self.z_errors.append(error)
         self.peak=force if self.peak is None else max(self.peak,force)
 
+    def record_measurement(self,row,record=None):
+        try: (self.record if record is None else record)(row,self.env)
+        except BaseException as error:
+            if classify_failure(error)=='safety':
+                self.physical_error=error; self.capture_failure(error)
+            raise
+
     def observe(self):
         obs=self.builder.observe(self.env,contact_latched=True)
         result={k:obs[k] for k in self.model.obs_keys}
@@ -285,7 +298,7 @@ class HybridEpisode:
                     try: self.env.step_control(Command(*map(float,command)))
                     except BaseException as error: self.physical_error=error; raise
                     row=self.module.physical_row(self.env,command,self.builder,'PAC_ACT' if learned else 'ACT_warmup',True)
-                    self.record(row,self.env)
+                    self.record_measurement(row)
                     self._save_row(row)
                     if len(self.context['act_trace'])>2: del self.context['act_trace'][:-2]
                     self.reference=np.asarray(command,np.float32).copy()
@@ -336,11 +349,22 @@ class HybridEpisode:
             metrics_rate_hz=100,wrist_force_is_not_table_only_force=True)
         try:
             self.trace.close(); self.store.commit(row)
-        finally:
-            if self.env is not None: self.env.close()
-            if self.solver is not None: self.solver.__exit__(None,None,None)
-            self.closed=True
+        except BaseException as error:
+            try: self.close()
+            except BaseException as failure: error.add_note('resource cleanup: '+repr(failure))
+            raise
+        else: self.close()
         return row
+
+    def close(self):
+        if self.closed: return
+        errors=[]
+        for function in (self.trace.close,self.env.close if self.env is not None else lambda:None,
+                         (lambda:self.solver.__exit__(None,None,None)) if self.solver_entered else lambda:None):
+            try: function()
+            except BaseException as error: errors.append(error)
+        self.closed=True
+        if errors: raise BaseExceptionGroup('physical resource cleanup failed',errors)
 
     def interrupt(self,error):
         if self.closed: return

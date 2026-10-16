@@ -124,7 +124,7 @@ class Collection:
     def __init__(self,bundle,policy,store,registry,guard,counters,on_status=None):
         self.bundle,self.policy,self.store,self.registry,self.guard=bundle,policy,store,registry,guard
         self.counters=counters; self.worlds={}; self.on_status=on_status
-        self.version=0
+        self.version=0; self.commit_id=None
 
     def count_action(self,spec):
         from .safety import StopExperiment
@@ -171,7 +171,7 @@ class Collection:
             next_value=0. if done or not learning else float(self.policy.values(self.tensor_obs(world.observe())).item())
         record=dict(observation=obs,action=sampled[0].cpu(),mean=mean[0].cpu(),log_std=log_std,
             length=k,environment_reward=reward,prior_cost=cost,reward=reward-cost,
-            value=value,next_value=next_value,terminated=done,policy_revision=self.version,
+            value=value,next_value=next_value,terminated=done,policy_revision=self.version,actor_commit_id=self.commit_id,
             seed=world.spec['seed'],target_count=world.spec['target_count'])
         append_json(world.path/'learning_blocks.jsonl',{k:v for k,v in record.items() if k!='observation'})
         if world.spec['role']=='train':
@@ -204,5 +204,15 @@ class Collection:
         return build_batch(records,self.version),flat
 
     def interrupt(self,error):
-        for world in list(self.worlds.values()): world.interrupt(error)
+        errors=[]
+        for world in list(self.worlds.values()):
+            try: world.interrupt(error)
+            except BaseException as failure:
+                errors.append(repr(failure)); error.add_note('world cleanup: '+repr(failure))
+                if hasattr(world,'close'):
+                    try: world.close()
+                    except BaseException as failure:
+                        errors.append(repr(failure)); error.add_note('resource cleanup: '+repr(failure))
         self.worlds.clear()
+        self.cleanup_errors=getattr(self,'cleanup_errors',[])+errors
+        return errors

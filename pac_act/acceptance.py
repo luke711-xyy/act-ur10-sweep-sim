@@ -64,7 +64,9 @@ def preflight(bundle,out,device='cpu'):
                 # including failures. Close live partial tasks as administrative
                 # cuts rather than inventing task failure rewards.
                 from .safety import StopExperiment
-                collection.interrupt(StopExperiment('32-block acceptance update boundary'))
+                stopped=StopExperiment('32-block acceptance update boundary')
+                if collection.interrupt(stopped):
+                    raise RuntimeError('acceptance world cleanup incomplete') from stopped
                 for row in store.rows():
                     folder=out/'episodes'/store.key(row)
                     if not (folder/'media.json').exists(): render_episode(folder,guard)
@@ -94,7 +96,8 @@ def preflight(bundle,out,device='cpu'):
         except BaseException as error:
             collection.interrupt(error)
             write_json(out/'acceptance.json',dict(engineering_passed=False,incomplete=True,error=repr(error),
-                bundle_identity=frozen['identity'],training_started=False,budget=guard.identity(),checks=checks))
+                bundle_identity=frozen['identity'],training_started=False,budget=guard.identity(),checks=checks,
+                cleanup_errors=collection.cleanup_errors))
             write_json(out/'status.json',dict(state='needs_attention',error=repr(error),training_started=False,automatic_retry=False))
             raise
 
@@ -117,7 +120,7 @@ def _old_hybrid(world,policy,model_path):
     namespace['build_act_processors']=lambda *args,**kwargs:(policy.preprocessor,policy.postprocessor)
     native_record=namespace['_trial_record']
     def record(row,env):
-        native_record(row,env); world._save_row(row)
+        world.record_measurement(row,native_record); world._save_row(row)
         if len(world.context['act_trace'])>2: del world.context['act_trace'][:-2]
     namespace['_trial_record']=record
     try:

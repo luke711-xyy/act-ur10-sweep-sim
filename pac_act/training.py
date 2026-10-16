@@ -4,11 +4,12 @@ import json
 from pathlib import Path
 import random
 import time
+import uuid
 
 from .config import DEFAULT,Config
 from .identity import LayoutRegistry,seed_spec,verify_bundle,bundle_digest
 from .lifecycle import Collection,cfg_for,experiment_lock,make_guard,resume_counters
-from .storage import Checkpoints,RunStore,append_json,read_rows,write_json
+from .storage import Checkpoints,RunStore,append_json,read_rows,write_json,iter_rows,audit_identity
 
 
 def final_accepted_state(checkpoints,counters,registry):
@@ -43,13 +44,15 @@ def validation_pending(store,specs):
 
 def reconcile_update_audit(root,state):
     audit=state.get('last_update_audit')
-    if audit and not any(r.get('accepted') and r['update']==audit['update']
+    if audit and not any(r.get('accepted') and audit_identity(r)==audit_identity(audit)
                          for r in read_rows(Path(root)/'updates.jsonl')):
         append_json(Path(root)/'updates.jsonl',audit)
+    write_json(Path(root)/'active_update.json',dict(commit_id=audit_identity(audit)))
 
 
 def commit_update(checkpoints,state,counts,audit,root):
     """A loss curve and used-action count refer only to a durable update."""
+    audit.update(commit_id=uuid.uuid4().hex,parent_commit_id=audit_identity(state.get('last_update_audit')))
     state=dict(state,last_update_audit=audit.copy())
     record=checkpoints.save(state,state['counters']['sampled_actions'])
     counts.update(state['counters'])
@@ -93,6 +96,8 @@ def evaluate_set(bundle,policy,store,registry,guard,*,arm,media='selected',specs
 def recover_orphans(store):
     """Explicit resume only: retire interrupted opportunities, never rerun them."""
     known={store.key(r) for r in store.rows()}
+    from collections import Counter
+    journal=Counter(r['seed'] for r in iter_rows(store.root/'action_journal.jsonl'))
     for marker in sorted((store.root/'attempts').glob('*.json')):
         spec=json.loads(marker.read_text()); key=store.key(spec)
         if key in known: continue
@@ -102,9 +107,12 @@ def recover_orphans(store):
             # Measurement was durably written, only append-only ledger commit
             # was interrupted. Reuse the actual result verbatim.
             store.commit(json.loads(result.read_text())); continue
-        blocks=read_rows(folder/'blocks.jsonl'); count=blocks[-1].get('final_collected') if blocks else None
-        store.commit(dict(**spec,outcome='interrupted',success=None,final_collected=count,
-            active_actions=sum(r['executed'] for r in blocks if r['learned']),
+        blocks=read_rows(folder/'blocks.jsonl'); last_count=blocks[-1].get('final_collected') if blocks else None
+        block_actions=sum(r['executed'] for r in blocks if r['learned'])
+        store.commit(dict(**spec,outcome='interrupted',success=None,final_collected=None,
+            last_known_collected=last_count,terminal_count_known=False,
+            active_actions=max(block_actions,journal[spec['seed']]),active_actions_complete=False,
+            active_actions_source='durable blocks and per-episode action journal; unfinished action may be unknown',
             reason='previous process interrupted; no physical continuation or retry'))
 
 
@@ -208,9 +216,15 @@ def train(bundle,out,acceptance_report,*,resume=False):
         else:
             write_json(out/'run.json',dict(bundle_identity=frozen['identity'],checkpoint_identity=identity,
                 config=DEFAULT.asdict(),budget=guard.identity(),validation_seeds=[seed_spec('validation',i) for i in range(24)]))
-        writer=SummaryWriter(str(out/'tensorboard'))
+        execution_id=uuid.uuid4().hex
+        # A recovery fork gets a separate TensorBoard run. Historical orphaned
+        # updates remain visible as history, never mixed into the new curve.
+        writer=SummaryWriter(str(out/'tensorboard'/execution_id))
+        write_json(out/'active_learning_session.json',dict(execution_id=execution_id,
+            resumed=resume,selected_commit_id=audit_identity(latest.get('last_update_audit')) if resume else None))
         collection=Collection(bundle,policy,store,registry,guard,counts)
         collection.version=trainer._n_updates
+        collection.commit_id=audit_identity(latest.get('last_update_audit')) if resume else None
         milestones={r['threshold'] for r in cp.index()['milestones'] if r['threshold'] is not None}
         def publish(state='running',**extra):
             write_json(out/'progress.json',counts)
@@ -256,6 +270,7 @@ def train(bundle,out,acceptance_report,*,resume=False):
                 # Atomic checkpoint publication comes before curves/counters.
                 commit_update(cp,state(next_counts),counts,audit,out)
                 last_audit=audit.copy(); collection.version=trainer._n_updates
+                collection.commit_id=audit['commit_id']
                 for k,v in audit.items():
                     if isinstance(v,(int,float)): writer.add_scalar(k,v,trainer._n_updates)
                 writer.flush()
@@ -267,19 +282,24 @@ def train(bundle,out,acceptance_report,*,resume=False):
                 del batch,records
                 publish(phase='update_committed')
         except StopExperiment as stop:
-            collection.interrupt(stop)
+            cleanup_errors=collection.interrupt(stop)
             counts['discarded_actions']=counts['sampled_actions']-counts['used_actions']
-            publish(state='budget_stopped',reason=str(stop))
+            publish(state='needs_attention' if cleanup_errors else 'budget_stopped',reason=str(stop),cleanup_errors=cleanup_errors)
+            if cleanup_errors: raise RuntimeError('physical cleanup incomplete; no automatic continuation') from stop
         except BaseException as error:
             collection.interrupt(error)
             counts['discarded_actions']=counts['sampled_actions']-counts['used_actions']
             if trainer.last_audit and not trainer.last_audit.get('accepted',True):
                 append_json(out/'updates.jsonl',dict(trainer.last_audit,update=trainer._n_updates))
-            publish(state='needs_attention',error=repr(error),automatic_resume=False)
+            publish(state='needs_attention',error=repr(error),cleanup_errors=collection.cleanup_errors,automatic_resume=False)
             writer.close()
             raise
         else:
-            collection.interrupt(StopExperiment('effective action budget completed'))
+            stopped=StopExperiment('effective action budget completed')
+            errors=collection.interrupt(stopped)
+            if errors:
+                publish(state='needs_attention',cleanup_errors=errors,automatic_resume=False)
+                raise RuntimeError('physical cleanup incomplete') from stopped
         finally: writer.close()
         # Persist the accepted learning state, not an uncommitted partial batch.
         # If the total deadline/resource reserve is already gone, the two

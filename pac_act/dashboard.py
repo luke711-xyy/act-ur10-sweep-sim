@@ -5,17 +5,18 @@ import math
 from pathlib import Path
 from urllib.parse import parse_qs,urlparse
 
-from .storage import read_rows,last_row
+from .storage import read_rows,last_row,active_updates
 
 
 def snapshot(root,page=1,page_size=25):
     root=Path(root); page_size=max(1,min(100,int(page_size)))
-    rows=read_rows(root/'episodes.jsonl'); updates=read_rows(root/'updates.jsonl')
+    rows=read_rows(root/'episodes.jsonl'); updates=active_updates(root)
     pages=max(1,math.ceil(len(rows)/page_size)); page=max(1,min(pages,int(page)))
     def document(path): return json.loads(path.read_text()) if path.exists() else {}
     counts=document(root/'progress.json')
     journal=last_row(root/'action_journal.jsonl')
     if journal: counts['sampled_actions']=max(counts.get('sampled_actions',0),journal['sampled_actions'])
+    counts['pending_actions']=max(0,counts.get('sampled_actions',0)-counts.get('used_actions',0)-counts.get('discarded_actions',0))
     blocks=last_row(root/'block_journal.jsonl')
     if blocks: counts['sampled_blocks']=blocks['sampled_blocks']
     training=[]; train_rows=[r for r in rows if r.get('role')=='train']

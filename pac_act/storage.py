@@ -40,13 +40,63 @@ def fsync_dir(path):
 
 def append_json(path,value):
     payload=json.dumps(value,default=numeric,allow_nan=False)+'\n'
-    with Path(path).open('a') as f:
+    path=Path(path)
+    if path.exists(): preserve_incomplete_tail(path)
+    with path.open('a') as f:
         f.write(payload); f.flush(); os.fsync(f.fileno())
 
 
-def read_rows(path):
+def preserve_incomplete_tail(path):
+    """Single writer under the experiment lease; retain crash evidence first."""
+    with Path(path).open('r+b') as stream:
+        stream.seek(0,2); end=stream.tell()
+        if not end: return
+        stream.seek(end-1)
+        if stream.read(1)==b'\n': return
+        offset=end; chunks=[]; boundary=0
+        while offset:
+            start=max(0,offset-65536); stream.seek(start); chunk=stream.read(offset-start)
+            newline=chunk.rfind(b'\n')
+            if newline>=0:
+                boundary=start+newline+1; chunks.append(chunk[newline+1:]); break
+            chunks.append(chunk); offset=start
+        evidence=Path(path).with_name(Path(path).name+'.incomplete.'+uuid.uuid4().hex)
+        with evidence.open('xb') as saved:
+            for chunk in reversed(chunks): saved.write(chunk)
+            saved.flush(); os.fsync(saved.fileno())
+        fsync_dir(Path(path).parent)
+        stream.truncate(boundary); stream.flush(); os.fsync(stream.fileno())
+
+
+def iter_rows(path):
     path=Path(path)
-    return [json.loads(line) for line in path.read_text().splitlines() if line] if path.exists() else []
+    if not path.exists(): return
+    with path.open('rb') as stream:
+        for line in stream:
+            if not line.endswith(b'\n'): break
+            if line.strip(): yield json.loads(line)
+
+
+def read_rows(path): return list(iter_rows(path))
+
+
+def audit_identity(audit):
+    if not audit: return None
+    return audit.get('commit_id') or 'legacy_'+hashlib.sha256(
+        json.dumps(audit,sort_keys=True,default=numeric).encode()).hexdigest()
+
+
+def active_updates(root):
+    root=Path(root); rows=read_rows(root/'updates.jsonl')
+    pointer=root/'active_update.json'
+    if not pointer.exists(): return rows
+    cursor=json.loads(pointer.read_text())['commit_id']
+    lookup={audit_identity(r):r for r in rows if r.get('accepted',True)}
+    chain=[]; seen=set()
+    while cursor is not None:
+        if cursor in seen or cursor not in lookup: raise ValueError('missing/cyclic active update lineage')
+        seen.add(cursor); row=lookup[cursor]; chain.append(row); cursor=row.get('parent_commit_id')
+    return list(reversed(chain))
 
 
 def last_row(path):
