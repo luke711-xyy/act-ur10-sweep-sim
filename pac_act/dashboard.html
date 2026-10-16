@@ -1,29 +1,180 @@
 <!doctype html>
-<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PAC-ACT · Training workbench</title>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hybrid PAC-ACT · 实验工作台</title>
 <style>
-:root{color-scheme:dark;--bg:oklch(20% .015 230);--panel:oklch(24% .018 230);--ink:oklch(95% .01 210);--muted:oklch(76% .025 215);--line:oklch(39% .025 230);--accent:oklch(80% .12 165)}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,sans-serif}main{max-width:1500px;margin:auto;padding:32px}header,.toolbar,nav{display:flex;align-items:center;gap:18px;justify-content:space-between;flex-wrap:wrap}h1{font-size:26px;margin:0;letter-spacing:-.02em}h2{font-size:18px;margin:0 0 16px}p{color:var(--muted);max-width:72ch}a{color:var(--accent)}section{margin:26px 0;padding-top:24px;border-top:1px solid var(--line)}.metrics{display:flex;flex-wrap:wrap;gap:28px;margin:24px 0}.metrics div{min-width:150px}.metrics dt{color:var(--muted)}.metrics dd{font-size:23px;margin:4px 0;font-variant-numeric:tabular-nums}#status{color:var(--accent)}.plots{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr));gap:18px}.plot{background:var(--panel);padding:16px;border-radius:8px}.plot h3{margin:0 0 6px;font-size:14px;font-weight:500}.plot svg{width:100%;height:auto;display:block}.axis{fill:var(--muted);font:11px system-ui}.gridline{stroke:var(--line);stroke-width:.5}.raw{fill:none;stroke:var(--accent);opacity:.28;stroke-width:1}.smooth{fill:none;stroke:var(--accent);stroke-width:2}.table-scroll{overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap;font-variant-numeric:tabular-nums}th,td{padding:11px 12px;text-align:left;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:500}td:last-child{white-space:normal;min-width:220px}button,select,input{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:7px 12px;border-radius:5px}button{cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.empty{padding:24px;color:var(--muted)}pre{font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}#error{color:oklch(82% .12 25)}nav{margin-top:16px}.sub{font-size:12px;color:var(--muted)}@media(max-width:600px){main{padding:18px}.metrics{gap:16px}.metrics div{min-width:130px}}
+:root{color-scheme:light;--bg:oklch(1 0 0);--surface:oklch(.976 .003 145);--ink:oklch(.24 .015 145);--muted:oklch(.46 .015 145);--line:oklch(.88 .008 145);--primary:oklch(.43 .12 145);--raw:oklch(.68 .035 145);--blue:oklch(.46 .14 255);--red:oklch(.46 .17 25);--warning:oklch(.44 .09 70)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums}h1,h2,h3,p{margin:0}h1{font-size:23px;letter-spacing:-.025em}h2{font-size:18px;letter-spacing:-.015em}h3{font-size:14px;font-weight:600}p{max-width:75ch;text-wrap:pretty}a{color:var(--primary);text-underline-offset:3px}button,select,input{font:inherit}button,select{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:7px 11px}button{cursor:pointer}button:hover,select:hover{border-color:var(--primary)}button:disabled{opacity:.4;cursor:default}button:active{background:var(--surface)}:focus-visible{outline:2px solid var(--primary);outline-offset:3px}[hidden]{display:none!important}
+.topbar{border-bottom:1px solid var(--line);padding:22px max(24px,calc((100vw - 1420px)/2));display:flex;align-items:center;justify-content:space-between;gap:20px}.topbar p{font-size:12px;color:var(--muted);margin-top:3px}.actions,.controls,.legend,nav,.heading{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.actions{flex-shrink:0}.badge{display:inline-block;padding:4px 9px;border:1px solid var(--line);border-radius:5px;font-size:12px;color:var(--primary);background:var(--surface)}main{max-width:1468px;margin:auto;padding:26px 24px 44px}section{margin-bottom:32px}.heading{justify-content:space-between;margin-bottom:16px}.heading p,.subtle{font-size:12px;color:var(--muted);margin-top:4px}.run-path{display:block;font:12px/1.6 ui-monospace,SFMono-Regular,monospace;color:var(--muted);overflow-wrap:anywhere;margin-top:7px}.state{margin:16px 0;color:var(--primary);font-weight:550}.alert{background:oklch(.98 .02 80);border:1px solid oklch(.84 .05 80);border-radius:6px;padding:11px 14px;color:var(--warning);font-size:13px;white-space:pre-line;overflow-wrap:anywhere;margin-bottom:20px}.danger{color:var(--red);background:oklch(.98 .01 25);border-color:oklch(.83 .05 25)}.metrics{display:flex;flex-wrap:wrap;gap:20px 42px;margin:20px 0 18px}.metrics>div{min-width:135px}dt{color:var(--muted);font-size:12px}dd{font-size:24px;letter-spacing:-.025em;margin:4px 0 0}dd small{font-size:12px;letter-spacing:0;color:var(--muted);margin-left:5px}
+.budget{display:grid;grid-template-columns:1fr 1fr;gap:24px;background:var(--surface);padding:15px 18px;border-radius:6px}.bar-label{display:flex;justify-content:space-between;gap:15px;font-size:12px}progress{appearance:none;width:100%;height:6px;border:0;border-radius:3px;overflow:hidden;margin-top:9px;background:var(--line);accent-color:var(--primary)}progress::-webkit-progress-bar{background:var(--line)}progress::-webkit-progress-value{background:var(--primary)}.freshness{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding:13px 0;color:var(--muted);font-size:12px}
+.plots{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.plot{min-width:0;border:1px solid var(--line);border-radius:7px;padding:13px 13px 3px;position:relative}.plot-head{display:flex;justify-content:space-between;gap:8px;align-items:baseline}.value{font-size:12px;color:var(--primary)}.plot svg{display:block;width:100%;height:auto;overflow:visible}.axis{fill:var(--muted);font:11px system-ui}.gridline{stroke:var(--line);stroke-width:.7}.curve-raw{fill:none;stroke:var(--raw);stroke-width:1.2;opacity:.65}.curve-smooth{fill:none;stroke:var(--primary);stroke-width:2}.dot-raw{fill:var(--raw)}.dot-smooth{fill:var(--primary)}.empty{padding:27px 8px;color:var(--muted);font-size:12px;min-height:115px;display:flex;align-items:center;justify-content:center;text-align:center}.tip{position:absolute;left:12px;bottom:30px;background:var(--ink);color:white;padding:6px 9px;border-radius:4px;font-size:11px;pointer-events:none}.legend{font-size:12px;color:var(--muted);gap:18px}.legend i{display:inline-block;width:20px;height:2px;vertical-align:middle;margin-right:5px;background:var(--raw)}.legend i.smooth{background:var(--primary)}input[type=range]{width:110px;accent-color:var(--primary);vertical-align:middle}output{font-size:12px;min-width:30px;display:inline-block}
+.group-metrics{display:flex;gap:30px;flex-wrap:wrap;background:var(--surface);padding:12px 16px;margin-bottom:15px;border-radius:6px}.group-metrics p{font-size:12px;color:var(--muted)}.group-metrics strong{font-size:18px;color:var(--ink);margin-left:8px}.table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:7px}table{width:100%;border-collapse:collapse;text-align:left;white-space:nowrap;font-size:12px}th{font-size:11px;color:var(--muted);background:var(--surface);font-weight:550}td,th{padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}tr:last-child td{border-bottom:0}.reason{min-width:210px;max-width:400px;white-space:normal;overflow-wrap:anywhere}.seed{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px}.yes{color:var(--primary)}.no{color:var(--red)}.neutral{color:var(--muted)}.media-links a{display:block;margin-bottom:2px}.pagination{justify-content:space-between;margin-top:12px}nav form{display:flex;align-items:center;gap:8px}input[type=number]{width:65px;border:1px solid var(--line);border-radius:4px;padding:6px;color:var(--ink)}.checks{display:flex;flex-wrap:wrap;gap:12px;margin-top:12px}.checks span{font-size:12px;padding:6px 9px;background:var(--surface);border:1px solid var(--line);border-radius:4px}footer{border-top:1px solid var(--line);padding-top:18px;font-size:12px;color:var(--muted)}.nowrap{white-space:nowrap}
+@media(max-width:1050px){.plots{grid-template-columns:repeat(2,minmax(0,1fr))}.topbar{align-items:flex-start}.metrics{gap:18px 30px}}@media(max-width:650px){.topbar{padding:18px;flex-direction:column;gap:12px}main{padding:20px 16px}.plots,.budget{grid-template-columns:1fr}.metrics{gap:18px 22px}.metrics>div{min-width:125px}.actions{flex-wrap:wrap}h1{font-size:21px}.heading{align-items:flex-start}.controls{gap:8px}.group-metrics{gap:12px 22px}.pagination{align-items:flex-start;gap:14px}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
 </style>
-<main><header><div><h1>Hybrid PAC-ACT</h1><p>A* → frozen ACT warmup → action-chunk PPO · 独立训练工作台</p></div><span id="status" role="status">等待状态</span></header>
-<div class="toolbar"><span id="run" class="sub">只读监控，不控制训练进程</span><a href="http://127.0.0.1:6007/" target="_blank" rel="noopener">TensorBoard ↗</a></div>
-<p id="error" role="alert"></p><dl class="metrics" id="metrics"></dl>
-<section><div class="toolbar"><h2>优化曲线</h2><label>EMA 平滑 <input id="ema" type="range" min="0" max=".99" step=".01" value=".6"></label></div><div class="plots" id="plots"></div><p class="sub">浅线为原始值，实线为 EMA；横轴为完整接受的更新次数。回报和严格成功率分开判断。</p></section>
-<section><h2>训练效果</h2><div class="plots" id="training-plots"></div><p class="sub">横轴为训练回合序号；成功率与数量误差取最近最多 30 回合，不混入验证结果。回报改善不等于严格成功率提高。</p></section>
-<section><h2>训练与验证回合</h2><div class="table-scroll"><table><thead><tr><th>Seed / phase</th><th>目标 → 实际</th><th>严格成功</th><th>有效动作</th><th>环境回报</th><th>腕力峰值</th><th>终止原因</th></tr></thead><tbody id="episodes"></tbody></table></div><nav><div><button id="previous">上一页</button> <span id="pagination"></span> <button id="next">下一页</button></div><label>每页 <select id="size"><option>25</option><option>50</option><option>100</option></select></label></nav></section>
-<section><h2>Checkpoint</h2><div id="saves" class="sub"></div></section><section><h2>验证结果</h2><div id="validation"></div></section></main>
+</head>
+<body>
+<header class="topbar"><div><h1>Hybrid PAC-ACT <span class="badge" id="phase-badge">正在连接</span></h1><p>A* → ACT 暖启动 → 同步五步动作块 · PPO 后训练工作台</p></div><div class="actions"><span id="connection" class="subtle" role="status">连接中</span><button id="pause" aria-pressed="false">暂停刷新</button><button id="refresh">立即刷新</button></div></header>
+<main>
+<div id="network-error" class="alert danger" role="alert" hidden></div>
+<section aria-labelledby="run-title">
+<div class="heading"><div><h2 id="run-title">当前 PAC-ACT 任务</h2><code id="run-path" class="run-path">读取当前任务目录…</code></div><span id="training-state" class="badge">正式训练状态待核验</span></div>
+<p class="state" id="run-state" role="status">读取已落盘的实验记录…</p>
+<dl class="metrics" id="metrics"></dl>
+<div class="budget"><div><div class="bar-label"><span id="budget-name">验收更新</span><strong id="budget-label">—</strong></div><progress id="budget" max="2" value="0" aria-label="当前阶段进度"></progress></div><div><div class="bar-label"><span id="wall-name">墙钟预算</span><strong id="wall-label">—</strong></div><progress id="wall" max="7200" value="0" aria-label="墙钟预算进度"></progress></div></div>
+<div class="freshness"><span id="counter-detail">计数仅来自当前任务记录</span><span id="last-refresh">每 5 秒刷新</span></div>
+</section>
+<div id="warnings" class="alert" role="status" hidden></div>
+<section aria-labelledby="loss-title">
+<div class="heading"><div><h2 id="loss-title">PPO 更新曲线</h2><p>横轴：已接受的 PPO 更新次数。预检更新与正式训练分开记录。</p></div><div class="controls"><span class="legend"><span><i></i>原始值</span><span><i class="smooth"></i>EMA</span></span><label for="ema">平滑 <input id="ema" type="range" min="0" max=".99" step=".01" value=".6"> <output id="ema-value" for="ema">0.60</output></label></div></div>
+<div class="plots" id="loss-plots"></div>
+<p class="subtle">悬停查看数值；只有一次更新时显示数据点，缺失处断线，不补零。尚未记录的指标不会从权重推算。</p>
+</section>
+<section aria-labelledby="effect-title">
+<div class="heading"><div><h2 id="effect-title">任务结果与回报</h2><p>按阶段和调度组分别查看；行政截断不计入任务成功率分母。</p></div><label for="effect-group">结果组 <select id="effect-group" aria-label="结果曲线分组"></select></label></div>
+<div class="group-metrics" id="group-summary"></div><div class="plots" id="effect-plots"></div>
+<p class="subtle">横轴：当前组已结束的任务回合；成功率与数量误差使用最近最多 30 回合。接触回报不等于最终收集数量或严格成功。</p>
+</section>
+<section aria-labelledby="episodes-title">
+<div class="heading"><div><h2 id="episodes-title">全部回合记录</h2><p id="episode-summary">读取中…</p></div><div class="controls"><label for="role">阶段 <select id="role"><option value="all">全部阶段</option><option value="preflight">预检</option><option value="train">正式训练</option><option value="validation">验证</option><option value="comparison">对照评测</option></select></label><label for="arm">调度组 <select id="arm"><option value="all">全部组</option></select></label></div></div>
+<div class="table-wrap"><table><thead><tr><th>Seed / 阶段 / 调度</th><th>目标 → 实际</th><th>结果</th><th>有效动作</th><th>环境回报</th><th>腕力峰值</th><th>平均 Z 误差</th><th>终止原因</th><th>回放证据</th></tr></thead><tbody id="episodes"></tbody></table></div>
+<nav class="pagination" aria-label="全部回合分页"><div class="controls"><button id="first">首页</button><button id="previous">上一页</button><span id="pagination"></span><button id="next">下一页</button><button id="last">末页</button></div><form id="jump"><label for="page">第</label><input id="page" type="number" min="1" step="1" value="1" aria-label="回合页码"><button type="submit">跳转</button><label for="size">每页 <select id="size"><option>20</option><option>50</option><option>100</option></select></label></form></nav>
+</section>
+<section aria-labelledby="checkpoint-title"><div class="heading"><div><h2 id="checkpoint-title">Checkpoint 保存情况</h2><p>预检验收快照、正式训练里程碑和滚动恢复点分别标注。</p></div><span class="badge" id="checkpoint-count">读取中</span></div><div class="table-wrap"><table><thead><tr><th>文件</th><th>类型</th><th>动作数</th><th>阈值</th><th>大小</th><th>落盘证据</th></tr></thead><tbody id="saves"></tbody></table></div><p class="subtle">面板只核对索引、文件存在及大小，不打开 .pt 或重算权重哈希；这不等于重新验证可恢复性。</p></section>
+<section aria-labelledby="acceptance-title"><div class="heading"><div><h2 id="acceptance-title">验收与验证</h2><p id="acceptance-summary">验收报告尚未完成；不据此启动正式训练。</p></div></div><div class="checks" id="checks"></div><div id="validations"></div></section>
+<footer><p>只读监控 · 不提供启动、停止、恢复或调参接口。不加载模型，不运行推理，不改实验记录或旧数据。</p><p>Hybrid、ACT 执行与 Z 导纳均由独立实验进程管理。</p></footer>
+</main>
 <script>
-let page=1,last=null;const $=id=>document.getElementById(id);const fmt=(v,n=0)=>v==null?'—':Number(v).toLocaleString(undefined,{maximumFractionDigits:n});
-function text(tag,value){let e=document.createElement(tag);e.textContent=value;return e}
-function plot(rows,key,title){const box=document.createElement('div');box.className='plot';box.append(text('h3',title));const points=rows.filter(r=>Number.isFinite(r[key]));if(!points.length){let e=text('div','暂无更新数据');e.className='empty';box.append(e);return box}let low=Math.min(...points.map(r=>r[key])),high=Math.max(...points.map(r=>r[key]));if(low===high){low-=1;high+=1}const pad=(high-low)*.06;low-=pad;high+=pad;const x0=48,y0=12,w=410,h=170,xmin=points[0].update??0,xmax=points.at(-1).update??1,s=Number($('ema').value);let avg=points[0][key];const raw=[],smooth=[];for(const r of points){avg=s*avg+(1-s)*r[key];const x=x0+((r.update??0)-xmin)/Math.max(1,xmax-xmin)*w;raw.push([x,y0+(high-r[key])/(high-low)*h]);smooth.push([x,y0+(high-avg)/(high-low)*h])}const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 480 218');svg.setAttribute('role','img');svg.setAttribute('aria-label',title);const add=(tag,attrs,label)=>{let el=document.createElementNS(svg.namespaceURI,tag);for(const [k,v]of Object.entries(attrs))el.setAttribute(k,v);if(label)el.textContent=label;svg.append(el)};for(let i=0;i<5;i++){let y=y0+h*i/4;add('line',{x1:x0,x2:x0+w,y1:y,y2:y,class:'gridline'});add('text',{x:2,y:y+4,class:'axis'},(high-(high-low)*i/4).toPrecision(3))}add('text',{x:x0,y:205,class:'axis'},String(xmin));add('text',{x:x0+w-15,y:205,class:'axis'},String(xmax));for(const [values,cls]of [[raw,'raw'],[smooth,'smooth']])add('path',{d:values.map((p,i)=>(i?'L':'M')+p.join(',')).join(' '),class:cls});svg.addEventListener('mousemove',e=>{let rect=svg.getBoundingClientRect(),fraction=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width));let r=points[Math.round(fraction*(points.length-1))];svg.setAttribute('title',`update ${r.update}: ${r[key]}`)});box.append(svg);return box}
-function render(d){last=d;$('status').textContent=d.status.state||'尚未启动';$('run').textContent=d.status.reason||d.status.phase||'只读监控，不控制训练进程';const p=d.progress;$('metrics').replaceChildren();for(const [title,value]of [['已采集有效动作',fmt(p.sampled_actions)],['已用于更新',fmt(p.used_actions)],['已丢弃',fmt(p.discarded_actions)],['待提交',fmt(p.pending_actions)],['已接受更新',fmt(p.updates)],['回合数',fmt(d.total_episodes)]]){let group=document.createElement('div');group.append(text('dt',title),text('dd',value));$('metrics').append(group)}$('plots').replaceChildren();for(const [key,title]of [['actor_loss','Actor loss'],['value_loss','Value loss'],['exact_kl','Exact KL / rollout'],['entropy','Entropy'],['prior_cost','Normalized prior cost'],['environment_return','Environment return'],['optimization_return','Optimization return'],['std_xy_mm','XY exploration std / mm'],['std_yaw_deg','Yaw exploration std / degree']])$('plots').append(plot(d.updates,key,title));$('episodes').replaceChildren();for(const r of d.episodes){let row=document.createElement('tr');for(const v of [`${r.seed} / ${r.role}`,`${r.target_count} → ${r.final_collected??'未知'}`,r.success==null?'中断':r.success?'是':'否',fmt(r.active_actions),fmt(r.environment_return,2),fmt(r.peak_wrist_N,2)+' N',r.reason||'—'])row.append(text('td',v));$('episodes').append(row)}if(!d.episodes.length){let row=document.createElement('tr'),cell=text('td','尚无物理回合；预检或训练启动后更新。');cell.colSpan=7;cell.className='empty';row.append(cell);$('episodes').append(row)}page=d.page;$('pagination').textContent=`${d.page} / ${d.pages} · 共 ${d.total_episodes} 条`;$('previous').disabled=page<=1;$('next').disabled=page>=d.pages;const saves=[...(d.checkpoints.milestones||[]),...(d.checkpoints.slots||[])];$('saves').replaceChildren(...saves.map(s=>text('p',`${s.kind} · ${fmt(s.actions)} actions · ${fmt(s.bytes/2**20,1)} MiB · ${s.file}`)));if(!saves.length)$('saves').textContent='尚无 checkpoint。';$('validation').replaceChildren(...d.validations.map(v=>text('p',`${v.arm} · 严格成功 ${fmt(v.strict_success_rate*100,1)}% · MAE ${fmt(v.mean_absolute_error,2)} · ${v.episodes} episodes`)))}
-function renderTraining(d){
-  $('training-plots').replaceChildren();
-  for(const [key,title] of [['episode_return','Environment return / episode'],['strict_success_percent','Strict success / %'],['mean_absolute_count_error','Mean absolute count error']])
-    $('training-plots').append(plot(d.training_metrics||[],key,title));
-  const blocks=document.createElement('div');blocks.append(text('dt','已采集 / 已使用动作块'),text('dd',`${fmt(d.progress.sampled_blocks)} / ${fmt(d.progress.used_blocks)}`));$('metrics').append(blocks);
-  for(const v of d.validations){let link=document.createElement('a');link.href=`/validation_${encodeURIComponent(v.arm)}.png`;link.target='_blank';link.rel='noopener';link.textContent=`${v.arm} · 数量热力图 ↗`;let line=document.createElement('p');line.append(link);$('validation').append(line)}
+function series(rows,key,weight){
+  let average=null;
+  return rows.map(row=>{
+    const value=row[key],x=row.update;
+    if(!Number.isFinite(value)||!Number.isFinite(x)){average=null;return null}
+    average=average===null?value:weight*average+(1-weight)*value;
+    return {x,raw:value,smooth:average};
+  });
 }
-async function refresh(){try{let response=await fetch(`/api?page=${page}&size=${$('size').value}`);if(!response.ok)throw Error(`HTTP ${response.status}`);const d=await response.json();render(d);renderTraining(d);$('error').textContent=''}catch(e){$('error').textContent=`暂时无法读取状态：${e.message}；保留上次显示。`}}
-$('previous').onclick=()=>{page--;refresh()};$('next').onclick=()=>{page++;refresh()};$('size').onchange=()=>{page=1;refresh()};$('ema').oninput=()=>{if(last){render(last);renderTraining(last)}};refresh();setInterval(refresh,5000);
-</script></html>
+function geometry(values,width=480,height=220){
+  const valid=values.filter(Boolean);
+  if(!valid.length)return {points:[],rawPath:'',smoothPath:''};
+  const xmin=Math.min(...valid.map(p=>p.x)),xmax=Math.max(...valid.map(p=>p.x));
+  let low=Math.min(...valid.flatMap(p=>[p.raw,p.smooth])),high=Math.max(...valid.flatMap(p=>[p.raw,p.smooth]));
+  const pad=low===high?Math.max(Math.abs(low)*.1,.001):(high-low)*.1;low-=pad;high+=pad;
+  const left=55,top=12,w=width-72,h=height-47;let rawPath='',smoothPath='',pen=false;
+  const points=[];let segment=0;
+  for(const point of values){
+    if(!point){pen=false;segment++;continue}
+    const x=left+(xmax===xmin?.5:(point.x-xmin)/(xmax-xmin))*w;
+    const rawY=top+(high-point.raw)/(high-low)*h,smoothY=top+(high-point.smooth)/(high-low)*h;
+    rawPath+=(pen?'L':'M')+x+','+rawY;smoothPath+=(pen?'L':'M')+x+','+smoothY;pen=true;
+    points.push({...point,xValue:point.x,x,rawY,smoothY,segment});
+  }
+  return {points,rawPath,smoothPath,low,high,xmin,xmax,left,top,w,h};
+}
+function scaled(value,factor){return Number.isFinite(value)?value*factor:null}
+function markers(g){const counts=new Map();for(const p of g.points)counts.set(p.segment,(counts.get(p.segment)||0)+1);return g.points.filter(p=>g.points.length<40||counts.get(p.segment)===1)}
+globalThis.PacCharts={series,geometry,scaled,markers};
+if(typeof document!=='undefined' && document.querySelector){
+const $=id=>document.getElementById(id),finite=Number.isFinite;
+const fmt=(v,n=0)=>finite(v)?v.toLocaleString('zh-CN',{maximumFractionDigits:n}):'—';
+const roleNames={preflight:'预检',train:'正式训练',validation:'验证',comparison:'对照评测',infer:'推理'};
+const armNames={old_hybrid:'原 Hybrid',new_zero:'新调度·零噪声',new_exploration:'新调度·探索',actor:'PPO 验收采样',post_update:'更新后·确定性',baseline:'基线'};
+const groupName=key=>{const [role,arm]=key.split(':');return (roleNames[role]||role)+' / '+(armNames[arm]||arm)};
+let page=1,last=null,paused=false,serial=0,pages=1;
+function text(tag,value,cls){const element=document.createElement(tag);element.textContent=value;if(cls)element.className=cls;return element}
+function selectOptions(element,entries,preferred){
+  const current=element.value,signature=JSON.stringify(entries);
+  if(element.dataset.options!==signature){
+    element.replaceChildren(...entries.map(([value,label])=>{const option=text('option',label);option.value=value;return option}));
+    element.dataset.options=signature;
+    element.value=entries.some(([v])=>v===current)?current:preferred||entries[0]?.[0]||'';
+  }
+}
+function plot(rows,key,title,xTitle='PPO 更新'){
+  const box=text('div','','plot'),head=text('div','','plot-head'),points=series(rows,key,Number($('ema').value));
+  const valid=points.filter(Boolean);head.append(text('h3',title),text('span',valid.length?fmt(valid.at(-1).raw,5):'暂无','value'));box.append(head);
+  if(!valid.length){box.append(text('div','当前阶段尚未记录此指标','empty'));return box}
+  const g=geometry(points),svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('viewBox','0 0 480 220');svg.setAttribute('role','img');svg.setAttribute('aria-label',title+'；'+valid.length+'个记录点');svg.setAttribute('tabindex','0');
+  function add(tag,attrs,label){const e=document.createElementNS(svg.namespaceURI,tag);for(const[k,v]of Object.entries(attrs))e.setAttribute(k,v);if(label!=null)e.textContent=label;svg.append(e);return e}
+  for(let i=0;i<4;i++){const y=g.top+g.h*i/3;add('line',{x1:g.left,x2:g.left+g.w,y1:y,y2:y,class:'gridline'});add('text',{x:1,y:y+4,class:'axis'},fmt(g.high-(g.high-g.low)*i/3,4))}
+  add('text',{x:g.left,y:203,class:'axis'},String(g.xmin));add('text',{x:g.left+g.w-8,y:203,'text-anchor':'end',class:'axis'},String(g.xmax));
+  add('text',{x:255,y:219,'text-anchor':'middle',class:'axis'},xTitle);
+  add('path',{d:g.rawPath,class:'curve-raw'});add('path',{d:g.smoothPath,class:'curve-smooth'});
+  for(const p of markers(g)){add('circle',{cx:p.x,cy:p.rawY,r:2,class:'dot-raw'});add('circle',{cx:p.x,cy:p.smoothY,r:2.4,class:'dot-smooth'})}
+  const tip=text('div','','tip');tip.hidden=true;box.append(svg,tip);
+  svg.onpointermove=event=>{const bounds=svg.getBoundingClientRect(),x=(event.clientX-bounds.left)/bounds.width*480;const p=g.points.reduce((a,b)=>Math.abs(a.x-x)<Math.abs(b.x-x)?a:b);tip.textContent=xTitle+' '+p.xValue+' · 原始 '+fmt(p.raw,6)+' · EMA '+fmt(p.smooth,6);tip.hidden=false};
+  svg.onpointerleave=()=>tip.hidden=true;
+  return box;
+}
+function renderEffects(d){
+  const key=$('effect-group').value,group=d.effect_groups[key],s=group?.summary||{};
+  $('group-summary').replaceChildren(...[['严格成功率',finite(s.strict_success_rate)?fmt(s.strict_success_rate*100,1)+'%':'—'],['平均数量误差',fmt(s.mean_absolute_count_error,2)],['已结束任务',fmt(s.task_episodes)],['行政截断',fmt(s.interrupted)]].map(([k,v])=>{const p=text('p',k);p.append(text('strong',v));return p}));
+  $('effect-plots').replaceChildren(...[['episode_return','环境回报'],['strict_success_percent','严格成功率 / %'],['mean_absolute_count_error','平均绝对数量误差']].map(([k,t])=>plot(group?.metrics||[],k,t,'组内任务回合')));
+}
+function render(d){
+  last=d;pages=d.pages;page=d.page;const pre=d.run.phase==='preflight',p=d.progress,st=d.status.state;
+  $('phase-badge').textContent=pre?'CPU 实际预检':roleNames[d.run.phase]||'任务观察';
+  $('run-path').textContent=d.run.path;
+  $('training-state').textContent=d.run.training_started===false?'正式训练未启动':d.run.training_started===true?'正式训练已启动':'正式训练状态未记录';
+  const states={preflight:'实际预检进行中',preflight_complete:'实际预检已结束',needs_attention:'需要处理：实验已停止',complete:'任务已完成',training:'正式训练进行中',collecting:'正在采样'};
+  let state=states[st]||st||'等待状态记录';
+  if(pre)state+=' · PPO 验收更新 '+fmt(d.preflight.completed_rounds)+' / '+d.preflight.expected_rounds+' · 已记账 '+fmt(d.total_episodes)+' 次';
+  if(d.process.alive===true)state+=' · 实验进程 '+d.process.pid+' 运行中';
+  $('run-state').textContent=state;
+  $('metrics').replaceChildren(...[['已采集有效动作',p.sampled_actions],['已用于更新的动作',p.used_actions],['已采集动作块',p.sampled_blocks],['已接受 PPO 更新',p.updates],['待归属动作',p.pending_actions],['已记账回合',d.total_episodes]].map(([k,v])=>{const div=text('div','');div.append(text('dt',k),text('dd',fmt(v)));return div}));
+  $('budget-name').textContent=pre?'PPO 验收更新':'有效动作采集';
+  $('budget').max=pre?d.preflight.expected_rounds:1000000;$('budget').value=(pre?d.preflight.completed_rounds:p.sampled_actions)||0;
+  $('budget-label').textContent=pre?fmt(d.preflight.completed_rounds)+' / '+d.preflight.expected_rounds:fmt(p.sampled_actions)+' / 1,000,000';
+  const b=d.run.budget,elapsed=finite(d.run.elapsed_seconds)?d.run.elapsed_seconds:finite(b.started_at)?Math.max(0,d.observed_at-b.started_at):null,limit=finite(b.deadline)&&finite(b.started_at)?b.deadline-b.started_at:null;
+  $('wall-name').textContent=finite(d.run.elapsed_seconds)?'实际耗时 / 原预算':'墙钟预算';
+  $('wall').max=limit||1;$('wall').value=elapsed==null?0:Math.min(elapsed,limit||elapsed);
+  $('wall-label').textContent=finite(elapsed)&&finite(limit)?fmt(elapsed/60,0)+' / '+fmt(limit/60,0)+' 分钟':'预算未记录';
+  $('counter-detail').textContent=pre?'预检计数不计入正式训练 · 最多 24 次机会 / 2 小时 / 5 GiB':'计数来自当前任务进度与已落盘日志';
+  $('last-refresh').textContent='读取于 '+new Date(d.observed_at*1000).toLocaleTimeString('zh-CN',{hour12:false})+' · '+(paused?'自动刷新已暂停':'每 5 秒刷新');
+  const warnings=[...d.warnings];if(d.status.error)warnings.push(d.status.error);
+  if(d.process.alive===false&&['preflight','training','collecting'].includes(st))warnings.push('未找到该任务的实际实验进程；状态文件可能滞后，请核验，面板不会自动恢复。');
+  $('warnings').hidden=!warnings.length;$('warnings').textContent=warnings.join('\n');
+  $('loss-plots').replaceChildren(...[['actor_loss','Actor loss'],['value_loss','Value loss'],['exact_kl','Exact KL / 整批'],['kl','KL / 更新内均值'],['entropy','Entropy'],['prior_cost','行为先验代价'],['environment_return','采样环境回报'],['optimization_return','优化回报'],['std_xy_mm','XY 探索标准差 / mm'],['std_yaw_deg','Yaw 探索标准差 / °']].map(([k,t])=>plot(d.updates,k,t)));
+  const keys=Object.keys(d.effect_groups);selectOptions($('effect-group'),keys.map(k=>[k,groupName(k)]),keys.includes(pre?'preflight:new_zero':'train:actor')?(pre?'preflight:new_zero':'train:actor'):keys[0]);renderEffects(d);
+  const arms=[...new Set(keys.map(k=>k.split(':')[1]))];selectOptions($('arm'),[['all','全部组'],...arms.map(a=>[a,armNames[a]||a])]);
+  $('episodes').replaceChildren();
+  for(const r of d.episodes){
+    const row=document.createElement('tr'),identity=text('td','');
+    identity.append(text('span',String(r.seed),'seed'),text('div',(roleNames[r.role]||r.role)+' / '+(armNames[r.arm]||r.arm||'Actor'),'subtle'));row.append(identity);
+    row.append(text('td',r.target_count+' → '+(r.final_collected??'未知')));
+    const outcome=r.outcome==='interrupted'?'行政截断':r.success===true?'严格成功':r.outcome==='safety'?'安全终止':r.success===false?'普通失败':'未知';
+    row.append(text('td',outcome,r.success===true?'yes':r.outcome==='interrupted'?'neutral':'no'));
+    for(const v of [fmt(r.active_actions),fmt(r.environment_return,2),finite(r.peak_wrist_N)?fmt(r.peak_wrist_N,2)+' N':'—',finite(r.mean_Z_error_m)?fmt(r.mean_Z_error_m*1000,3)+' mm':'—'])row.append(text('td',v));
+    row.append(text('td',r.reason||'未记录','reason'));const media=text('td','','media-links');
+    for(const[url,label]of [[r.video_url,'视频 ↗'],[r.force_url,'腕力 / Z ↗']])if(url){const a=text('a',label);a.href=url;a.target='_blank';a.rel='noopener';media.append(a)}
+    if(!media.children.length)media.textContent='等待媒体';row.append(media);$('episodes').append(row);
+  }
+  if(!d.episodes.length){const td=text('td','当前筛选暂无回合记录。','neutral');td.colSpan=9;const tr=text('tr','');tr.append(td);$('episodes').append(tr)}
+  $('episode-summary').textContent=d.data_complete?'共 '+fmt(d.total_episodes)+' 条 · 当前筛选 '+fmt(d.filtered_episodes)+' 条 · 中断与失败均保留':'日志不完整：已读取 '+fmt(d.parsed_episodes)+' 条，总量未知；分页仅含可解析记录';
+  $('pagination').textContent=page+' / '+pages;$('page').value=page;$('page').max=pages;
+  $('first').disabled=$('previous').disabled=page<=1;$('next').disabled=$('last').disabled=page>=pages;
+  $('saves').replaceChildren(...d.checkpoint_records.map(s=>{const row=text('tr','');for(const v of [s.file,s.kind,fmt(s.actions),fmt(s.threshold),finite(s.bytes)?fmt(scaled(s.bytes,1/2**20),1)+' MiB':'—',s.verification==='metadata_and_file_size_only'?'索引 / 文件大小一致':'未完整落盘'])row.append(text('td',v));return row}));
+  if(!d.checkpoint_records.length){const tr=text('tr',''),td=text('td',pre?'尚无验收 checkpoint；验收结束时保存。':'尚无 checkpoint 记录。','neutral');td.colSpan=6;tr.append(td);$('saves').append(tr)}
+  $('checkpoint-count').textContent=d.checkpoint_records.length+' 份索引记录';
+  $('acceptance-summary').textContent=d.preflight.engineering_passed===true?'工程验收通过；不等于任务成功率已改善。':d.preflight.engineering_passed===false?'工程验收未通过，详见各项检查与终止原因。':'验收报告尚未完成；不据此启动正式训练。';
+  $('checks').replaceChildren(...Object.entries(d.preflight.checks).map(([k,v])=>text('span',(v?'✓ ':'× ')+k,v?'yes':'no')));
+  $('validations').replaceChildren(...d.validations.map(v=>{const rate=scaled(v.strict_success_rate,100);const p=text('p',v.arm+' · 严格成功 '+(finite(rate)?fmt(rate,1)+'%':'—')+' · MAE '+fmt(v.mean_absolute_error,2)+' · '+fmt(v.episodes)+' 回合','subtle');const a=text('a',' 数量热力图 ↗');a.href='/validation_'+encodeURIComponent(v.arm)+'.png';a.target='_blank';a.rel='noopener';p.append(a);return p}));
+}
+async function refresh(){
+  const request=++serial;
+  try{const query=new URLSearchParams({page:String(page),size:$('size').value,role:$('role').value,arm:$('arm').value||'all'});const response=await fetch('/api?'+query,{signal:AbortSignal.timeout(10000)});if(!response.ok)throw Error('HTTP '+response.status);const d=await response.json();if(request!==serial)return;render(d);$('network-error').hidden=true;$('connection').textContent=paused?'自动刷新已暂停':'已连接 · 只读'}
+  catch(error){if(request!==serial)return;$('network-error').hidden=false;$('network-error').textContent='暂时无法读取：'+error.message+'。保留上次数据，不视为任务进展。';$('connection').textContent='连接异常'}
+}
+$('refresh').onclick=refresh;$('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'恢复刷新':'暂停刷新';$('pause').setAttribute('aria-pressed',String(paused));$('connection').textContent=paused?'自动刷新已暂停':'已连接 · 只读'};
+$('ema').oninput=()=>{$('ema-value').textContent=Number($('ema').value).toFixed(2);if(last)render(last)};
+$('effect-group').onchange=()=>{if(last)renderEffects(last)};
+for(const id of ['role','arm','size'])$(id).onchange=()=>{page=1;refresh()};
+$('first').onclick=()=>{page=1;refresh()};$('previous').onclick=()=>{page--;refresh()};$('next').onclick=()=>{page++;refresh()};$('last').onclick=()=>{page=pages;refresh()};
+$('jump').onsubmit=event=>{event.preventDefault();page=Math.min(pages,Math.max(1,Number($('page').value)||1));refresh()};
+refresh();setInterval(()=>{if(!paused&&!document.hidden)refresh()},5000);
+}
+</script>
+</body>
+</html>
