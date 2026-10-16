@@ -58,12 +58,14 @@ def numeric_diagnosis(root,physical_scales):
         historical_proposed_means_available=False,historical_rollback_verified=None,
         historical_exact_KL_recomputable=False,environment_steps_executed=0,optimizer_steps_executed=0,
         environment_reward=dict(nonzero_blocks=int((env!=0).sum()),total=float(env.sum()),**_stats(env)),
-        critic_value=_stats([r['value'] for r in records]),recomputed_advantage=_stats(advantages),
+        critic_value=_stats([r['value'] for r in records]),logged_fields_advantage=_stats(advantages),
+        recomputed_advantage=None,historical_GAE_exact_reconstruction_available=False,
         max_abs_prior_cost=float(np.max(np.abs(prior))),standardized_sampling_noise=_stats(raw[mask]),
         physical_std={key:_stats(physical_std[:,:,i][mask[:,:,i]]) for i,key in enumerate(('dx_mm','dy_mm','dyaw_deg'))},
         initial_identity_KL=gaussian_kl(means,logs,means,logs,lengths),
         sensitivity=shift_sensitivity(physical_std,lengths,.02),
         limitations=['Historical proposed means/std/optimizer-step metrics were not saved.',
+            'Later zero-action terminal corrections can change collector GAE only in memory; exact historical GAE is unavailable from these logs.',
             'RGB/state observation batch and rejected weights were not saved; an exact historical optimizer replay cannot be claimed.',
             'Counterfactual sensitivity is not a measurement of the historical physical command change.'])
     acceptance=root/'acceptance.json'

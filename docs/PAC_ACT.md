@@ -62,6 +62,13 @@ seals the preceding real transition but never creates a fake action sample.
 - Exact whole-rollout KL >.015 ends epochs early; >.02 or nonfinite values
   restores Actor, Critic, optimizer, noise and all RNG state and stops.
   Resource/deadline checks also run between optimizer microbatches/KL passes.
+- These hard rejection/rollback thresholds are additional project safeguards,
+  not required PAC-ACT defaults. The referenced upstream implementation adds
+  an empirical KL penalty and supports optional `target_kl` early stopping;
+  its inspected chunk-training entry does not pass `target_kl`. This project
+  uses analytic `KL(old || new)`, summed over the executed XY/yaw prefix and
+  averaged over blocks. Do not interpret KL as a physical safety measurement
+  or transfer thresholds between different estimators/scales without checking.
 - Used-action counters and accepted loss curves are published only after
   the complete update checkpoint is durable. Its audit is in the checkpoint
   too, so a crash between checkpoint and JSONL publication can be reconciled.
@@ -74,6 +81,36 @@ seals the preceding real transition but never creates a fake action sample.
   Uncommitted rollout actions remain counted as sampled/discarded, not used.
   Completed validation arms are never re-executed; interrupted validation
   opportunities remain visible and do not silently become passed validation.
+
+## Rejected-update evidence and offline diagnosis
+
+New instrumented runs publish `update_audits/rejected_<attempt_id>.json` and
+an append-only `rejected_updates.jsonl` pointer/hash index. These are not
+checkpoints and cannot authorize resume. They retain attempted/completed Adam
+calls, gradient norms, configured learning rates, the original exception,
+available proposal distributions (including explicitly partial/nonfinite
+passes), physical mean-shift summaries, and pre/proposed/restored component
+hashes for model, Actor, Critic, noise, optimizer, RNG and update count.
+`rollback_verified=true` requires equality of the pre/restored hashes; a
+missing comparison is null, never an invented pass. Audit failures must not
+bypass restoration or replace the originating exception. Later media/save
+failures identify the last accepted update separately, not as a rejection.
+
+```sh
+.venv/bin/python -B scripts/diagnose_pac_update.py \
+  --run /path/to/failed_mac_acceptance --model /path/to/bundle/base_model \
+  --out /new/path/numeric_diagnosis
+```
+
+The diagnostic reads numeric learning-block logs and frozen normalization
+only: no policy execution, environment steps, optimizer or historical writes.
+It reports reward sparsity, physical noise units and independent float64
+Gaussian KL sensitivity. Historical proposed weights/distributions cannot be
+reconstructed if they were not saved. Logged-field GAE is labeled separately:
+the collector may seal a previous transition after a zero-action terminal
+without rewriting its earlier JSONL line, so those logs alone do not prove
+the exact advantages used by the historical learner. New code does not
+retroactively certify an older rejected update or its rollback.
 
 ## Environment and portable bundle
 

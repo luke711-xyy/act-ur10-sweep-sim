@@ -73,3 +73,12 @@ def write_failure_reports(error,documents):
             failures.append(dict(path=str(path),error=repr(failure)))
             error.add_note('failure evidence write: '+str(path)+': '+repr(failure))
     return failures
+
+
+def failure_audit_fields(trainer,error):
+    """Do not attribute a later media/checkpoint error to an earlier update."""
+    audit=trainer.last_audit
+    rejected=getattr(trainer,'_rejected_exception',None)
+    associated=error is rejected or (rejected is not None and error.__cause__ is rejected)
+    return dict(rejected_update_audit=audit if audit and audit.get('accepted') is False and associated else None,
+        last_accepted_update_audit=getattr(trainer,'last_accepted_audit',None))

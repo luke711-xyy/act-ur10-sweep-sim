@@ -104,3 +104,60 @@ def test_failure_reports_attempt_all_writes_without_replacing_original_error(tmp
     assert len(paths)==2 and len(failures)==2
     assert str(error)=='original KL rejection'
     assert len(error.__notes__)==2
+
+
+@pytest.mark.parametrize('fault',['traceback','record'])
+def test_diagnostic_construction_failure_cannot_bypass_rollback_or_replace_original(monkeypatch,fault):
+    import pac_act.ppo as module
+    import pac_act.update_audit as audit_module
+    policy=TinyPolicy();trainer=module.ChunkPPO(policy)
+    original=module.UpdateRejected('original physical-policy rejection')
+    def corrupt(*args):
+        with torch.no_grad():policy.actor.bias.add_(1.)
+        raise original
+    trainer.update_minibatch=corrupt
+    def broken(*args,**kwargs):raise OSError('diagnostic construction failed')
+    monkeypatch.setattr(module.traceback,'format_exc',broken) if fault=='traceback' else monkeypatch.setattr(audit_module,'json_safe',broken)
+    before=trainer.snapshot()
+    with pytest.raises(module.UpdateRejected) as caught:trainer.train(batch(policy))
+    assert caught.value is original
+    assert audit_module.state_hashes(before)==audit_module.state_hashes(trainer.snapshot())
+    assert trainer.last_audit['accepted'] is False
+    assert trainer.last_audit['rollback_verified'] is True
+    assert any('diagnostic construction failed' in e for e in trainer.last_audit['audit_errors'])
+
+
+def test_nonfinite_KL_retains_partial_raw_proposal_without_another_forward(tmp_path):
+    from pac_act.ppo import audited_trainer,UpdateRejected
+    policy=TinyPolicy();trainer=audited_trainer(policy,lambda:None,tmp_path,'id')
+    calls=[];means=policy.means
+    def counted(obs):calls.append(len(obs['x']));return means(obs)
+    policy.means=counted
+    data=batch(policy);calls.clear()
+    def corrupt(*args):
+        with torch.no_grad():policy.actor.bias[0]=float('nan')
+        return {}
+    trainer.update_minibatch=corrupt
+    with pytest.raises(UpdateRejected,match='nonfinite'):trainer.train(data)
+    audit=json.loads(next((tmp_path/'update_audits').glob('*.json')).read_text())
+    after=audit['distribution_after']
+    assert after['complete'] is False and after['blocks_evaluated']==4 and after['expected_blocks']==32
+    assert after['proposed_means'][0][0][0]=={'nonfinite':'nan'}
+    assert after['nonfinite_KL'] is True
+    assert len(calls)==9  # Eight initial microbatches, one offending microbatch; no recovery inference.
+    assert audit['rollback_verified'] is True
+
+
+def test_failure_report_selects_only_the_rejection_causing_this_error():
+    from types import SimpleNamespace
+    from pac_act.update_audit import failure_audit_fields
+    error=RuntimeError('media failure');accepted=dict(accepted=True,update=1)
+    trainer=SimpleNamespace(last_audit=accepted,last_accepted_audit=accepted,_rejected_exception=None)
+    fields=failure_audit_fields(trainer,error)
+    assert fields['rejected_update_audit'] is None and fields['last_accepted_update_audit']==accepted
+    original=RuntimeError('rejected');rejected=dict(accepted=False,attempt_id='a')
+    trainer.last_audit=rejected;trainer._rejected_exception=original
+    assert failure_audit_fields(trainer,error)['rejected_update_audit'] is None
+    assert failure_audit_fields(trainer,original)['rejected_update_audit']==rejected
+    wrapper=RuntimeError('wrapped');wrapper.__cause__=original
+    assert failure_audit_fields(trainer,wrapper)['rejected_update_audit']==rejected

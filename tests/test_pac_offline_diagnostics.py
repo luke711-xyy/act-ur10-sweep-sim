@@ -31,5 +31,21 @@ def test_legacy_missing_proposed_state_is_not_fabricated(tmp_path):
     result=numeric_diagnosis(root,np.array([.001,.001,math.pi/180]))
     assert result['historical_proposed_means_available'] is False
     assert result['historical_rollback_verified'] is None
-    assert result['recomputed_advantage']['min']==10.
+    assert result['logged_fields_advantage']['min']==10.
     assert result['physical_std']['dx_mm']['mean']==pytest.approx(.1)
+
+
+def test_logged_gae_is_not_claimed_exact_without_durable_terminal_corrections(tmp_path):
+    import json
+    from pac_act.offline_diagnostics import numeric_diagnosis
+    folder=tmp_path/'episodes/preflight_8000006_actor';folder.mkdir(parents=True)
+    record=dict(action=np.zeros((5,3)).tolist(),mean=np.zeros((5,3)).tolist(),
+        log_std=np.full((5,3),math.log(.1)).tolist(),length=5,reward=1.,environment_reward=1.,
+        prior_cost=0.,value=0.,next_value=99.,terminated=False)
+    (folder/'learning_blocks.jsonl').write_text(json.dumps(record)+'\n')
+    # A later zero-action terminal can seal this transition only in collector memory.
+    result=numeric_diagnosis(tmp_path,np.array([.001,.001,math.pi/180]))
+    assert result['logged_fields_advantage']['mean']==100.
+    assert result['recomputed_advantage'] is None
+    assert result['historical_GAE_exact_reconstruction_available'] is False
+    assert any('terminal' in x for x in result['limitations'])

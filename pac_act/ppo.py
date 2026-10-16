@@ -97,6 +97,7 @@ class ChunkPPO(PPO):
             {'params':list(policy.critic.parameters()),'lr':config.critic_lr,'role':'critic'}],eps=1e-5)
         self._n_updates=0; self.last_audit=None;self.audit_sink=audit_sink
         self.last_distribution_audit=None
+        self.last_accepted_audit=None;self._rejected_exception=None
         self._audit_step_calls=0;self._audit_step_returns=0
         self._step_audits=[]
 
@@ -171,23 +172,28 @@ class ChunkPPO(PPO):
             old=PrefixGaussian(data['old_means'],data['old_log_std'],data['lengths'])
             proposed=self.policy.means(data['observations'])
             value=old.kl(proposed,self.policy.noise.log_std)
-            if not torch.isfinite(value).all(): raise UpdateRejected('nonfinite full rollout KL')
-            total+=float(value.sum())
             old_means.append(data['old_means'].cpu());new_means.append(proposed.cpu())
             old_logs.append(old.log_std.cpu())
-        before=torch.cat(old_means);after=torch.cat(new_means)
-        mask=torch.arange(5)[None,:]<batch.lengths.cpu()[:,None]
-        scaled=(after-before)*self.policy.noise.scales.detach().cpu()
-        units=(1000.,1000.,180./np.pi)
-        shifts={key:float((scaled[:,:,i][mask].square().mean()).sqrt())*units[i]
+            finite=bool(torch.isfinite(value).all())
+            if finite:total+=float(value.sum())
+            # Capture the offending microbatch BEFORE rejecting it. This is
+            # partial evidence, not a successful whole-rollout KL pass.
+            before=torch.cat(old_means);after=torch.cat(new_means);count=len(after)
+            lengths=batch.lengths.cpu()[:count]
+            mask=torch.arange(5)[None,:]<lengths[:,None]
+            scaled=(after-before)*self.policy.noise.scales.detach().cpu()
+            units=(1000.,1000.,180./np.pi)
+            shifts={key:float((scaled[:,:,i][mask].square().mean()).sqrt())*units[i]
                 for i,key in enumerate(('dx_mm','dy_mm','dyaw_deg'))}
-        self.last_distribution_audit=dict(exact_kl=total/len(batch),
-            kl_definition='KL(old || proposed), sum executed steps and XY/yaw, mean blocks',
-            active_scalar_dimensions=int(batch.lengths.sum())*3,
-            physical_mean_shift_rms=shifts,lengths=batch.lengths.cpu().tolist(),
-            old_means=before.tolist(),proposed_means=after.tolist(),old_log_std=torch.cat(old_logs).tolist(),
-            proposed_log_std=self.policy.noise.log_std.detach().cpu().tolist(),
-            sampled_actions=batch.actions.cpu().tolist(),physical_scales=self.policy.noise.scales.detach().cpu().tolist())
+            self.last_distribution_audit=dict(exact_kl=total/count if finite else None,
+                complete=finite and count==len(batch),blocks_evaluated=count,expected_blocks=len(batch),nonfinite_KL=not finite,
+                kl_definition='KL(old || proposed), sum executed steps and XY/yaw, mean blocks',
+                active_scalar_dimensions=int(lengths.sum())*3,
+                physical_mean_shift_rms=shifts,lengths=lengths.tolist(),
+                old_means=before.tolist(),proposed_means=after.tolist(),old_log_std=torch.cat(old_logs).tolist(),
+                proposed_log_std=self.policy.noise.log_std.detach().cpu().tolist(),
+                sampled_actions=batch.actions.cpu()[:count].tolist(),physical_scales=self.policy.noise.scales.detach().cpu().tolist())
+            if not finite:raise UpdateRejected('nonfinite full rollout KL')
         return total/len(batch)
 
     def train(self,batch):
@@ -196,6 +202,7 @@ class ChunkPPO(PPO):
         from .update_audit import state_hashes,json_safe
         batch.consumed=True; saved=self.snapshot(); records=[];before_hash=state_hashes(saved)
         attempt_id=uuid.uuid4().hex;completed_epochs=0;before_dist=None
+        self._rejected_exception=None
         self._audit_step_calls=0;self._audit_step_returns=0
         self._step_audits=[]
         self.last_distribution_audit=None;stage='initial_distribution'
@@ -215,23 +222,36 @@ class ChunkPPO(PPO):
             self.last_audit=dict(accepted=True,update=self._n_updates,epochs=epoch+1,exact_kl=kl,
                 **{k:float(np.mean([r[k] for r in records if k in r]))
                    for k in records[0]} if records else {})
+            self.last_accepted_audit=copy.deepcopy(self.last_audit)
             return self.last_audit
         except BaseException as error:
-            raw_traceback=traceback.format_exc();audit_errors=[];proposed_hash=None;after_hash=None;restored=False
-            try:proposed_hash=state_hashes(dict(model=self.policy.learned_state(),
-                optimizer=self.optimizer.state_dict(),rng=capture_rng(self.policy.device),updates=self._n_updates))
-            except BaseException as audit_error:audit_errors.append('proposed state hash: '+repr(audit_error))
+            self._rejected_exception=error
+            audit_errors=[];proposed_hash=None;after_hash=None;restored=False
+            self.last_audit=dict(accepted=False,attempt_id=attempt_id,audit_errors=audit_errors)
+            def diagnostic(label,operation,default=None):
+                try:return operation()
+                except BaseException as audit_error:
+                    audit_errors.append(label+': '+repr(audit_error));return default
             try:
-                self.restore(saved); restored=True
-            except BaseException as restoration:
-                error.add_note(f'rollback could not be completed: {restoration!r}; last verified disk checkpoint remains authoritative')
+                raw_traceback=diagnostic('traceback formatting',traceback.format_exc)
+                proposed_hash=diagnostic('proposed state hash',lambda:state_hashes(dict(model=self.policy.learned_state(),
+                    optimizer=self.optimizer.state_dict(),rng=capture_rng(self.policy.device),updates=self._n_updates)))
+            finally:
+                # No traceback/hash/diagnostic failure may skip restoration.
+                try:
+                    self.restore(saved);restored=True
+                except BaseException as restoration:
+                    error.add_note(f'rollback could not be completed: {restoration!r}; last verified disk checkpoint remains authoritative')
             if restored:
-                try:after_hash=state_hashes(dict(model=self.policy.learned_state(),
-                    optimizer=self.optimizer.state_dict(),rng=capture_rng(self.policy.device),updates=self._n_updates))
-                except BaseException as audit_error:audit_errors.append('restored state hash: '+repr(audit_error))
+                after_hash=diagnostic('restored state hash',lambda:state_hashes(dict(model=self.policy.learned_state(),
+                    optimizer=self.optimizer.state_dict(),rng=capture_rng(self.policy.device),updates=self._n_updates)))
             verified=before_hash==after_hash if after_hash is not None else None
             if restored and verified is False:error.add_note('rollback hash verification failed')
-            self.last_audit=json_safe(dict(accepted=False,attempt_id=attempt_id,time=time.time(),
+            # A minimal record remains usable even if richer diagnostics fail.
+            self.last_audit.update(rolled_back=restored,rollback_verified=verified,
+                error_type=type(error).__name__,stage=stage,
+                error=diagnostic('exception representation',lambda:repr(error)),traceback=raw_traceback)
+            rich=diagnostic('rejection record construction',lambda:json_safe(dict(accepted=False,attempt_id=attempt_id,time=time.time(),
                 provenance='live_instrumented_update',rolled_back=restored,rollback_verified=verified,
                 error=repr(error),error_type=type(error).__name__,traceback=raw_traceback,stage=stage,
                 updates=self._n_updates,optimizer_steps=self._audit_step_returns,
@@ -245,12 +265,13 @@ class ChunkPPO(PPO):
                 state_hashes=dict(before=before_hash,proposed=proposed_hash,restored=after_hash),
                 batch=dict(blocks=len(batch),effective_actions=int(batch.lengths.sum()),
                     nonfinite_returns=int((~torch.isfinite(batch.returns)).sum()),
-                    env_reward_nonzero_blocks=int((batch.env_rewards!=0).sum())),audit_errors=audit_errors))
+                    env_reward_nonzero_blocks=int((batch.env_rewards!=0).sum())),audit_errors=audit_errors)))
+            if rich is not None:self.last_audit=rich
             if self.audit_sink:
                 try:self.last_audit.update(self.audit_sink(self.last_audit) or {})
                 except BaseException as audit_error:
                     self.last_audit['audit_errors'].append('audit persistence: '+repr(audit_error))
-                    error.add_note('rejected-update audit persistence failed: '+repr(audit_error))
+            for failure in self.last_audit['audit_errors']:error.add_note('rejected-update diagnostic: '+failure)
             from .safety import StopExperiment
             if isinstance(error,(KeyboardInterrupt,SystemExit,UpdateRejected,StopExperiment)): raise
             raise UpdateRejected(f'PPO update rolled back: {type(error).__name__}: {error}') from error

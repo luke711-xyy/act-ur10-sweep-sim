@@ -289,14 +289,14 @@ def train(bundle,out,acceptance_report,*,resume=False):
         except BaseException as error:
             collection.interrupt(error)
             counts['discarded_actions']=counts['sampled_actions']-counts['used_actions']
-            if trainer.last_audit and not trainer.last_audit.get('accepted',True):
-                try:append_json(out/'updates.jsonl',dict(trainer.last_audit,update=trainer._n_updates))
+            from .update_audit import write_failure_reports,failure_audit_fields
+            audit_fields=failure_audit_fields(trainer,error)
+            if audit_fields['rejected_update_audit'] is not None:
+                try:append_json(out/'updates.jsonl',dict(audit_fields['rejected_update_audit'],update=trainer._n_updates))
                 except BaseException as failure:error.add_note('rejection history append: '+repr(failure))
-            from .update_audit import write_failure_reports
             write_failure_reports(error,{out/'progress.json':counts,out/'status.json':dict(state='needs_attention',
                 error=repr(error),cleanup_errors=collection.cleanup_errors,automatic_resume=False,
-                rejected_update_audit=trainer.last_audit)})
-            writer.close()
+                **audit_fields)})
             raise
         else:
             stopped=StopExperiment('effective action budget completed')
@@ -304,7 +304,13 @@ def train(bundle,out,acceptance_report,*,resume=False):
             if errors:
                 publish(state='needs_attention',cleanup_errors=errors,automatic_resume=False)
                 raise RuntimeError('physical cleanup incomplete') from stopped
-        finally: writer.close()
+        finally:
+            import sys
+            original=sys.exception()
+            try:writer.close()
+            except BaseException as close_error:
+                if original is None:raise
+                original.add_note('TensorBoard writer close: '+repr(close_error))
         # Persist the accepted learning state, not an uncommitted partial batch.
         # If the total deadline/resource reserve is already gone, the two
         # previously verified rolling points remain authoritative.

@@ -106,10 +106,10 @@ def preflight(bundle,out,device='cpu',continue_from=None):
             return report
         except BaseException as error:
             collection.interrupt(error)
-            from .update_audit import write_failure_reports
+            from .update_audit import write_failure_reports,failure_audit_fields
             write_failure_reports(error,{out/'acceptance.json':dict(engineering_passed=False,incomplete=True,error=repr(error),
                 bundle_identity=frozen['identity'],training_started=False,budget=guard.identity(),checks=checks,
-                cleanup_errors=collection.cleanup_errors,rejected_update_audit=trainer.last_audit),
+                cleanup_errors=collection.cleanup_errors,**failure_audit_fields(trainer,error)),
                 out/'status.json':dict(state='needs_attention',error=repr(error),training_started=False,automatic_retry=False)})
             raise
 
