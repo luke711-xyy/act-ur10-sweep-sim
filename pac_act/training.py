@@ -124,6 +124,7 @@ def benchmark(collection,trainer):
     try:
         from sim.environments.sweep_env import SweepEnv
         from sim.act.interface import ACTObservationBuilder
+        from .media import configure_replay_framebuffer
         worlds=[]
         observations=[]
         try:
@@ -140,6 +141,7 @@ def benchmark(collection,trainer):
                 obs={k:raw[k] for k in collection.policy.obs_keys}
                 for key in collection.policy.image_keys: obs[key]=np.rint(np.clip(obs[key],0,1)*255).astype(np.uint8)
                 observations.append(obs)
+                configure_replay_framebuffer(env.model,(960,640))
                 env.render_rgb('overhead_cam',size=(960,640))
             # Keep all six actual rendering contexts alive during backward.
             return _benchmark_backward(collection,trainer,observations,start)
