@@ -176,6 +176,107 @@ def _resolve_dino_video(root, video_value):
     return video
 
 
+def _normalize_no_video_seeds(values):
+    if values is None:
+        values=()
+    if not isinstance(values,(list,tuple,set,frozenset)):
+        raise ValueError('allowed no-video seeds must be a sequence of integers')
+    values=tuple(values)
+    if (len(set(values))!=len(values) or any(type(seed) is not int or seed not in DINO_SEEDS
+            for seed in values)):
+        raise ValueError('allowed no-video seeds must be distinct seeds in the DINO sync5 plan')
+    return tuple(sorted(values))
+
+
+def _validate_no_video_ik_exception(root,row,*,control_profile):
+    seed=row.get('seed')
+    reason=row.get('reason')
+    if (row.get('failure_type')!='ik_unreachable' or row.get('success') is not False
+            or row.get('termination_reason')!='known_execution_failure:ik_unreachable'
+            or row.get('physical_attempts')!=1 or row.get('planner_attempts')!=1
+            or row.get('quantity_status')!='known'
+            or any(row.get(field)!=0 for field in ('collected','peak_collected','final_collected'))
+            or not isinstance(reason,str) or not reason.startswith(
+                'known IK execution failure: RuntimeError: UR10 IK target is unreachable:')
+            or row.get('failure_reason')!=reason
+            or row.get('recovered_incident')!='known_ik_failure_without_persisted_replay'
+            or row.get('media_status')!='unavailable_after_result_conversion_error'
+            or row.get('replay_episode_id') is not None or row.get('replay_input_path') is not None
+            or row.get('replay_error')!='No replay snapshot was persisted for this interrupted IK attempt.'
+            or row.get('video_path') is not None
+            or row.get('video_error')!='No video frames were persisted; this layout will not be rerun.'
+            or row.get('image_cleanup_error') not in (None,'')):
+        raise RuntimeError('DINO no-video exception is not a one-shot known IK failure without persisted replay')
+    if 'hybrid_control_profile' in row:
+        if row.get('hybrid_control_profile')!=control_profile:
+            raise RuntimeError('DINO no-video IK row has a mismatched controller profile')
+        controller_profile_source='episode_row'
+    else:
+        if not isinstance(control_profile,dict):
+            raise RuntimeError('DINO no-video IK row is missing controller profile evidence')
+        controller_profile_source='batch_metadata_due_to_legacy_conversion'
+    if 'inference_strategy' in row:
+        if row.get('inference_strategy')!='hybrid_astar_act_trial4_dinov3_frozen':
+            raise RuntimeError('DINO no-video IK row has a mismatched inference strategy')
+        inference_strategy_source='episode_row'
+    else:
+        if row.get('planner_strategy')!='hybrid_astar_act_trial4_dinov3_frozen':
+            raise RuntimeError('DINO no-video IK row is missing inference strategy evidence')
+        inference_strategy_source='planner_strategy_legacy_conversion'
+    root=Path(root).resolve(strict=True)
+    incident_root=root/'incidents'
+    if incident_root.is_symlink() or not incident_root.is_dir():
+        raise RuntimeError('DINO no-video IK incident directory is missing or is a symlink')
+    incident_value=row.get('incident_path')
+    if not isinstance(incident_value,str) or not incident_value:
+        raise RuntimeError('DINO no-video IK failure is missing its incident record')
+    candidate=Path(incident_value)
+    if not candidate.is_absolute():
+        candidate=root/candidate
+    if candidate.is_symlink():
+        raise RuntimeError('DINO no-video IK incident record is a symlink')
+    try:
+        incident_path=candidate.resolve(strict=True)
+        incident_root=incident_root.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError('DINO no-video IK incident record is missing') from error
+    if incident_path.parent!=incident_root or incident_path.suffix.lower()!='.json':
+        raise RuntimeError('DINO no-video IK incident record escapes its incident directory')
+    incident=json.loads(incident_path.read_text())
+    if (incident.get('seed')!=seed or incident.get('exception_type')!='RuntimeError'
+            or incident.get('exception')!='known IK failure has no reset-pose snapshot'
+            or incident.get('quantity_status')!='known' or incident.get('peak_collected')!=0
+            or incident.get('final_collected')!=0 or incident.get('simulation_time')!=row.get('elapsed')
+            or incident.get('trace_rows')!=row.get('trace_rows')
+            or incident.get('schedule')!=row.get('act_chunk_schedule')):
+        raise RuntimeError('DINO no-video IK incident record does not match its result row')
+    return dict(seed=seed,key=row.get('key'),kind='known_ik_failure_without_persisted_replay',
+        incident_path=incident_path.relative_to(root).as_posix(),incident_sha256=sha256(incident_path),
+        physical_attempts=1,quantity_status='known',
+        controller_profile_source=controller_profile_source,
+        inference_strategy_source=inference_strategy_source)
+
+
+def _validate_no_video_recovery_report(root,rows,exceptions):
+    if not exceptions:
+        return None
+    root=Path(root).resolve(strict=True)
+    report_path=root/'evaluation_report.json'
+    if report_path.is_symlink() or not report_path.is_file():
+        raise RuntimeError('DINO no-video exception is missing its final recovery report')
+    report=json.loads(report_path.read_text())
+    rows_by_seed={row.get('seed'):row for row in rows}
+    seeds=sorted(item['seed'] for item in exceptions)
+    missing=[dict(seed=seed,key=rows_by_seed[seed]['key'],
+        reason=rows_by_seed[seed]['video_error']) for seed in seeds]
+    if (report.get('planned')!=120 or report.get('videos_expected')!=120
+            or report.get('videos_available')!=120-len(exceptions)
+            or report.get('episodes_without_video')!=missing
+            or report.get('recovered_known_ik_incidents')!=seeds):
+        raise RuntimeError('DINO recovery report does not match the declared no-video media exception')
+    return sha256(report_path)
+
+
 def _verify_dino_checkpoint(metadata, model, model_path):
     checkpoint = Path(model_path)
     if checkpoint.is_symlink() or not checkpoint.is_dir():
@@ -250,8 +351,9 @@ def _validate_dino_summary(root, status, rows):
     return summary, successes
 
 
-def _dino_dependency_ready(root, *, active_pids):
+def _dino_dependency_ready(root, *, active_pids, allowed_no_video_seeds=()):
     root = Path(root).resolve(strict=True)
+    allowed_no_video_seeds=_normalize_no_video_seeds(allowed_no_video_seeds)
     status = json.loads((root / 'status.json').read_text())
     if status.get('state') == 'needs_attention':
         raise RuntimeError('dependency needs_attention; no automatic recovery')
@@ -332,10 +434,25 @@ def _dino_dependency_ready(root, *, active_pids):
     seen_keys = set()
     seen_video_paths = set()
     videos = []
+    media_exceptions = []
     for row in rows:
         seed = row.get('seed')
         expected = plan_by_seed.get(seed)
         key = row.get('key')
+        planning_calls = row.get('planning_calls')
+        if (seed in allowed_no_video_seeds and 'planning_calls' not in row
+                and type(row.get('planner_attempts')) is int):
+            # The legacy evaluator's recovered IK incident predates the
+            # planning_calls field; its one A* invocation is recorded as
+            # planner_attempts. This fallback is limited to declared media
+            # exceptions and is further constrained by the incident validator.
+            planning_calls = row['planner_attempts']
+        row_control_profile=row.get('hybrid_control_profile')
+        if seed in allowed_no_video_seeds and 'hybrid_control_profile' not in row:
+            row_control_profile=control_profile
+        row_inference_strategy=row.get('inference_strategy')
+        if seed in allowed_no_video_seeds and 'inference_strategy' not in row:
+            row_inference_strategy=row.get('planner_strategy')
         if (expected is None or seed in rows_by_seed or key in seen_keys
                 or type(row.get('layout_index')) is not int or type(row.get('target_count')) is not int
                 or any(row.get(field) != expected[field] for field in (
@@ -343,53 +460,65 @@ def _dino_dependency_ready(root, *, active_pids):
                     'checkpoint_step', 'key'))
                 or row.get('model_checkpoint') != model_path
                 or type(row.get('success')) is not bool
-                or type(row.get('planning_calls')) is not int or row['planning_calls'] not in (0, 1)
+                or type(planning_calls) is not int or planning_calls not in (0, 1)
                 or type(row.get('physical_attempts')) is not int
                 or row['physical_attempts'] not in (0, 1)
                 or (row['success'] and row['physical_attempts'] != 1)):
             raise RuntimeError('DINO ledger has a duplicate, mismatched or retried opportunity')
-        if (row.get('inference_strategy') != 'hybrid_astar_act_trial4_dinov3_frozen'
+        if (row_inference_strategy != 'hybrid_astar_act_trial4_dinov3_frozen'
                 or row.get('act_chunk_schedule') != DINO_SCHEDULE
-                or row.get('hybrid_control_profile') != control_profile):
+                or row_control_profile != control_profile):
             raise RuntimeError('DINO ledger action schedule or hybrid controller profile differs')
-        if (row.get('video_error') or row.get('replay_error') or row.get('image_cleanup_error')
-                or row.get('frame_images_deleted') is not True):
-            raise RuntimeError('DINO retained media is incomplete or has an export error')
-        # The child evaluator sets video_deferred when it hands encoding to the batch's
-        # bounded media worker. The batch appends a row only after that worker has
-        # materialized, decoded and finalized the MP4; status.media_pending is the
-        # authoritative pending marker, while this field records the child path.
-        if row.get('video_deferred') is not True:
-            raise RuntimeError('DINO result did not use the expected bounded media pipeline')
-        video = _resolve_dino_video(root, row.get('video_path'))
-        if video in seen_video_paths:
-            raise RuntimeError('DINO results share a retained video path')
-        seen_video_paths.add(video)
-        evidence = dict(key=key, path=video.relative_to(root).as_posix(),
-            bytes=video.stat().st_size, sha256=sha256(video), frames=_decode_one_video_frame(video))
-        videos.append(evidence)
+        if seed in allowed_no_video_seeds:
+            media_exceptions.append(_validate_no_video_ik_exception(
+                root,row,control_profile=control_profile))
+        else:
+            if (row.get('video_error') or row.get('replay_error') or row.get('image_cleanup_error')
+                    or row.get('frame_images_deleted') is not True):
+                raise RuntimeError('DINO retained media is incomplete or has an export error')
+            # The child evaluator sets video_deferred when it hands encoding to the batch's
+            # bounded media worker. The batch appends a row only after that worker has
+            # materialized, decoded and finalized the MP4; status.media_pending is the
+            # authoritative pending marker, while this field records the child path.
+            if row.get('video_deferred') is not True:
+                raise RuntimeError('DINO result did not use the expected bounded media pipeline')
+            video = _resolve_dino_video(root, row.get('video_path'))
+            if video in seen_video_paths:
+                raise RuntimeError('DINO results share a retained video path')
+            seen_video_paths.add(video)
+            evidence = dict(key=key, path=video.relative_to(root).as_posix(),
+                bytes=video.stat().st_size, sha256=sha256(video), frames=_decode_one_video_frame(video))
+            videos.append(evidence)
         rows_by_seed[seed] = row
         seen_keys.add(key)
         target_row_counts[row['target_count']] += 1
     if set(rows_by_seed) != DINO_SEEDS or target_row_counts != Counter({target: 20 for target in range(1, 7)}):
         raise RuntimeError('DINO result ledger does not cover each planned seed exactly once')
+    if {item['seed'] for item in media_exceptions}!=set(allowed_no_video_seeds):
+        raise RuntimeError('declared DINO no-video exception does not match an actual validated incident')
+    recovery_report_sha256=_validate_no_video_recovery_report(root,rows,media_exceptions)
 
     summary, successes = _validate_dino_summary(root, status, rows)
     videos.sort(key=lambda item: item['key'])
     return dict(profile=DINO_PROFILE, model_label=DINO_LABEL, checkpoint_step=DINO_STEP,
         model_path=model_path, weights_sha256=model['weights_sha256'], episodes=120,
-        verified_videos=len(videos), strict_successes=successes, videos=videos,
+        verified_videos=len(videos), allowed_no_video_seeds=list(allowed_no_video_seeds),
+        media_exceptions=media_exceptions,recovery_report_sha256=recovery_report_sha256,
+        strict_successes=successes, videos=videos,
         ledger_sha256=sha256(root / 'episodes.jsonl'), summary_sha256=sha256(root / 'summary.json'),
         metadata_sha256=sha256(root / 'metadata.json'), status_sha256=sha256(root / 'status.json'),
         plan_sha256=plan_hash, schedule_adapter_sha256=metadata['schedule_adapter_sha256'])
 
 
-def dependency_ready(root, *, active_pids, profile=LEGACY_PROFILE):
+def dependency_ready(root, *, active_pids, profile=LEGACY_PROFILE, allowed_no_video_seeds=()):
     """Return a completion certificate for one explicit dependency protocol."""
     if profile == LEGACY_PROFILE:
+        if allowed_no_video_seeds:
+            raise ValueError('no-video exceptions are supported only by the DINO sync5 profile')
         return _legacy_dependency_ready(root, active_pids=active_pids)
     if profile == DINO_PROFILE:
-        return _dino_dependency_ready(root, active_pids=active_pids)
+        return _dino_dependency_ready(root, active_pids=active_pids,
+            allowed_no_video_seeds=allowed_no_video_seeds)
     raise ValueError(f'unknown dependency profile: {profile}')
 
 
@@ -410,10 +539,37 @@ def _verify_video_certificate(root, certificate):
         video = _resolve_dino_video(root, item.get('path'))
         if (video.stat().st_size != item.get('bytes') or sha256(video) != item.get('sha256')):
             raise RuntimeError('dependency video changed after verification')
+    exceptions=certificate.get('media_exceptions',[])
+    allowed=certificate.get('allowed_no_video_seeds',[])
+    normalized_allowed=_normalize_no_video_seeds(allowed)
+    exception_seeds=[item.get('seed') for item in exceptions]
+    if (certificate.get('verified_videos')!=len(certificate.get('videos',[]))
+            or len(certificate.get('videos',[]))+len(exceptions)!=120
+            or list(normalized_allowed)!=allowed or sorted(exception_seeds)!=list(normalized_allowed)):
+        raise RuntimeError('dependency media certificate has incomplete video/exception coverage')
+    if exceptions:
+        metadata_path=root/'metadata.json'
+        if (metadata_path.is_symlink() or not metadata_path.is_file()
+                or sha256(metadata_path)!=certificate.get('metadata_sha256')):
+            raise RuntimeError('dependency metadata changed after no-video profile verification')
+        metadata=json.loads(metadata_path.read_text())
+        control_profile=metadata.get('hybrid_control_profile')
+        rows=read_rows(root/'episodes.jsonl')
+        rows_by_seed={row.get('seed'):row for row in rows}
+        for item in exceptions:
+            row=rows_by_seed.get(item.get('seed'))
+            if (row is None or _validate_no_video_ik_exception(
+                    root,row,control_profile=control_profile)!=item):
+                raise RuntimeError('dependency media exception incident changed after verification')
+        report_hash=_validate_no_video_recovery_report(root,rows,exceptions)
+        if report_hash!=certificate.get('recovery_report_sha256'):
+            raise RuntimeError('dependency media exception recovery report changed after verification')
+    elif certificate.get('recovery_report_sha256') is not None:
+        raise RuntimeError('dependency media certificate has an unexpected recovery report')
 
 
 def run_queue(bundle, after_batch, out, queue, *, start_index=120, device='cpu',
-              poll_seconds=30., dependency_profile=LEGACY_PROFILE):
+              poll_seconds=30., dependency_profile=LEGACY_PROFILE, allowed_no_video_seeds=()):
     bundle, after_batch, out, queue = map(lambda p: Path(p).resolve(),
         (bundle, after_batch, out, queue))
     if type(start_index) is not int or start_index < 6 or start_index % 6 or start_index >= 1_000_000 - 5:
@@ -422,6 +578,9 @@ def run_queue(bundle, after_batch, out, queue, *, start_index=120, device='cpu',
         raise ValueError('authorized acceptance queue is CPU-only')
     if dependency_profile not in (LEGACY_PROFILE, DINO_PROFILE):
         raise ValueError(f'unknown dependency profile: {dependency_profile}')
+    allowed_no_video_seeds=_normalize_no_video_seeds(allowed_no_video_seeds)
+    if dependency_profile!=DINO_PROFILE and allowed_no_video_seeds:
+        raise ValueError('no-video exceptions are supported only by the DINO sync5 profile')
 
     def overlap(a, b):
         return a == b or a.is_relative_to(b) or b.is_relative_to(a)
@@ -445,6 +604,7 @@ def run_queue(bundle, after_batch, out, queue, *, start_index=120, device='cpu',
             bundle / 'manifest.json', after_batch / 'metadata.json', after_batch / 'episode_plan.json')}
         identity = dict(bundle=str(bundle), after_batch=str(after_batch), out=str(out),
             start_index=start_index, dependency_profile=dependency_profile, device=device,
+            allowed_no_video_seeds=list(allowed_no_video_seeds),
             queued_at=started, queue_deadline=deadline, waiting_counts_against_preflight_budget=False,
             preflight_limits=dict(hours=2, opportunities=24, output_gib=5, free_gib=8),
             formal_training_authorized=False,
@@ -463,7 +623,8 @@ def run_queue(bundle, after_batch, out, queue, *, start_index=120, device='cpu',
             status = json.loads((after_batch / 'status.json').read_text())
 
             if pinned_ready is None:
-                candidate = dependency_ready(after_batch, active_pids=active, profile=dependency_profile)
+                candidate = dependency_ready(after_batch, active_pids=active, profile=dependency_profile,
+                    allowed_no_video_seeds=allowed_no_video_seeds)
                 if candidate is None:
                     publish('waiting_for_120_batch', dependency_pids=active)
                     time.sleep(poll_seconds)
@@ -474,7 +635,8 @@ def run_queue(bundle, after_batch, out, queue, *, start_index=120, device='cpu',
                 if status.get('state') == 'needs_attention':
                     raise RuntimeError('dependency needs_attention; no automatic recovery')
                 if status.get('state') != 'complete' or active:
-                    dependency_ready(after_batch, active_pids=active, profile=dependency_profile)
+                    dependency_ready(after_batch, active_pids=active, profile=dependency_profile,
+                        allowed_no_video_seeds=allowed_no_video_seeds)
                     publish('waiting_for_120_batch', dependency_pids=active)
                     time.sleep(poll_seconds)
                     continue
@@ -489,7 +651,8 @@ def run_queue(bundle, after_batch, out, queue, *, start_index=120, device='cpu',
             # Re-read the complete ledger, summary, status, and every video once the
             # inference slot is free. A valid but changed ledger is still refused.
             active = dependency_pids(after_batch)
-            candidate = dependency_ready(after_batch, active_pids=active, profile=dependency_profile)
+            candidate = dependency_ready(after_batch, active_pids=active, profile=dependency_profile,
+                allowed_no_video_seeds=allowed_no_video_seeds)
             if candidate is None:
                 publish('waiting_for_clear_handoff', dependency_pids=active)
                 time.sleep(poll_seconds)

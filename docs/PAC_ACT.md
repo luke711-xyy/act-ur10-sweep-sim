@@ -130,6 +130,18 @@ old120 plan, the ACT dataset manifest, the residual seed schedule and result
 ledger. Add every other known demonstration/preflight manifest using repeated
 `--additional`. Paths to images in those manifests are never followed.
 
+The seed schedule is the planned assignment of layout seeds to training,
+validation, and preflight opportunities. The result ledger records what was
+actually attempted, including the seed and initial-layout fingerprint; it is
+not interchangeable with the schedule. On Ubuntu, the PAC branch can recreate
+its pilot and long-training schedules from source, but the legacy residual
+exports may be absent because their configured path is macOS-specific. In that
+case, keep the regenerated schedule separate from a history-inventory record:
+mark the old attempts as unavailable, do not invent episode rows or claim that
+the historical attempt count was zero, and preserve this status in the
+exclusion snapshot. Exclude every source-defined schedule seed and the full
+reserved residual range, in addition to every known dataset/evaluation layout.
+
 ```sh
 .venv/bin/python -B scripts/prepare_pac_act_exclusions.py \
   --old-plan /path/to/old120/episode_plan.json \

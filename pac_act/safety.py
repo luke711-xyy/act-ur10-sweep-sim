@@ -61,8 +61,17 @@ def inference_lock_paths():
     # Original manual inference and SAC use this native lock. Sibling
     # worktrees must share the lease even though their Git caches differ.
     for sibling in PROJECT.parent.iterdir():
-        candidate=sibling/'runs/.act_inference.lock'
-        if candidate.is_file(): paths.add(candidate)
+        try:
+            # Ignore unrelated temporary/system directories. PAC worktrees are
+            # identifiable by their Git marker and package directory.
+            if not (sibling/'.git').exists() or not (sibling/'pac_act').is_dir():
+                continue
+            candidate=sibling/'runs/.act_inference.lock'
+            if candidate.is_file(): paths.add(candidate)
+        except OSError:
+            # Sibling scans are best-effort: private OS temp directories are
+            # not inference roots, and explicit external roots use the env var.
+            continue
     for path in os.environ.get('PAC_ACT_INFERENCE_LOCKS','').split(os.pathsep):
         if path: paths.add(Path(path).resolve())
     return sorted(paths)

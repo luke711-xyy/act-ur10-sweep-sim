@@ -39,7 +39,7 @@ def completed_dinov3_batch(root):
     profile={'admittance_configuration':'act.hybrid_admittance','ACT_predicted_Z_executed':False}
     plan=[]; rows=[]
     for i in range(120):
-        target=i//20+1; seed=2120000+i; fingerprint=f'{i+1:064x}'
+        target=i%6+1; seed=2120000+i; fingerprint=f'{i+1:064x}'
         key=f'{label}:n{target}:l{i:02d}'
         plan.append(dict(layout_index=i,seed=seed,layout_fingerprint=fingerprint,
             target_count=target,model_label=label,model_path=model_path,
@@ -80,6 +80,42 @@ def completed_dinov3_batch(root):
             peak_count_matrix=peak,final_count_matrix=final,by_target=by_target)}))
     write_json(root/'status.json',dict(state='complete',completed=120,planned=120,current=None))
     return rows
+
+
+def known_no_replay_ik_failure(root,rows,index=14):
+    row=rows[index]
+    # The completed legacy evaluator row records its single A* call as
+    # planner_attempts; result conversion omitted planning_calls and the
+    # per-row controller profile. The batch metadata still contains the
+    # controller profile used by the evaluation.
+    row.pop('planning_calls',None)
+    row.pop('hybrid_control_profile',None)
+    row['planner_strategy']=row.pop('inference_strategy')
+    row.update(failure_type='ik_unreachable',
+        failure_reason='known IK execution failure: RuntimeError: UR10 IK target is unreachable: position residual=0.002112 m, orientation residual=0.022903 rad',
+        reason='known IK execution failure: RuntimeError: UR10 IK target is unreachable: position residual=0.002112 m, orientation residual=0.022903 rad',
+        termination_reason='known_execution_failure:ik_unreachable',
+        collected=0,target_collected=0,unexpected_collected=0,quantity_status='known',
+        elapsed=17.019999999997818,trace_rows=1662,peak_force=None,
+        planner_attempts=1,planner_strategy='hybrid_astar_act_trial4_dinov3_frozen',
+        replay_episode_id=None,replay_input_path=None,
+        replay_error='No replay snapshot was persisted for this interrupted IK attempt.',
+        video_path=None,video_error='No video frames were persisted; this layout will not be rerun.',
+        media_status='unavailable_after_result_conversion_error',
+        recovered_incident='known_ik_failure_without_persisted_replay')
+    Path(rows[index]['video_path'] if rows[index].get('video_path') else root/'videos'/
+        f"{row['key'].replace(':','_')}.mp4").unlink(missing_ok=True)
+    incident=root/'incidents'/f"seed_{row['seed']}.json"
+    row['incident_path']=str(incident)
+    write_json(incident,dict(seed=row['seed'],exception_type='RuntimeError',
+        exception='known IK failure has no reset-pose snapshot',quantity_status='known',
+        peak_collected=0,final_collected=0,simulation_time=row['elapsed'],
+        trace_rows=row['trace_rows'],schedule=row['act_chunk_schedule']))
+    (root/'episodes.jsonl').write_text(''.join(json.dumps(item)+'\n' for item in rows))
+    write_json(root/'evaluation_report.json',dict(planned=120,videos_available=119,videos_expected=120,
+        episodes_without_video=[dict(seed=row['seed'],key=row['key'],reason=row['video_error'])],
+        recovered_known_ik_incidents=[row['seed']]))
+    return row,incident
 
 
 def completed_batch(root,*,zero_planning=False):
@@ -281,9 +317,75 @@ def test_dinov3_batch_requires_explicit_profile_and_emits_video_evidence(tmp_pat
         for video in certificate['videos'])
 
 
+def test_dinov3_one_declared_no_video_ik_incident_is_recorded_without_weakening_default(tmp_path):
+    from pac_act.preflight_queue import dependency_ready
+    root=tmp_path/'dino-batch';rows=completed_dinov3_batch(root)
+    row,incident=known_no_replay_ik_failure(root,rows)
+    row['planning_calls']=1
+    row['hybrid_control_profile']=json.loads((root/'metadata.json').read_text())['hybrid_control_profile']
+    row['inference_strategy']=row['planner_strategy']
+    (root/'episodes.jsonl').write_text(''.join(json.dumps(item)+'\n' for item in rows))
+    with pytest.raises(RuntimeError,match='media|video|replay'):
+        dependency_ready(root,active_pids=[],profile='dinov3_sync5_200k')
+    row.pop('planning_calls')
+    row.pop('hybrid_control_profile')
+    row.pop('inference_strategy')
+    (root/'episodes.jsonl').write_text(''.join(json.dumps(item)+'\n' for item in rows))
+    certificate=dependency_ready(root,active_pids=[],profile='dinov3_sync5_200k',
+        allowed_no_video_seeds=[2120014])
+    assert certificate['episodes']==120 and certificate['verified_videos']==119
+    assert certificate['allowed_no_video_seeds']==[2120014]
+    assert certificate['media_exceptions']==[dict(seed=2120014,key=row['key'],
+        kind='known_ik_failure_without_persisted_replay',incident_path='incidents/seed_2120014.json',
+        incident_sha256=sha256(incident),physical_attempts=1,quantity_status='known',
+        controller_profile_source='batch_metadata_due_to_legacy_conversion',
+        inference_strategy_source='planner_strategy_legacy_conversion')]
+    assert certificate['recovery_report_sha256']==sha256(root/'evaluation_report.json')
+
+
+def test_dinov3_no_video_exception_rejects_wrong_incident_or_another_missing_video(tmp_path):
+    from pac_act.preflight_queue import dependency_ready
+    root=tmp_path/'dino-batch';rows=completed_dinov3_batch(root)
+    _row,incident=known_no_replay_ik_failure(root,rows)
+    payload=json.loads(incident.read_text());payload['seed']=2120015;write_json(incident,payload)
+    with pytest.raises(RuntimeError,match='incident|IK|no-video'):
+        dependency_ready(root,active_pids=[],profile='dinov3_sync5_200k',
+            allowed_no_video_seeds=[2120014])
+
+    root=tmp_path/'second-batch';rows=completed_dinov3_batch(root)
+    known_no_replay_ik_failure(root,rows)
+    (root/'videos'/f"{rows[15]['key'].replace(':','_')}.mp4").unlink()
+    rows[15]['video_path']=None
+    (root/'episodes.jsonl').write_text(''.join(json.dumps(item)+'\n' for item in rows))
+    with pytest.raises(RuntimeError,match='video|media'):
+        dependency_ready(root,active_pids=[],profile='dinov3_sync5_200k',
+            allowed_no_video_seeds=[2120014])
+
+    root=tmp_path/'third-batch';rows=completed_dinov3_batch(root)
+    known_no_replay_ik_failure(root,rows)
+    report=json.loads((root/'evaluation_report.json').read_text())
+    report['videos_available']=118
+    write_json(root/'evaluation_report.json',report)
+    with pytest.raises(RuntimeError,match='recovery report|media exception'):
+        dependency_ready(root,active_pids=[],profile='dinov3_sync5_200k',
+            allowed_no_video_seeds=[2120014])
+
+
+def test_dinov3_no_video_incident_is_rechecked_with_its_certificate(tmp_path):
+    import pac_act.preflight_queue as module
+    root=tmp_path/'dino-batch';rows=completed_dinov3_batch(root)
+    _row,incident=known_no_replay_ik_failure(root,rows)
+    certificate=module.dependency_ready(root,active_pids=[],profile='dinov3_sync5_200k',
+        allowed_no_video_seeds=[2120014])
+    incident.write_text(incident.read_text()+' ')
+    with pytest.raises(RuntimeError,match='incident|media exception'):
+        module._verify_video_certificate(root,certificate)
+
+
 def test_dinov3_queue_passes_explicit_profile_and_preflight_index_once(tmp_path,monkeypatch):
     import pac_act.preflight_queue as module
-    root=tmp_path/'dino-batch';completed_dinov3_batch(root)
+    root=tmp_path/'dino-batch';rows=completed_dinov3_batch(root)
+    known_no_replay_ik_failure(root,rows)
     bundle=tmp_path/'bundle';(bundle/'source/scripts').mkdir(parents=True)
     write_json(bundle/'manifest.json',dict(identity='fixture'))
     (bundle/'source/scripts/train_pac_act.py').write_text('# fixture\n')
@@ -297,14 +399,16 @@ def test_dinov3_queue_passes_explicit_profile_and_preflight_index_once(tmp_path,
         return subprocess.CompletedProcess(command,0)
     monkeypatch.setattr(module.subprocess,'run',execute)
     result=module.run_queue(bundle,root,out,queue,start_index=120,
-        dependency_profile='dinov3_sync5_200k')
+        dependency_profile='dinov3_sync5_200k',allowed_no_video_seeds=[2120014])
     assert result['state']=='preflight_complete' and len(calls)==1
     command=calls[0]
     assert command[command.index('--preflight-start-index')+1]=='120'
     authorization=json.loads((queue/'authorization.json').read_text())
     certificate=json.loads((queue/'dependency_verified.json').read_text())
     assert authorization['dependency_profile']=='dinov3_sync5_200k'
-    assert certificate['profile']=='dinov3_sync5_200k' and certificate['verified_videos']==120
+    assert authorization['allowed_no_video_seeds']==[2120014]
+    assert certificate['profile']=='dinov3_sync5_200k' and certificate['verified_videos']==119
+    assert certificate['media_exceptions'][0]['seed']==2120014
 
 
 @pytest.mark.parametrize('hazard',['incomplete_status','wrong_checkpoint','wrong_schedule',
@@ -402,9 +506,10 @@ def test_queue_cli_passes_explicit_dependency_profile(tmp_path,monkeypatch):
     monkeypatch.setattr(sys,'argv',['queue_pac_preflight.py','--bundle',str(tmp_path/'bundle'),
         '--after-batch',str(tmp_path/'batch'),'--out',str(tmp_path/'out'),
         '--queue-state',str(tmp_path/'queue'),'--preflight-start-index','120',
-        '--dependency-profile','dinov3_sync5_200k'])
+        '--dependency-profile','dinov3_sync5_200k','--allow-no-video-seed','2120014'])
     queue_pac_preflight.main()
-    assert captured['kwargs']==dict(start_index=120,device='cpu',dependency_profile='dinov3_sync5_200k')
+    assert captured['kwargs']==dict(start_index=120,device='cpu',dependency_profile='dinov3_sync5_200k',
+        allowed_no_video_seeds=[2120014])
 
 
 def test_dinov3_queue_detects_ledger_change_after_waiting_for_slot(tmp_path,monkeypatch):
