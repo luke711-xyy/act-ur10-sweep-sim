@@ -12,7 +12,6 @@ from test_pac_ppo import TinyPolicy,batch
 def test_successful_update_above_old_early_limit_is_accepted_once():
     from pac_act.ppo import ChunkPPO
     p=TinyPolicy(); t=ChunkPPO(p)
-    t.exact_kl=lambda b:.016
     result=t.train(batch(p))
     assert result['accepted'] is True and result['update']==1 and result['epochs']==8
     assert [g['lr'] for g in t.optimizer.param_groups]==[1e-6,1e-5]

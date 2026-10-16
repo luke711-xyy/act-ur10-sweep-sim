@@ -26,18 +26,3 @@ def test_resource_stop_inside_update_restores_weights_optimizer_and_rng():
     assert trainer.last_audit['rolled_back'] is True
     assert trainer._n_updates == 0
     assert data.consumed
-
-
-def test_exact_kl_checks_resource_guard_between_microbatches():
-    from pac_act.ppo import ChunkPPO
-    from pac_act.safety import StopExperiment
-    policy = TinyPolicy()
-    calls = []
-    def poll():
-        calls.append(True)
-        if len(calls) == 2:
-            raise StopExperiment('deadline')
-    trainer = ChunkPPO(policy, poll=poll)
-    with pytest.raises(StopExperiment):
-        trainer.exact_kl(batch(policy))
-    assert len(calls) == 2

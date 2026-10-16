@@ -39,7 +39,7 @@ def test_preflight_uses_only_actor_learning_prefixes_and_accepted_rounds(tmp_pat
         folder=tmp_path/'episodes'/f'preflight_{seed}_{arm}'
         folder.mkdir(parents=True)
         append_json(folder/'learning_blocks.jsonl', dict(length=5, policy_revision=revision))
-    append_json(tmp_path/'updates.jsonl', dict(update=1, accepted=True, acceptance_round=1, exact_kl=.021))
+    append_json(tmp_path/'updates.jsonl', dict(update=1, accepted=True, acceptance_round=1, kl=.021))
     result=snapshot(tmp_path)
     assert result['run']['phase']=='preflight'
     assert result['run']['training_started'] is False

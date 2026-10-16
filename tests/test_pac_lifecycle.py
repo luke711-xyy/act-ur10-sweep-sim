@@ -54,7 +54,7 @@ def test_dashboard_full_pagination_and_loss_series(tmp_path):
     from pac_act.dashboard import snapshot
     from pac_act.storage import append_json
     for i in range(30): append_json(tmp_path/'episodes.jsonl',dict(seed=i,target_count=1,final_collected=i%3,success=False))
-    for i in range(4): append_json(tmp_path/'updates.jsonl',dict(update=i,actor_loss=i/2,value_loss=10-i,exact_kl=.001*i))
+    for i in range(4): append_json(tmp_path/'updates.jsonl',dict(update=i,actor_loss=i/2,value_loss=10-i,kl=.001*i))
     page=snapshot(tmp_path,page=2,page_size=12)
     assert len(page['episodes'])==12 and page['total_episodes']==30 and page['pages']==3
     assert len(page['updates'])==4

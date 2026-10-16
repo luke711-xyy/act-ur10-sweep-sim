@@ -101,7 +101,6 @@ class ChunkPPO(PPO):
             {'params':actor_parameters,'lr':config.actor_lr,'role':'actor'},
             {'params':critic_parameters,'lr':config.critic_lr,'role':'critic'}],eps=1e-5)
         self._n_updates=0; self.last_audit=None;self.audit_sink=audit_sink
-        self.last_distribution_audit=None
         self.last_accepted_audit=None;self._rejected_exception=None
         self._audit_step_calls=0;self._audit_step_returns=0
         self._step_audits=[]
@@ -167,69 +166,26 @@ class ChunkPPO(PPO):
         step_audit['status']='complete'
         return result
 
-    @torch.no_grad()
-    def exact_kl(self,batch):
-        self.last_distribution_audit=None
-        total=0.;old_means=[];new_means=[];old_logs=[]
-        for start in range(0,len(batch),self.config.microbatch):
-            self.poll()
-            data=batch.take(torch.arange(start,min(start+self.config.microbatch,len(batch))),self.policy.device)
-            old=PrefixGaussian(data['old_means'],data['old_log_std'],data['lengths'])
-            proposed=self.policy.means(data['observations'])
-            value=old.kl(proposed,self.policy.noise.log_std)
-            old_means.append(data['old_means'].cpu());new_means.append(proposed.cpu())
-            old_logs.append(old.log_std.cpu())
-            finite=bool(torch.isfinite(value).all())
-            if finite:
-                total+=float(value.sum())
-                finite=bool(np.isfinite(total))
-            # Capture the offending microbatch BEFORE rejecting it. This is
-            # partial evidence, not a successful whole-rollout KL pass.
-            before=torch.cat(old_means);after=torch.cat(new_means);count=len(after)
-            lengths=batch.lengths.cpu()[:count]
-            mask=torch.arange(5)[None,:]<lengths[:,None]
-            scaled=(after-before)*self.policy.noise.scales.detach().cpu()
-            units=(1000.,1000.,180./np.pi)
-            shifts={key:float((scaled[:,:,i][mask].square().mean()).sqrt())*units[i]
-                for i,key in enumerate(('dx_mm','dy_mm','dyaw_deg'))}
-            self.last_distribution_audit=dict(exact_kl=total/count if finite else None,
-                complete=finite and count==len(batch),blocks_evaluated=count,expected_blocks=len(batch),nonfinite_KL=not finite,
-                kl_definition='KL(old || proposed), sum executed steps and XY/yaw, mean blocks',
-                active_scalar_dimensions=int(lengths.sum())*3,
-                physical_mean_shift_rms=shifts,lengths=lengths.tolist(),
-                old_means=before.tolist(),proposed_means=after.tolist(),old_log_std=torch.cat(old_logs).tolist(),
-                proposed_log_std=self.policy.noise.log_std.detach().cpu().tolist(),
-                sampled_actions=batch.actions.cpu()[:count].tolist(),physical_scales=self.policy.noise.scales.detach().cpu().tolist())
-            if not finite:raise UpdateRejected('nonfinite full rollout KL')
-        return total/len(batch)
-
     def train(self,batch):
         if batch.consumed: raise RuntimeError('on-policy rollout already consumed; never replay a PPO batch')
         if len(batch)<32 or len(batch)%32: raise ValueError('rollout must contain whole logical minibatches32')
         from .update_audit import state_hashes,json_safe
         batch.consumed=True; saved=self.snapshot(); records=[];before_hash=state_hashes(saved)
-        attempt_id=uuid.uuid4().hex;completed_epochs=0;before_dist=None
+        attempt_id=uuid.uuid4().hex;completed_epochs=0
         self._rejected_exception=None
         self._audit_step_calls=0;self._audit_step_returns=0
         self._step_audits=[]
-        self.last_distribution_audit=None;stage='initial_distribution'
+        stage='optimization'
         try:
             self.poll()
-            initial_kl=self.exact_kl(batch)
-            if not np.isfinite(initial_kl):raise UpdateRejected('nonfinite aggregate rollout KL')
-            before_dist=copy.deepcopy(self.last_distribution_audit)
             for epoch in range(self.config.epochs):
                 indices=torch.randperm(len(batch))
                 for start in range(0,len(batch),self.config.batch):
                     stage=f'epoch_{epoch+1}_minibatch_{start//self.config.batch+1}'
                     records.append(self.update_minibatch(batch,indices[start:start+self.config.batch]))
-                completed_epochs=epoch+1;stage=f'epoch_{epoch+1}_whole_rollout_KL'
-                kl=self.exact_kl(batch)
-                if not np.isfinite(kl):raise UpdateRejected('nonfinite aggregate rollout KL')
-                # Finite KL is a diagnostic and differentiable loss term, not
-                # an early-stop/rejection gate. Nonfinite values still raise.
+                completed_epochs=epoch+1
             self._n_updates+=1
-            self.last_audit=dict(accepted=True,update=self._n_updates,epochs=epoch+1,exact_kl=kl,
+            self.last_audit=dict(accepted=True,update=self._n_updates,epochs=epoch+1,
                 **{k:float(np.mean([r[k] for r in records if k in r]))
                    for k in records[0]} if records else {})
             self.last_accepted_audit=copy.deepcopy(self.last_audit)
@@ -270,8 +226,6 @@ class ChunkPPO(PPO):
                 completed_epochs=completed_epochs,
                 config=self.config.asdict(),metrics_before_optimizer_steps=records,
                 optimizer_step_audits=self._step_audits,
-                distribution_before=before_dist,
-                distribution_after=self.last_distribution_audit if stage.endswith('whole_rollout_KL') else None,
                 state_hashes=dict(before=before_hash,proposed=proposed_hash,restored=after_hash),
                 batch=dict(blocks=len(batch),effective_actions=int(batch.lengths.sum()),
                     nonfinite_returns=int((~torch.isfinite(batch.returns)).sum()),

@@ -6,20 +6,22 @@ import torch
 from test_pac_ppo import TinyPolicy,batch
 
 
-def test_finite_large_KL_keeps_all_epochs_and_accepts_the_update():
+def test_finite_minibatch_KL_keeps_all_epochs_and_accepts_the_update():
     from pac_act.config import DEFAULT
     from pac_act.ppo import ChunkPPO
     policy=TinyPolicy();trainer=ChunkPPO(policy,replace(DEFAULT,epochs=3))
-    data=batch(policy);initial=policy.actor.bias.detach().clone()
+    data=batch(policy);initial=policy.actor.bias.detach().clone();metrics=[]
     ordinary_step=trainer.update_minibatch
     def moving_step(*args):
         result=ordinary_step(*args)
+        metrics.append(result['kl'])
         with torch.no_grad():policy.actor.bias.add_(.01)
         return result
     trainer.update_minibatch=moving_step
     audit=trainer.train(data)
     assert audit['accepted'] is True and audit['epochs']==3
-    assert audit['exact_kl']>.02 and torch.isfinite(torch.tensor(audit['exact_kl']))
+    assert len(metrics)==3 and all(torch.isfinite(torch.tensor(value)) for value in metrics)
+    assert audit['kl']==pytest.approx(sum(metrics)/len(metrics))
     assert trainer._n_updates==1 and trainer._audit_step_returns==3
     assert not torch.equal(policy.actor.bias,initial)
 
@@ -35,35 +37,49 @@ def test_KL_penalty_still_has_gradient_when_stopping_is_disabled():
     torch.testing.assert_close(parts['loss'],expected)
 
 
+def test_train_evaluates_policy_only_for_optimization_minibatches():
+    from dataclasses import replace
+    from pac_act.config import DEFAULT
+    from pac_act.ppo import ChunkPPO
+
+    policy=TinyPolicy();data=batch(policy)
+    trainer=ChunkPPO(policy,replace(DEFAULT,epochs=2,microbatch=4,batch=32))
+    means=policy.means;calls=[]
+    def counted(observations):
+        calls.append(len(observations['x']))
+        return means(observations)
+    policy.means=counted
+
+    audit=trainer.train(data)
+
+    assert calls==[4]*16
+    assert audit['accepted'] is True and audit['epochs']==2
+    assert 'kl' in audit and 'exact_kl' not in audit
+
+
 def test_nonfinite_proposal_is_still_rejected_and_rolled_back():
     from pac_act.ppo import ChunkPPO,UpdateRejected
     from pac_act.update_audit import state_hashes
     policy=TinyPolicy();trainer=ChunkPPO(policy);data=batch(policy);before=trainer.snapshot()
-    def invalid(*args):
+    step=trainer.optimizer.step
+    def invalid(*args,**kwargs):
+        result=step(*args,**kwargs)
         with torch.no_grad():policy.actor.bias.fill_(float('nan'))
-        return {}
-    trainer.update_minibatch=invalid
+        return result
+    trainer.optimizer.step=invalid
     with pytest.raises(UpdateRejected,match='nonfinite'):trainer.train(data)
     assert trainer.last_audit['rollback_verified'] is True
     assert state_hashes(before)==state_hashes(trainer.snapshot())
 
 
-def test_nonfinite_aggregate_KL_after_an_optimizer_step_is_rejected_and_restored():
-    from pac_act.config import DEFAULT
+def test_invalid_old_policy_distribution_is_rejected_and_restored():
     from pac_act.ppo import ChunkPPO,UpdateRejected
     from pac_act.update_audit import state_hashes
-    policy=TinyPolicy();trainer=ChunkPPO(policy,replace(DEFAULT,epochs=1));data=batch(policy)
-    before=trainer.snapshot();exact=trainer.exact_kl;calls=[]
-    def overflow_after_update(data):
-        value=exact(data);calls.append(value)
-        if len(calls)>1:
-            finite=torch.full((4,),1e38)
-            assert torch.isfinite(finite).all()
-            return float(finite.sum())  # Each value finite, aggregate overflows float32.
-        return value
-    trainer.exact_kl=overflow_after_update
-    with pytest.raises(UpdateRejected,match='nonfinite'):trainer.train(data)
-    assert trainer.last_audit['optimizer_steps']==1
+    policy=TinyPolicy();trainer=ChunkPPO(policy);data=batch(policy)
+    data.old_means[0,0,0]=float('nan')
+    before=trainer.snapshot()
+    with pytest.raises(UpdateRejected,match='PPO update rolled back'):trainer.train(data)
+    assert trainer.last_audit['optimizer_steps']==0
     assert trainer.last_audit['rollback_verified'] is True
     assert state_hashes(before)==state_hashes(trainer.snapshot())
 

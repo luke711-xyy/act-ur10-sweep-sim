@@ -136,7 +136,7 @@ function render(d){
   const warnings=[...d.warnings];if(d.status.error)warnings.push(d.status.error);
   if(d.process.alive===false&&['preflight','training','collecting'].includes(st))warnings.push('未找到该任务的实际实验进程；状态文件可能滞后，请核验，面板不会自动恢复。');
   $('warnings').hidden=!warnings.length;$('warnings').textContent=warnings.join('\n');
-  $('loss-plots').replaceChildren(...[['actor_loss','Actor loss'],['value_loss','Value loss'],['exact_kl','Exact KL / 整批'],['kl','KL / 更新内均值'],['entropy','Entropy'],['prior_cost','行为先验代价'],['environment_return','采样环境回报'],['optimization_return','优化回报'],['std_xy_mm','XY 探索标准差 / mm'],['std_yaw_deg','Yaw 探索标准差 / °']].map(([k,t])=>plot(d.updates,k,t)));
+  $('loss-plots').replaceChildren(...[['actor_loss','Actor loss'],['value_loss','Value loss'],['kl','KL / 更新内 minibatch 均值'],['entropy','Entropy'],['prior_cost','行为先验代价'],['environment_return','采样环境回报'],['optimization_return','优化回报'],['std_xy_mm','XY 探索标准差 / mm'],['std_yaw_deg','Yaw 探索标准差 / °']].map(([k,t])=>plot(d.updates,k,t)));
   const keys=Object.keys(d.effect_groups);selectOptions($('effect-group'),keys.map(k=>[k,groupName(k)]),keys.includes(pre?'preflight:new_zero':'train:actor')?(pre?'preflight:new_zero':'train:actor'):keys[0]);renderEffects(d);
   const arms=[...new Set(keys.map(k=>k.split(':')[1]))];selectOptions($('arm'),[['all','全部组'],...arms.map(a=>[a,armNames[a]||a])]);
   $('episodes').replaceChildren();
