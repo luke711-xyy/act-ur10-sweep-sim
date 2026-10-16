@@ -3,6 +3,8 @@
 Only the MuJoCo integration boundary is replaced. This is not a physical
 rollout clearance; it catches control-chain wiring and prefix accounting.
 """
+import json
+import shutil
 from types import SimpleNamespace
 import numpy as np
 import pytest
@@ -14,7 +16,11 @@ def wired_episode(monkeypatch,tmp_path,*,fail_after=None,force=1.,learned=False)
     from pac_act.identity import PROJECT
     from pac_act.rewards import ContactReward
     from sim.act.rollout import CollectionTerminationTracker,_overforce_relief_loop
-    formal,module=load_trial4(); cfg=cfg_for(PROJECT/'hybrid_trial4_snapshot',1)
+    formal,module=load_trial4()
+    bundle=tmp_path/'legacy_bundle'; bundle.mkdir(exist_ok=True)
+    shutil.copyfile(PROJECT/'hybrid_trial4_snapshot/evaluation_config.yaml',bundle/'evaluation_config.yaml')
+    (bundle/'manifest.json').write_text(json.dumps({}))
+    cfg=cfg_for(bundle,1)
     class Env:
         time=.02; control_dt=.01
         ee=SimpleNamespace(tcp_yaw=lambda:0.,wrist_ft_world=lambda:np.zeros(6),compensated_wrench_world=lambda:np.zeros(6))

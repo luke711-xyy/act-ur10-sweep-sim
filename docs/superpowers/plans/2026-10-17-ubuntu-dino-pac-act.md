@@ -40,18 +40,20 @@
 - Create: hybrid_trial4_snapshot/dinov3_sync5/evaluation_config.yaml (or an equivalently explicit, bundle-contained representation)
 - Modify: pac_act/hybrid.py
 - Modify: pac_act/identity.py
+- Modify: pac_act/lifecycle.py (manifest profile propagation into each episode)
 - Create: tests/test_pac_dinov3_control_profile.py
+- Modify: tests/test_pac_execution.py (construct a legacy bundle fixture with an explicit manifest)
 
 **Interfaces:**
 - Resolve the controller profile explicitly from the verified bundle manifest as dinov3_sync5; reject unknown profile ids or digest/config mismatches before environment construction.
 - Preserve the legacy PAC snapshot and loader behavior for provenance and existing tests. The DINO bundle must never select its older relief settings.
 
-- [ ] **Step 1: Write failing tests** for exact sync5 control-profile values and refusal of stale/changed hashes. Cover target force 1 N, ±0.002 m Z limit, seek/maintain MBK 10/400/10 and 10/800/10, 1 mm contact gate, force/stability thresholds and dwell, 2 s handoff, handoff-only XY/yaw acceleration limits, tracking/follow, wrist-Fz feedback, and ACT-predicted-Z disabled.
-- [ ] **Step 2: Add** the compliance and relief behavior recorded by the active sync5 metadata/config: maintain compliance 5e-05 m/N capped at 0.0005 m only in maintain; overforce relief activates/releases at 1.5/1.1 N with 0.0005/0.0005 m/s rates and 0.00025 m cap. Bind these values and the effective evaluation config to the bundle source/profile digests.
-- [ ] **Step 3: Implement** explicit profile selection in the PAC runtime and package path. Do not consult the active run directory at runtime; the verified profile travels inside the new DINO bundle. Do not change any parameter or modify the root checkout, current evaluation worktree, or default inference route.
-- [ ] **Step 4: Test** Z correction/cap, relief activation/release, phase ownership and profile drift using synthetic force/state inputs only; no simulator episode, optimizer update or physical attempt. Require generated runtime settings to equal the frozen DINO sync5 profile.
-- [ ] **Step 5: Run** python -m pytest -q tests/test_pac_dinov3_control_profile.py; expect parity and fail-closed tests to pass.
-- [ ] **Step 6: Commit** with message fix: preserve DINO sync5 admittance profile in PAC-ACT.
+- [x] **Step 1: Write failing tests** for exact sync5 control-profile values and fail-closed profile/config drift or unknown ids. Cover target force 1 N, ±0.002 m Z limit, seek/maintain MBK 10/400/10 and 10/800/10, 1 mm contact gate, force/stability thresholds and dwell, 2 s handoff, handoff-only XY/yaw acceleration limits, tracking/follow, wrist-Fz feedback, and ACT-predicted-Z disabled.
+- [x] **Step 2: Add** the compliance and relief behavior recorded by the active sync5 metadata/config: maintain compliance 5e-05 m/N capped at 0.0005 m only in maintain; overforce relief activates/releases at 1.5/1.1 N with 0.0005/0.0005 m/s rates and 0.00025 m cap. Bind these values and the effective evaluation config to the bundle source/profile digests.
+- [x] **Step 3: Implement** explicit profile selection in the PAC runtime and a bundle-contained profile contract. Task 4 wires the DINO source profile/config into the portable bundle manifest. Do not consult the active run directory at runtime; do not change any parameter or modify the root checkout, current evaluation worktree, or default inference route.
+- [x] **Step 4: Test** Z correction/cap, relief activation/release, phase ownership and profile drift using synthetic force/state inputs only; no simulator episode, optimizer update or physical attempt. Require generated runtime settings to equal the frozen DINO sync5 profile.
+- [x] **Step 5: Run** python -m pytest -q tests/test_pac_dinov3_control_profile.py; expect parity and fail-closed tests to pass.
+- [x] **Step 6: Commit** with message fix: preserve DINO sync5 admittance profile in PAC-ACT.
 
 ---
 ### Task 2: DINOv3 ACT strict loader and PAC policy adapter

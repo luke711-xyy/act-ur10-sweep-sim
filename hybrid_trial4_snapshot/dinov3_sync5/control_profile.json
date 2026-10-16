@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "profile_id": "dinov3_sync5",
+  "effective_profile": {
+    "target_force_N": 1.0,
+    "total_Z_limit_m": 0.002,
+    "seek_MBK": [10.0, 400.0, 10.0],
+    "maintain_MBK": [10.0, 800.0, 10.0],
+    "gate_m": 0.001,
+    "contact_threshold_N": 0.5,
+    "contact_dwell_s": 0.1,
+    "stable_band_N": [0.8, 1.2],
+    "stable_dwell_s": 0.2,
+    "handoff_window_s": 2.0,
+    "XY_acceleration_m_s2": 0.05,
+    "XY_speed_m_s": 0.08,
+    "yaw_speed_rad_s": 0.35,
+    "yaw_acceleration_rad_s2": 0.5,
+    "up_m_s": 0.02,
+    "down_m_s": 0.1,
+    "tracking_gain": 0.5,
+    "tracking_bias_cap_m": 0.0002,
+    "IK_early_exit_threshold": 1e-6,
+    "force_feedback": "compensated_filtered_wrist_Fz_only",
+    "Z_owner": "admittance_plus_bounded_actual_Z_follow",
+    "ACT_predicted_Z_executed": false,
+    "after_handoff_window": "exact_native_ACT_without_continued_acceleration_limiting",
+    "maintain_force_compliance": {
+      "gain_m_per_N": 5e-5,
+      "offset_cap_m": 0.0005,
+      "active_phase": "maintain",
+      "feedback": "compensated_filtered_wrist_Fz"
+    },
+    "overforce_relief": {
+      "activation_force": 1.5,
+      "release_force": 1.1,
+      "upward_rate": 0.0005,
+      "return_rate": 0.0005,
+      "max_offset": 0.00025
+    }
+  }
+}

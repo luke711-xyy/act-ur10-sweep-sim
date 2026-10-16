@@ -126,7 +126,20 @@ class HybridEpisode:
         from sim.act.expert import expert_plan_candidates
         from sim.act.interface import ACTObservationBuilder
         self.spec,self.store,self.registry,self.guard,self.model=spec,store,registry,guard,model
-        self.path=store.claim(spec); self.cfg=cfg; self.formal,self.module=load_trial4()
+        self.cfg=cfg; self.formal,self.module=load_trial4()
+        from .dinov3_control import (SYNC5_PROFILE_ID, configure_sync5_admittance,
+                                     load_sync5_profile, reset_trial4_admittance)
+        profile_id=cfg.get_path('act.hybrid_control_profile_id')
+        reset_trial4_admittance(self.module)
+        if profile_id==SYNC5_PROFILE_ID:
+            profile_root=cfg.get_path('act.hybrid_control_profile_root')
+            if not profile_root:
+                raise ValueError('DINO sync5 profile root missing from verified bundle config')
+            profile=load_sync5_profile(profile_root)
+            configure_sync5_admittance(self.module,cfg,profile)
+        elif profile_id is not None:
+            raise ValueError('unknown controller profile')
+        self.path=store.claim(spec)
         self.trace=TraceWriter(self.path/'physical_trace.jsonl.gz')
         self.reward=ContactReward(spec['target_count']); self.clock=BlockClock()
         self.active=False; self.done=False; self.closed=False; self.context=None

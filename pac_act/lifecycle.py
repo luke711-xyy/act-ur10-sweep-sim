@@ -101,8 +101,21 @@ def make_guard(root,profile,original=None,started_at=None):
 def cfg_for(bundle,target):
     from sim.config import load_config
     from .hybrid import load_trial4
+    from .identity import controller_profile_id
+    bundle=Path(bundle).resolve()
+    manifest=json.loads((bundle/'manifest.json').read_text())
+    profile_id=controller_profile_id(manifest)
+    if profile_id=='dinov3_sync5':
+        from .dinov3_control import load_sync5_profile
+        load_sync5_profile(bundle)
     formal,_=load_trial4()
-    return formal.candidate_config(load_config(str(Path(bundle)/'evaluation_config.yaml')),target)
+    cfg=formal.candidate_config(load_config(str(bundle/'evaluation_config.yaml')),target)
+    # Profile selection comes only from the bundle manifest, never from an
+    # ambient/default evaluation config. An omitted id preserves legacy runs.
+    cfg.set_path('act.hybrid_control_profile_id',profile_id)
+    if profile_id is not None:
+        cfg.set_path('act.hybrid_control_profile_root',str(bundle))
+    return cfg
 
 
 def next_spec(store,target,role='train',arm='actor',*,start_index=0):

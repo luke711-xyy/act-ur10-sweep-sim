@@ -9,6 +9,17 @@ from .storage import sha256,write_json
 PROJECT=Path(__file__).resolve().parents[1]
 RANGES={'train':(6_000_000,7_000_000),'validation':(7_000_000,8_000_000),
         'preflight':(8_000_000,9_000_000)}
+CONTROL_PROFILE_IDS={'dinov3_sync5'}
+
+
+def controller_profile_id(manifest):
+    """Resolve an explicitly bundled controller profile; absence is legacy."""
+    value=manifest.get('control_profile_id')
+    if value is None:
+        return None
+    if not isinstance(value,str) or value not in CONTROL_PROFILE_IDS:
+        raise ValueError('unknown controller profile')
+    return value
 
 
 class FileIdentityWatch:
