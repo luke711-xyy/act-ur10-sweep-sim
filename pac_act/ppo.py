@@ -216,8 +216,8 @@ class ChunkPPO(PPO):
                     records.append(self.update_minibatch(batch,indices[start:start+self.config.batch]))
                 completed_epochs=epoch+1;stage=f'epoch_{epoch+1}_whole_rollout_KL'
                 kl=self.exact_kl(batch)
-                if kl>self.config.hard_kl: raise UpdateRejected(f'full rollout exact KL {kl:.8g} exceeds .02')
-                if kl>self.config.early_kl: break
+                # Finite KL is a diagnostic and differentiable loss term, not
+                # an early-stop/rejection gate. Nonfinite values still raise.
             self._n_updates+=1
             self.last_audit=dict(accepted=True,update=self._n_updates,epochs=epoch+1,exact_kl=kl,
                 **{k:float(np.mean([r[k] for r in records if k in r]))

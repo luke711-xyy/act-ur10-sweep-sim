@@ -65,7 +65,7 @@ class LayoutRegistry:
 def source_files(project=PROJECT):
     paths=list((project/'sim').rglob('*.py'))+list((project/'pac_act').rglob('*.py'))
     paths+=list((project/'hybrid_trial4_snapshot').rglob('*'))
-    paths+=[project/'scripts/train_pac_act.py',project/'scripts/evaluate_hybrid_paired_batch.py']
+    paths+=[project/'scripts/train_pac_act.py',project/'scripts/queue_pac_preflight.py',project/'scripts/evaluate_hybrid_paired_batch.py']
     paths+=[project/'residual_rl'/name for name in ('bridge.py','rewards.py','storage.py')]
     paths+=list((project/'pac_act').glob('*.html'))+list(project.glob('requirements-pac-act*.txt'))
     paths+=[project/'pyproject.toml']
@@ -83,7 +83,7 @@ def copy_source_tree(project,code):
     for name in ('sim','configs','pac_act','hybrid_trial4_snapshot'):
         shutil.copytree(project/name,code/name,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
     (code/'scripts').mkdir(); (code/'residual_rl').mkdir()
-    for name in ('train_pac_act.py','monitor_pac_act.py','package_pac_act.py','prepare_pac_act_exclusions.py','evaluate_hybrid_paired_batch.py'):
+    for name in ('train_pac_act.py','queue_pac_preflight.py','monitor_pac_act.py','package_pac_act.py','prepare_pac_act_exclusions.py','evaluate_hybrid_paired_batch.py'):
         shutil.copyfile(project/'scripts'/name,code/'scripts'/name)
     for name in ('__init__.py','bridge.py','rewards.py','storage.py'):
         shutil.copyfile(project/'residual_rl'/name,code/'residual_rl'/name)

@@ -65,13 +65,13 @@ def test_microbatch_matches_logical_batch_and_preserves_learning_rates():
     assert [g['lr'] for g in a.optimizer.param_groups]==[1e-6,1e-5]
 
 
-def test_hard_kl_rolls_back_model_optimizer_noise_and_rng():
+def test_update_exception_rolls_back_model_optimizer_noise_and_rng():
     from pac_act.ppo import ChunkPPO,UpdateRejected
     p=TinyPolicy(); trainer=ChunkPPO(p); b=batch(p); saved=trainer.snapshot()
     def corrupt(batch,indices):
         with torch.no_grad(): p.actor.bias.add_(10.); p.noise.log_std.add_(1.)
         random.random(); np.random.rand(); torch.rand(2)
-        return {}
+        raise UpdateRejected('injected optimizer exception')
     trainer.update_minibatch=corrupt
     with pytest.raises(UpdateRejected): trainer.train(b)
     for key,value in saved['model'].items(): torch.testing.assert_close(p.state_dict()[key],value)

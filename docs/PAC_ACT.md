@@ -59,11 +59,12 @@ seals the preceding real transition but never creates a fake action sample.
 - Actor/noise LR=1e-6, Critic LR=1e-5; logical minibatch32, microbatch4/2/1;
   at most8 epochs, clip=.2, value coefficient=.5, entropy coefficient=.001,
   gradient norm=.5, differentiable adjacent-policy KL penalty=3.
-- Exact whole-rollout KL >.015 ends epochs early; >.02 or nonfinite values
-  restores Actor, Critic, optimizer, noise and all RNG state and stops.
+- Finite whole-rollout KL is logged and penalized, without threshold-based
+  early stopping or rejection. Nonfinite values or execution/update exceptions
+  still restore Actor, Critic, optimizer, noise and all RNG state and stop.
   Resource/deadline checks also run between optimizer microbatches/KL passes.
-- These hard rejection/rollback thresholds are additional project safeguards,
-  not required PAC-ACT defaults. The referenced upstream implementation adds
+- The user explicitly removed the earlier .015 early-stop and .02 hard-KL
+  gates on 2026-10-16. The referenced upstream implementation adds
   an empirical KL penalty and supports optional `target_kl` early stopping;
   its inspected chunk-training entry does not pass `target_kl`. This project
   uses analytic `KL(old || new)`, summed over the executed XY/yaw prefix and
@@ -173,6 +174,33 @@ saved integration states, without rerunning ACT or trajectory-command IK.
 Outputs include `acceptance.json`, per-episode `result.json`,
 `physical_trace.jsonl.gz`, `blocks.jsonl`, MP4 and wrist-force/Z curves.
 Engineering pass is not a claim that strict success has improved.
+
+An explicitly authorized new acceptance can select a fresh six-aligned
+preflight substream with `--preflight-start-index 120`. It cannot change the
+training/validation streams or give an existing opportunity another attempt.
+Known prior layout seeds/fingerprints must be in the new bundle exclusions;
+all earlier run directories and bundles stay unchanged. The new 2 h budget
+begins at actual preflight entry (including model loading), not while queued.
+
+```sh
+python -B /new/bundle/source/scripts/queue_pac_preflight.py \
+  --bundle /new/bundle --after-batch /running/paired120 \
+  --out /new/acceptance --queue-state /new/queue \
+  --preflight-start-index 120 --device cpu
+```
+
+This one-shot queue requires all120 paired formal results,20/goal, one-shot
+markers, matching status/summary and retained verified-video hashes, followed
+by exit of the dependency's execution/encoding processes and a free local
+inference lease. It never stops or changes that batch. Set
+`PAC_ACT_INFERENCE_LOCKS` to the existing native/worktree lease paths when
+running from a portable bundle. Dependency errors, drift, child failure or
+an expired 24 h queue deadline stop the queue without recovery/retry. No path
+in this queue invokes formal training. A passed preflight ends and reports.
+
+Exploration remains independently learned per executed position/component:
+initial XY0.10mm/yaw0.10degree, bounded0.01–0.30mm/degree. These are exploration
+standard deviations, not limits on how far Actor means can learn to change.
 
 If a presentation-layer error stops acceptance before any PPO update or
 stochastic comparison, continuation requires explicit human authorization.

@@ -14,6 +14,12 @@ def force_rejection(trainer,policy):
     trainer.config=replace(DEFAULT,actor_lr=.1,critic_lr=.1,epochs=1)
     trainer._update_learning_rate([trainer.optimizer])
     before=trainer.snapshot()
+    exact=trainer.exact_kl;passes=[]
+    def injected_failure(data):
+        value=exact(data);passes.append(value)
+        if len(passes)>1:raise UpdateRejected('injected post-update exception; finite KL alone is not rejected')
+        return value
+    trainer.exact_kl=injected_failure
     with pytest.raises(UpdateRejected):trainer.train(batch(policy))
     return before
 

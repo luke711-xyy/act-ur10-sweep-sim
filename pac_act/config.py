@@ -22,9 +22,9 @@ class Config:
     max_grad_norm: float = .5
     kl_coef: float = 3.
     prior_coef: float = 2.
-    target_kl: float = .01
-    early_kl: float = .015
-    hard_kl: float = .02
+    target_kl: None = None
+    early_kl: None = None
+    hard_kl: None = None
     max_actions: int = 1_000_000
     milestone: int = 50_000
     hours: float = 72.
@@ -35,6 +35,8 @@ class Config:
     rss_dwell: float = 30.
 
     def __post_init__(self):
+        if any(v is not None for v in (self.target_kl,self.early_kl,self.hard_kl)):
+            raise ValueError('KL stopping is disabled; use the approved KL penalty only')
         if (self.chunk != 25 or self.execute != 5 or self.action_hz != 25
                 or self.microbatch not in (1,2,4) or self.batch != 32
                 or self.environments != 6 or self.blocks_per_env != 64):

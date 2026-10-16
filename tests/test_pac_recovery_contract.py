@@ -9,12 +9,12 @@ import torch
 from test_pac_ppo import TinyPolicy,batch
 
 
-def test_successful_update_and_early_stop_are_accepted_once():
+def test_successful_update_above_old_early_limit_is_accepted_once():
     from pac_act.ppo import ChunkPPO
     p=TinyPolicy(); t=ChunkPPO(p)
     t.exact_kl=lambda b:.016
     result=t.train(batch(p))
-    assert result['accepted'] is True and result['update']==1 and result['epochs']==1
+    assert result['accepted'] is True and result['update']==1 and result['epochs']==8
     assert [g['lr'] for g in t.optimizer.param_groups]==[1e-6,1e-5]
 
 
@@ -23,7 +23,11 @@ def test_rollback_restores_populated_adam_state_and_noise():
     p=TinyPolicy(); t=ChunkPPO(p)
     t.update_minibatch(batch(p),torch.arange(32))
     before=t.snapshot(); b=batch(p)
-    t.exact_kl=lambda b:.021
+    step=t.update_minibatch
+    def failing_step(*args):
+        step(*args)
+        raise UpdateRejected('injected optimizer exception after populated Adam changed')
+    t.update_minibatch=failing_step
     with pytest.raises(UpdateRejected): t.train(b)
     after=t.snapshot()
     def same(a,b):

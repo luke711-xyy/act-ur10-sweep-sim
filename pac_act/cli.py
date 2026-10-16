@@ -14,6 +14,8 @@ def parser():
     p.add_argument('--acknowledge-gpu-training',action='store_true')
     p.add_argument('--continue-authorized-from',type=Path,
         help='one explicit pre-update preflight continuation; path to unchanged original bundle')
+    p.add_argument('--preflight-start-index',type=int,default=0,
+        help='fresh six-aligned preflight substream; never changes train/validation seeds')
     p.add_argument('--seed',type=int)
     p.add_argument('--target',type=int,choices=range(1,7))
     return p
@@ -23,6 +25,7 @@ def main(argv=None):
     p=parser(); args=p.parse_args(argv)
     if args.continue_authorized_from is not None and args.mode!='preflight':
         p.error('--continue-authorized-from is only valid for preflight')
+    if args.preflight_start_index and args.mode!='preflight':p.error('--preflight-start-index is only valid for preflight')
     if args.mode=='inspect':
         from .lifecycle import inspect
         print(json.dumps(inspect(args.bundle),indent=2)); return 0
@@ -36,7 +39,7 @@ def main(argv=None):
         train(args.bundle,args.out,args.acceptance_report,resume=args.mode=='resume')
     elif args.mode=='preflight':
         from .acceptance import preflight
-        preflight(args.bundle,args.out,args.device,continue_from=args.continue_authorized_from)
+        preflight(args.bundle,args.out,args.device,continue_from=args.continue_authorized_from,start_index=args.preflight_start_index)
     else:
         if args.run is None: p.error('evaluate/infer requires --run for checkpoint identity')
         if args.mode=='infer' and (args.seed is None or args.target is None): p.error('infer requires --seed and --target')

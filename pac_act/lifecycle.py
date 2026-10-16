@@ -105,12 +105,15 @@ def cfg_for(bundle,target):
     return formal.candidate_config(load_config(str(Path(bundle)/'evaluation_config.yaml')),target)
 
 
-def next_spec(store,target,role='train',arm='actor'):
+def next_spec(store,target,role='train',arm='actor',*,start_index=0):
     from .identity import RANGES,seed_spec
     start,end=RANGES[role]
+    if type(start_index) is not int or start_index<0 or start_index%6 or start+start_index+5>=end:
+        raise ValueError('preflight offset must be a nonnegative six-aligned registered index')
+    if start_index and role!='preflight':raise ValueError('offset is preflight-only')
     attempts=[json.loads(p.read_text()) for p in (store.root/'attempts').glob(f'{role}_*.json')]
     used=[a['seed'] for a in attempts if a['target_count']==target]
-    seed=max(used,default=start+target-1-6)+6
+    seed=max([start+start_index+target-1-6,*used])+6
     if seed>=end: raise RuntimeError('registered layout stream exhausted')
     return dict(seed=seed,target_count=target,role=role,arm=arm)
 
@@ -121,10 +124,11 @@ class Collection:
     Physics pauses during all policy/critic computation and optimizer updates.
     The shared Actor is never updated until every target has its valid blocks.
     """
-    def __init__(self,bundle,policy,store,registry,guard,counters,on_status=None):
+    def __init__(self,bundle,policy,store,registry,guard,counters,on_status=None,*,preflight_start_index=0):
         self.bundle,self.policy,self.store,self.registry,self.guard=bundle,policy,store,registry,guard
         self.counters=counters; self.worlds={}; self.on_status=on_status
         self.version=0; self.commit_id=None
+        self.preflight_start_index=preflight_start_index
 
     def count_action(self,spec):
         from .safety import StopExperiment
@@ -139,7 +143,7 @@ class Collection:
 
     def _new_world(self,target,role='train',arm='actor'):
         from .hybrid import HybridEpisode
-        spec=next_spec(self.store,target,role,arm)
+        spec=next_spec(self.store,target,role,arm,start_index=self.preflight_start_index if role=='preflight' else 0)
         if role=='preflight' and len(list((self.store.root/'attempts').glob('preflight_*.json')))>=24:
             from .safety import StopExperiment
             raise StopExperiment('24 preflight opportunity cap reached')
