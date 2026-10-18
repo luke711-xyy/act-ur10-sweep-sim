@@ -23,6 +23,7 @@ def test_feature_tap_preserves_act_output():
     assert importlib.util.find_spec('wam_sweep.vision') is not None, 'Task6 vision package missing'
     body = r'''
 import copy, json, pickle
+from dataclasses import replace
 from pathlib import Path
 import numpy as np
 import torch
@@ -72,6 +73,7 @@ try:
     handles = [binding.policy.model.register_forward_hook(lambda *args: counts.__setitem__('act',counts['act']+1)),
                binding.policy.model.backbone.register_forward_hook(lambda *args: counts.__setitem__('backbone',counts['backbone']+1))]
     raw = backend.observe()
+    precontact_raw = raw
     bev = BEVEncoder().to('mps')
     detector = SixQueryDetector().to('mps')
     estimator = VisualStateEstimator(bev, detector, identity, tap.capture_metadata)
@@ -161,6 +163,34 @@ try:
     for _ in range(5):
         assert not backend.step_target(None).done
     fixed_raw = backend.observe()
+    # Authenticate BOTH stale retimestamped RGB and a current capture with one
+    # independently substituted byte, before any image-only neural forward.
+    assert any(not np.array_equal(precontact_raw.images[view],fixed_raw.images[view]) for view in CAMERA_VIEWS)
+    retimestamped = replace(precontact_raw,timestamp=fixed_raw.timestamp)
+    substituted = replace(fixed_raw)
+    substituted.images['wrist'][0,0,0] ^= np.uint8(1)
+    assert substituted.images['wrist'][0,0,0] != fixed_raw.images['wrist'][0,0,0]
+    retained_before = pickle.dumps(tap.snapshot())
+    scheduler_before = pickle.dumps(vars(backend.scheduler))
+    history_before = pickle.dumps(history.snapshot())
+    estimator_before = pickle.dumps(estimator.snapshot())
+    queries_before = pickle.dumps(backend._queries)
+    counts.update(act=0,backbone=0)
+    rejected_pixels = []
+    for name,forged in [('retimestamped prior RGB',retimestamped),('substituted current RGB',substituted)]:
+        try:
+            tap.features_only(forged)
+        except ValueError as error:
+            assert 'pixels' in str(error) and 'capture' in str(error), str(error)
+        else:
+            raise AssertionError(name+' was encoded with current calibration')
+        assert counts == {'act':0,'backbone':0}, counts
+        assert pickle.dumps(tap.snapshot()) == retained_before
+        assert pickle.dumps(vars(backend.scheduler)) == scheduler_before
+        assert pickle.dumps(history.snapshot()) == history_before
+        assert pickle.dumps(estimator.snapshot()) == estimator_before
+        assert pickle.dumps(backend._queries) == queries_before
+        rejected_pixels.append(name)
     # Native retains only current capture. The feature facade must still pair
     # its older retained RGB with the exact OLD wrist transform for replay.
     old_from_tap = tap.capture_metadata(packet2.timestamp)
@@ -195,6 +225,7 @@ try:
         shared_model=True, checkpoint_tensor_count=len(sealed), output_equal_bitwise=True,
         active_forwards=active_counts, same_forward_storage_identity=True, fixed_branch_no_act=True,
         persisted_distinct_images=len(images), registered_provider_restore=True, historical_calibration_retained=True,
+        live_pixel_rejections=rejected_pixels, rejected_before_forward=True, rejection_preserved_causal_state=True,
         shape_per_view={l:list(packet2.spatial[CAMERA_VIEWS[0]][l].shape) for l in ('layer1','layer2','layer4')},
         input_identity=identity.__dict__ if hasattr(identity,'__dict__') else str(identity),
         device=str(next(binding.policy.parameters()).device), dtype=str(next(binding.policy.parameters()).dtype),

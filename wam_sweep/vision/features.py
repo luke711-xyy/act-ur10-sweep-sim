@@ -156,6 +156,15 @@ class FrozenFeatureTap:
         if not replay and self._last is not None and observation.timestamp <= self._last:
             raise ValueError('feature timestamps must increase; duplicate encoding forbidden')
 
+    def _validate_capture_pixels(self, observation):
+        # Authenticate live-entry RGB only. Never pass private native state to
+        # preprocessing/the network, or require current pixels during replay.
+        private = self._backend.native_act_input(observation.timestamp)
+        for key, view in zip(IMAGE_KEYS, CAMERA_VIEWS):
+            rgb = observation.images[view].transpose(2, 0, 1).astype(np.float32) / 255.
+            if not np.array_equal(rgb, private[key]):
+                raise ValueError('feature pixels differ from capture')
+
     def preprocess_images(self, observation):
         """Exact saved processor visual slice, filtering transition defaults."""
         self._check_live()
@@ -193,11 +202,7 @@ class FrozenFeatureTap:
         if self._mode != 'act' or receipt.issued_at != observation.timestamp:
             raise ValueError('features must accompany this exact native query timestamp')
         # This also rejects a foreign/stale raw packet for an external query.
-        private = self._backend.native_act_input(observation.timestamp)
-        for key, view in zip(IMAGE_KEYS, CAMERA_VIEWS):
-            rgb = observation.images[view].transpose(2, 0, 1).astype(np.float32) / 255.
-            if not np.array_equal(rgb, private[key]):
-                raise ValueError('query feature pixels differ from capture')
+        self._validate_capture_pixels(observation)
         return self._packet(observation, reference=self._backend.reference_preview(), receipt=receipt)
 
     def features_only(self, observation) -> ActFeaturePacket:
@@ -205,6 +210,7 @@ class FrozenFeatureTap:
         # Exact capture metadata is a separate producer; fail before inference.
         metadata = self._backend.capture_metadata(observation.timestamp)
         validate_capture_metadata(metadata,observation.timestamp,self.identity.manifest_hash)
+        self._validate_capture_pixels(observation)
         return self._images_only(observation,metadata=metadata)
 
     def capture_metadata(self, timestamp):
