@@ -168,6 +168,7 @@ class PoisonBackend:
         self.cfg, self.participants = config(), {}
         self.now, self.origin = 10.4, 10.4
         self.closed, self.done = False, False
+        self.termination_reason = ''
         self.planning_calls, self.actions = 0, []
         self.chosen = None
 
@@ -301,8 +302,9 @@ def test_duplicate_capture_and_provider_substitution_cannot_continue():
     _, preparation = api()
     backend, tap = PoisonBackend(), FixtureTap()
     backend.advance_visual_clock = backend.observe
-    result = preparation.prepare_visually(backend, MeasurementFixture(), tap=tap, history=HistoryBuffer())
-    assert result.status == 'perception_invalid' and backend.closed
+    with pytest.raises(ValueError, match='distinct consecutive 5 Hz captures'):
+        preparation.prepare_visually(backend, MeasurementFixture(), tap=tap, history=HistoryBuffer())
+    assert backend.closed
     assert backend.planning_calls == 0 and tap.timestamps == [10.4]
     backend = PoisonBackend()
     backend.bind_provider('features', FixtureTap())
@@ -311,11 +313,136 @@ def test_duplicate_capture_and_provider_substitution_cannot_continue():
     assert backend.planning_calls == 0
 
 
-@pytest.mark.parametrize('invalidate', [False, True], ids=['ready-and-replay', 'terminal-visual-failure'])
+@pytest.mark.parametrize('terminal_capture,hold_delta', [(1,.2),(2,.07),(2,.2),(3,.2)],
+                         ids=['initial','between-captures','exact-boundary','third-capture'])
+@pytest.mark.parametrize('reason', ['temporary hybrid safety: force ceiling or nonfinite force',
+                                   'target count was not collected',
+                                   '45-second shared episode timeout',
+                                   '1200-frame shared episode timeout'])
+def test_startup_native_termination_stops_before_more_visual_work(terminal_capture, hold_delta, reason):
+    _, preparation = api()
+    backend, tap, estimator, history = PoisonBackend(), FixtureTap(), MeasurementFixture(), HistoryBuffer()
+    observe = backend.observe
+    captures, holds = [], []
+    def terminating_capture():
+        captures.append(backend.now)
+        if len(captures) == terminal_capture:
+            backend.done, backend.termination_reason = True, reason
+        raw = observe()
+        return replace(raw, robot=replace(raw.robot, phase='terminated')) if backend.done else raw
+    def terminal_hold():
+        assert not backend.done, 'hold after native termination'
+        holds.append(backend.now)
+        backend.actions.append([.42, 0., .1, 0.])  # native hold evidence, not prepare-result actions
+        backend.now += hold_delta
+        return terminating_capture()
+    backend.observe, backend.advance_visual_clock = terminating_capture, terminal_hold
+    result = preparation.prepare_visually(backend, estimator, tap=tap, history=history)
+    assert result.status == 'native_failure' and result.termination_reason == reason
+    assert not result.ready and not result.paused and not result.visual_reason
+    assert backend.done and backend.termination_reason == reason
+    assert len(captures) == terminal_capture and len(holds) == terminal_capture-1
+    assert len(backend.actions) == len(holds)  # original native evidence remains available
+    assert result.actions.shape == (0,4)  # no native.prepare call/result ever occurred
+    assert len(tap.timestamps) == len(estimator.timestamps) == terminal_capture-1
+    assert len(history.snapshot()['observations']) == terminal_capture-1
+    assert backend.planning_calls == 0
+
+
+@pytest.mark.parametrize('stage', ['startup','monitor'])
+@pytest.mark.parametrize('fault', ['identity','pixels','calibration','camera_order','history','tap_type'])
+def test_producer_contract_errors_close_and_propagate(stage, fault):
+    _, preparation = api()
+    backend, tap, estimator, history = PoisonBackend(), FixtureTap(), MeasurementFixture(), HistoryBuffer()
+    trigger = 1 if stage == 'startup' else 4
+    feature_call, estimate_call, append_call = tap.features_only, estimator.estimate, history.append
+    calls = dict(tap=0, estimator=0, history=0)
+    if fault == 'identity':
+        import torch
+        from wam_sweep.contracts import InputIdentity
+        from wam_sweep.vision import BEVEncoder, SixQueryDetector, VisualStateEstimator
+        from wam_sweep.vision.features import ActFeaturePacket, LAYERS
+        identity = InputIdentity('fixture','manifest','model',
+                                 {k:'hash' for k in ('perception','control','preprocessing','config')})
+        # Real producer method and fully typed packet; fails identity before any
+        # neural forward. This is NOT a substitute trained perception fixture.
+        real_estimator = VisualStateEstimator(BEVEncoder(), SixQueryDetector(), identity, lambda t: None)
+        layers = {name:torch.zeros((1,ch,side,side)) for name,(ch,side) in LAYERS.items()}
+        bad_packet = ActFeaturePacket(0.,{view:layers for view in CAMERA_VIEWS},'wrong-manifest','model','hash')
+    def features(raw):
+        calls['tap'] += 1
+        if calls['tap'] == trigger:
+            if fault == 'pixels':
+                from wam_sweep.vision import FrozenFeatureTap
+                # Exercise the real live pixel validator against a mismatched
+                # private RGB channel, without binding or running another model.
+                private = {'observation.images.'+v:np.ones((3,2,2),np.float32) for v in CAMERA_VIEWS}
+                owner = SimpleNamespace(_backend=SimpleNamespace(native_act_input=lambda t:private))
+                FrozenFeatureTap._validate_capture_pixels(owner, raw)
+            if fault == 'tap_type':
+                raise TypeError('controlled tap provider contract fault')
+        return feature_call(raw)
+    def estimate(packet):
+        calls['estimator'] += 1
+        if calls['estimator'] == trigger:
+            if fault == 'identity':
+                return real_estimator.estimate(replace(bad_packet,timestamp=packet.timestamp))
+            if fault in ('calibration','camera_order'):
+                from wam_sweep.native import CaptureMetadata
+                from wam_sweep.vision.features import validate_capture_metadata
+                timestamp = packet.timestamp+.1 if fault == 'calibration' else packet.timestamp
+                validate_capture_metadata(CaptureMetadata(timestamp,{},'fixture'),packet.timestamp,'fixture')
+        return estimate_call(packet)
+    def append(safe):
+        calls['history'] += 1
+        if fault == 'history' and calls['history'] == trigger:
+            append_call(safe)
+        append_call(safe)  # real HistoryBuffer rejects the controlled duplicate slot
+    tap.features_only, estimator.estimate, history.append = features, estimate, append
+    messages = dict(identity='estimator feature/input dependency identity mismatch',
+                    pixels='feature pixels differ from capture',
+                    calibration='calibration schema/timestamp does not match historical pixels',
+                    camera_order='calibration camera order/types differ from feature order',
+                    history='observation clock ticks must strictly increase',
+                    tap_type='controlled tap provider contract fault')
+    error_type = TypeError if fault == 'tap_type' else ValueError
+    with pytest.raises(error_type, match=messages[fault]):
+        preparation.prepare_visually(backend, estimator, tap=tap, history=history)
+    assert backend.closed
+    assert backend.planning_calls == (0 if stage == 'startup' else 1)
+    assert len(backend.actions) == (0 if stage == 'startup' else 1)
+    assert not backend.participants['visual_preparation'].visual_reason
+    assert calls['tap'] == trigger and calls['estimator'] <= trigger and calls['history'] <= trigger
+
+
+@pytest.mark.parametrize('stage', ['startup','monitor'])
+@pytest.mark.parametrize('field,value', [('half_extents_xy',np.array([np.nan,.01])),
+                                       ('position_covariance',np.array([[1.,2.],[2.,1.]]))])
+def test_returned_invalid_visual_payload_remains_terminal(stage, field, value):
+    _, preparation = api()
+    backend, estimator = PoisonBackend(), MeasurementFixture()
+    estimate = estimator.estimate
+    trigger, calls = (1 if stage == 'startup' else 4), []
+    def invalid_visual(packet):
+        calls.append(packet.timestamp)
+        items = estimate(packet)
+        if len(calls) == trigger:
+            getattr(items[0],field)[:] = value  # returned visual values fail leaf revalidation
+        return items
+    estimator.estimate = invalid_visual
+    result = preparation.prepare_visually(backend, estimator, tap=FixtureTap(), history=HistoryBuffer())
+    assert result.status == 'perception_invalid' and result.visual_reason and backend.closed
+    assert backend.planning_calls == (0 if stage == 'startup' else 1)
+    assert len(calls) == trigger
+
+
+@pytest.mark.parametrize('invalidate', [False, True, 'producer-identity'],
+                         ids=['ready-and-replay', 'terminal-visual-failure', 'producer-identity'])
 def test_real_frozen_planner_and_native_preparation_use_conflicting_estimates(invalidate):
     api()  # RED is feature absence, not an incidental subprocess import error.
     body = 'invalidate = ' + repr(invalidate) + '\n' + r'''
 import copy, json
+from dataclasses import replace
 from pathlib import Path
 import numpy as np
 import torch
@@ -408,6 +535,34 @@ try:
         assert not safe.robot.visual_entry_valid  # native timer cannot fill this
         assert backend.selected_preparation_plan().landing_region == consumed[0].landing_region
         if len(monitor_times)==1: return False  # deliberate resumable native PAUSE
+    if invalidate == 'producer-identity':
+        features = tap.features_only
+        feature_times = []
+        def wrong_dependency(raw):
+            packet = features(raw)
+            feature_times.append(raw.timestamp)
+            return replace(packet,input_hash='wrong-manifest') if len(feature_times)==4 else packet
+        tap.features_only = wrong_dependency
+        try:
+            prepare_visually(backend,estimator,tap=tap,history=history,on_observation=completed)
+        except ValueError as error:
+            assert str(error)=='estimator feature/input dependency identity mismatch'
+        else:
+            raise AssertionError('real monitored producer fault did not propagate')
+        assert backend.closed and len(calls)==len(consumed)==1
+        assert len(measurement_times)==3 and len(feature_times)==4 and not monitor_times
+        action_count=len(backend._commands)
+        assert action_count==60 and counts=={'act':0,'backbone':20}  #40 startup +20 native prefix
+        try: backend.resume_preparation()
+        except RuntimeError as error: assert 'closed' in str(error)
+        else: raise AssertionError('producer-fault attempt continued')
+        assert len(backend._commands)==action_count
+        evidence=dict(error='estimator feature/input dependency identity mismatch',closed=True,
+                      planning_calls=len(calls),commands=action_count,feature_captures=len(feature_times),
+                      estimated_captures=len(measurement_times),counts=counts,no_later_actions=True)
+        atomic_checkpoint(root/'.venv/task-7-fix1-producer-evidence.json',json.dumps(evidence,indent=2).encode(),budget)
+        print(json.dumps(evidence))
+        raise SystemExit(0)
     result = prepare_visually(backend,estimator,tap=tap,history=history,on_observation=completed)
     if invalidate:
         assert result.status=='perception_invalid' and not result.ready and result.paused

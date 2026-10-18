@@ -6,13 +6,32 @@ No policy query, second planning call, oracle recovery or truth repair occurs.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
-from .contracts import OnlineObservation
+from .contracts import ObjectBelief, OnlineObservation
 from .native import PreparationResult as NativePreparationResult
 from .planning import PerceivedPlanningScene, PlanningGeometry, monitor_plan
+
+
+class _InvalidVisualMeasurement(ValueError):
+    """Only returned visual values failed a local, known validation leaf."""
+
+
+class _PreparationContractError(BaseException):
+    """Carry a producer fault past frozen prefix diagnostic Exception catches."""
+    def __init__(self, error):
+        self.error = error
+
+
+def _visual_beliefs(beliefs):
+    if not isinstance(beliefs, (tuple, list)) or any(type(b) is not ObjectBelief for b in beliefs):
+        raise TypeError('estimator must return visual ObjectBeliefs')
+    try:
+        return tuple(replace(b) for b in beliefs)
+    except (ValueError, TypeError) as error:
+        raise _InvalidVisualMeasurement(str(error)) from error
 
 
 @dataclass(frozen=True)
@@ -22,6 +41,9 @@ class PreparationResult:
     ``paused`` reports the native prefix flag, including on visual failure.
     Only status='paused' is resumable; perception_invalid closes the backend.
     termination_reason is the original native reason, even when empty.
+    Startup native termination maps to native_failure without processing its
+    final capture. actions then has no preparation commands; native startup
+    hold/state evidence remains owned by the terminated backend.
     """
     ready: bool
     paused: bool
@@ -69,11 +91,19 @@ class VisualPreparationMonitor:
         if self.timestamp is not None and abs(raw.timestamp-self.timestamp-.2) > 1e-7:
             raise ValueError('preparation needs distinct consecutive 5 Hz captures')
         packet = self.tap.features_only(raw)
-        beliefs = self.estimator.estimate(packet)
+        beliefs = _visual_beliefs(self.estimator.estimate(packet))
         safe = OnlineObservation(raw.timestamp, beliefs, raw.robot, raw.images)
         self.history.append(safe)
         self.timestamp = safe.timestamp
         return safe
+
+    def perceived_scene(self, safe):
+        # Only this estimated-geometry leaf is an expected visual rejection.
+        # Tap/estimator/calibration/OnlineObservation/history faults propagate.
+        try:
+            return PerceivedPlanningScene(safe.objects, geometry=self.geometry, robot_yaw=safe.robot.yaw)
+        except ValueError as error:
+            raise _InvalidVisualMeasurement(str(error)) from error
 
     def initial(self, raw):
         safe = self.capture(raw)
@@ -88,25 +118,27 @@ class VisualPreparationMonitor:
             self.visual_reason = 'startup requires three visible six-track captures with <=12mm uncertainty'
             return
         if self.startup_captures == 3:
-            self.scene = PerceivedPlanningScene(safe.objects, geometry=self.geometry, robot_yaw=safe.robot.yaw)
+            self.scene = self.perceived_scene(safe)
             self.track_ids = self.scene.track_ids
 
     def observe(self, raw, metadata=None, *, on_observation=None):
         try:
             safe = self.capture(raw)
-            scene = PerceivedPlanningScene(safe.objects, geometry=self.geometry, robot_yaw=safe.robot.yaw)
-        except (ValueError, TypeError) as error:
+            scene = self.perceived_scene(safe)
+            if scene.track_ids != self.track_ids:
+                self.visual_reason = 'visual track association changed after initial planning'
+                return False
+            validity = monitor_plan(scene, self.backend.selected_preparation_plan())
+            if not validity.valid:
+                self.visual_reason = validity.reason
+                return False
+            self.scene = scene
+            return on_observation(safe) if on_observation is not None else True
+        except _InvalidVisualMeasurement as error:
             self.visual_reason = str(error)
             return False
-        if scene.track_ids != self.track_ids:
-            self.visual_reason = 'visual track association changed after initial planning'
-            return False
-        validity = monitor_plan(scene, self.backend.selected_preparation_plan())
-        if not validity.valid:
-            self.visual_reason = validity.reason
-            return False
-        self.scene = scene
-        return on_observation(safe) if on_observation is not None else True
+        except Exception as error:
+            raise _PreparationContractError(error) from error
 
 
 def _bind(backend, name, provider):
@@ -143,18 +175,24 @@ def prepare_visually(backend, estimator, *, tap, history, on_observation=None, r
         if not resume:
             for index in range(3):
                 raw = backend.observe() if index == 0 else backend.advance_visual_clock()
+                if backend.done:
+                    native = NativePreparationResult(False, False, np.empty((0,4)), backend.termination_reason)
+                    break
                 try:
                     monitor.initial(raw)
-                except (ValueError, TypeError) as error:
+                except _InvalidVisualMeasurement as error:
                     monitor.visual_reason = str(error)
                 if monitor.visual_reason:
                     break
-            if not monitor.visual_reason:
+            if native is None and not monitor.visual_reason:
                 native = backend.prepare(monitor.scene, on_observation=lambda raw, meta: monitor.observe(
                     raw, meta, on_observation=on_observation))
         else:
             native = backend.resume_preparation(on_observation=lambda raw, meta: monitor.observe(
                 raw, meta, on_observation=on_observation))
+    except _PreparationContractError as fault:
+        backend.close()
+        raise fault.error.with_traceback(fault.error.__traceback__) from None
     except BaseException:
         backend.close()
         raise
