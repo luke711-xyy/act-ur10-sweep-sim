@@ -613,6 +613,10 @@ class FrozenSweepBackend:
         plans = expert_plan_candidates(scene, self.cfg, max_candidates=1)
         return self._prepare_plan(plans, on_observation)
 
+    def selected_preparation_plan(self):
+        """Read-only clone of the already chosen plan; never plans or reads GT."""
+        return copy.deepcopy(self._plan)
+
     def prepare_bootstrap_oracle(self, *, on_observation=None) -> PreparationResult:
         """Explicit privileged bootstrap/test path; never a visual fallback."""
         self._live()
