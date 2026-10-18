@@ -155,6 +155,8 @@ class BudgetLedger:
     Resuming an unpaused crash conservatively charges elapsed time since its
     last durable tick. Paused idle time is excluded. A backwards clock fails
     closed. Reserve remaining mandatory work using expected_bytes/seconds.
+    Link activity to its reservation token to consume that reservation's time;
+    unlinked activities never consume another activity's future reservation.
     """
     def __init__(self, path, *, owned_roots, config: BudgetConfig,
                  disk_probe=shutil.disk_usage, clock=time.time):
@@ -186,6 +188,12 @@ class BudgetLedger:
                 delta = now - state["active"]["tick"]
                 if delta < 0:
                     raise ValueError("clock moved backwards")
+                token = state["active"].get("reservation")  # Older schema-1 activities were unlinked.
+                if token is not None:
+                    reserved = state["reservations"].get(token)
+                    if reserved is None or reserved["pilot"] != state["active"]["pilot"]:
+                        raise ValueError("active reservation missing or pilot accounting changed")
+                    reserved["seconds"] = max(0., reserved["seconds"] - delta)
                 state["effective_seconds"] += delta
                 if state["active"]["pilot"]:
                     state["pilot_seconds"] += delta
@@ -248,6 +256,8 @@ class BudgetLedger:
             yield token
         finally:
             with self._state() as state:
+                if state["active"] is not None and state["active"].get("reservation") == token:
+                    raise ValueError("pause active work before releasing its reservation")
                 state["reservations"].pop(token)
 
     def record(self, event, *, seconds=0, kind=None, pilot=False, reservation=None):
@@ -256,8 +266,12 @@ class BudgetLedger:
             if event == "start":
                 if state["active"] is not None or not kind:
                     raise ValueError("activity already active or kind missing")
+                if reservation is not None:
+                    reserved = state["reservations"].get(reservation)
+                    if reserved is None or reserved["pilot"] != pilot:
+                        raise ValueError("known reservation with matching pilot accounting required")
                 self._decision(state, pilot=pilot).require()
-                state["active"] = dict(tick=self.clock(), kind=kind, pilot=pilot)
+                state["active"] = dict(tick=self.clock(), kind=kind, pilot=pilot, reservation=reservation)
             elif event == "pause":
                 state["active"] = None
             elif event == "prior":
@@ -270,15 +284,25 @@ class BudgetLedger:
                 # infer crash/liveness from lock text; retained files stay owned.
                 if not kind or reservation not in state["reservations"]:
                     raise ValueError("known orphan reservation and reconciliation reason required")
+                if state["active"] is not None and state["active"].get("reservation") == reservation:
+                    raise ValueError("cannot release the active reservation")
                 state["reservations"].pop(reservation)
             else:
                 raise ValueError("unknown ledger event")
             state["events"].append(dict(event=event, seconds=seconds, kind=kind, pilot=pilot, reservation=reservation))
 
     @contextmanager
-    def activity(self, kind, *, seconds=0, pilot=False):
-        self.admit(seconds=seconds, pilot=pilot).require()
-        self.record("start", kind=kind, pilot=pilot)
+    def activity(self, kind, *, seconds=0, pilot=False, reservation=None):
+        """Consume a linked reservation, or admit an unlinked time forecast.
+
+        With a token the forecast is already reserved; seconds must stay zero.
+        Pilot work must match the reservation's pilot flag on every resume.
+        """
+        if reservation is None:
+            self.admit(seconds=seconds, pilot=pilot).require()
+        elif seconds != 0:
+            raise ValueError("linked activity duration is already reserved; omit seconds")
+        self.record("start", kind=kind, pilot=pilot, reservation=reservation)
         try:
             yield
         finally:

@@ -216,8 +216,8 @@ class SplitManifest:
         records = list(self.records)
         excluded = set(json.loads(self.exclusions_json)["fingerprints"])
         known = {r.physical_fingerprint for r in records if r.physical_fingerprint is not None}
-        with budget.reserve(0, seconds=len(selected) * seconds_per_layout):
-            with budget.activity("native_reset_fingerprint"):
+        with budget.reserve(0, seconds=len(selected) * seconds_per_layout) as reservation:
+            with budget.activity("native_reset_fingerprint", reservation=reservation):
                 for i, record in enumerate(records):
                     if record.parent_id not in selected:
                         continue

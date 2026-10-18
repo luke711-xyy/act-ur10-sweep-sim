@@ -157,3 +157,27 @@ def test_binding_admission_precedes_resolver_and_bad_poses_rejected(api, exclusi
     for invalid in ("seed-hash", [[0] * 7] * 5, [[float("nan")] * 7] * 6):
         with pytest.raises(ValueError):
             manifest.bind(lambda _: invalid, budget(api, tmp_path), **kwargs)
+
+
+def test_binding_consumes_its_time_reservation_and_preserves_future_work(api, exclusions, tmp_path):
+    now = [1000.]
+    b = api[0].BudgetLedger(tmp_path / "binding-ledger.json", owned_roots=[tmp_path],
+                           config=WAMConfig().budget, clock=lambda: now[0],
+                           disk_probe=lambda _: SimpleNamespace(free=100 * 2**30))
+    b.record("prior", seconds=259195, kind="prior compute")
+    manifest = api[1].make_split_manifest(WAMConfig(), exclusions)
+    def settled_pose_fixture(record):
+        now[0] += 0.25
+        return pose(record)
+    with b.reserve(0, seconds=3) as future:
+        bound = manifest.bind(settled_pose_fixture, b, input_identity=identity(),
+                              resolver_hash="d" * 64, seconds_per_layout=1,
+                              parent_ids=[r.parent_id for r in manifest.records[:2]])
+        assert sum(r.physical_fingerprint is not None for r in bound.records) == 2
+        assert bound.ready is False
+        state = json.loads(b.path.read_bytes())
+        assert state["active"] is None
+        assert state["effective_seconds"] == 259195.5
+        assert state["reservations"] == {future: {"bytes": 0, "seconds": 3, "pilot": False}}
+        assert b.admit(seconds=1.5).allowed is True
+        assert b.admit(seconds=1.6).allowed is False

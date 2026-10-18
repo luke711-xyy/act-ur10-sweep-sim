@@ -23,6 +23,19 @@ from .contracts import InputIdentity
 
 SEALED_R8_MANIFEST_HASH = "59d9f08b19a0784b5668dad2676c25c9cd29c1654617fea0870b2e61a15de59a"
 
+# Actual namespaces/aliases in the sealed load_trial4 -> runtime -> nested
+# load-helper chain, including temporary `phases` and the imported `runner`.
+# A cached alias must pass origin checks BEFORE any native loader executes.
+NATIVE_NAMESPACES = frozenset({
+    "sim", "pac_act", "residual_rl", "hybrid_trial4_snapshot",
+    "_pac_frozen_hybrid_formal", "hybrid_formal_trial4_phases",
+    "hybrid_formal_trial4_runtime", "frozen_small_motion_controller",
+    "frozen_z_follow_controller", "reviewed_geometry_adapter",
+    "sealed_wrist_phase_machine", "preserved_rate_phase_dependency",
+    "approved_ik_helper", "reviewed_hybrid_helper", "reviewed_metrics_helper",
+    "sealed_simultaneous_helper", "scoped_one_second_handoff", "phases", "runner",
+})
+
 
 def digest_json(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
@@ -165,16 +178,24 @@ def snapshot_inputs(source, destination, budget, *,
     return copied
 
 
-def assert_native_origin(identity: InputIdentity, modules=None):
+def assert_native_origin(identity: InputIdentity, modules=None, *, native_aliases=()):
     """Call BEFORE loading native runtime; contamination requires a new process.
 
     Do not repair sys.path/sys.modules or mix checkouts. Every already-loaded
     native module must be a manifest-verified file in this snapshot's source.
-    The later backend still owns checking modules it subsequently loads.
+    The later backend still owns checking modules it subsequently loads and
+    must supply any additional source-checked alias namespaces in native_aliases.
+    Additional aliases extend, and cannot replace, the sealed/default guards.
     """
     root = safe_path(identity.root)
+    if isinstance(native_aliases, str):
+        raise TypeError("native_aliases must be a collection of module names")
+    aliases = frozenset(native_aliases)
+    if any(not isinstance(n, str) or not all(p.isidentifier() for p in n.split(".")) for n in aliases):
+        raise ValueError("invalid native alias namespace")
+    namespaces = NATIVE_NAMESPACES | aliases
     for name, module in (sys.modules if modules is None else modules).copy().items():
-        if name.split(".")[0] not in {"sim", "pac_act", "residual_rl", "hybrid_trial4_snapshot"}:
+        if not any(name == prefix or name.startswith(prefix + ".") for prefix in namespaces):
             continue
         filename = getattr(module, "__file__", None)
         try:

@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
+from types import ModuleType
 
 import pytest
 
@@ -328,3 +329,179 @@ def test_snapshot_refuses_before_copy_and_rejects_imported_other_checkout(api, t
 def test_modules_do_not_import_native_or_truth_at_import_time(api):
     child = subprocess.run([sys.executable, "-c", "import sys; import wam_sweep.inputs, wam_sweep.artifacts, wam_sweep.splits; assert not any(n.split('.')[0] in {'sim','pac_act','mujoco'} for n in sys.modules)"], capture_output=True, timeout=10)
     assert child.returncode == 0, child.stderr.decode()
+
+
+# Names read from sealed pac_act/hybrid.py, evaluate_hybrid_paired_batch.runtime
+# and the actual nested load helpers; no legacy modules are imported here.
+@pytest.mark.parametrize("alias", [
+    "_pac_frozen_hybrid_formal", "hybrid_formal_trial4_phases",
+    "hybrid_formal_trial4_runtime", "frozen_small_motion_controller",
+    "frozen_z_follow_controller", "reviewed_geometry_adapter",
+    "sealed_wrist_phase_machine", "preserved_rate_phase_dependency",
+    "approved_ik_helper", "reviewed_hybrid_helper", "reviewed_metrics_helper",
+    "sealed_simultaneous_helper", "scoped_one_second_handoff", "phases", "runner",
+])
+def test_native_guard_rejects_foreign_loader_alias_before_loading(api, bundle, monkeypatch, alias):
+    root, contents = bundle
+    inputs = api[1]
+    verified = inputs.verify_inputs(root, **expected_identity(contents))
+    foreign = ModuleType(alias)
+    foreign.__file__ = "/other/checkout/frozen-runtime.py"
+    monkeypatch.setitem(sys.modules, alias, foreign)
+    with pytest.raises(RuntimeError, match="new process"):
+        inputs.assert_native_origin(verified)
+    # Origin/content checks apply equally when the alias is a namespace root.
+    with pytest.raises(RuntimeError, match="new process"):
+        inputs.assert_native_origin(verified, {alias + ".nested": foreign})
+    local = ModuleType(alias)
+    local.__file__ = str(root / "source/sim/__init__.py")
+    inputs.assert_native_origin(verified, {alias: local})
+    (root / "source/sim/__init__.py").write_bytes(b"tampered native module")
+    with pytest.raises(RuntimeError, match="new process"):
+        inputs.assert_native_origin(verified, {alias: local})
+
+
+def test_native_guard_extensible_alias_still_requires_verified_file(api, bundle):
+    root, contents = bundle
+    inputs = api[1]
+    verified = inputs.verify_inputs(root, **expected_identity(contents))
+    with pytest.raises(RuntimeError, match="new process"):
+        inputs.assert_native_origin(verified, {"wam_backend_fixture": SimpleNamespace(__file__="/other/backend.py")},
+                                    native_aliases=("wam_backend_fixture",))
+    with pytest.raises(RuntimeError, match="new process"):
+        inputs.assert_native_origin(verified, {"sealed_wrist_phase_machine": ModuleType("missing_origin")})
+
+
+@pytest.mark.parametrize("pilot", [False, True])
+def test_consumed_reservation_keeps_admitted_work_running_until_hard_boundary(api, tmp_path, pilot):
+    now = [1000.]
+    b = ledger(api, tmp_path, clock=lambda: now[0])
+    cap = 7200 if pilot else 259200
+    b.record("prior", seconds=cap - 100, kind="prior compute", pilot=pilot)
+    with b.reserve(1234, seconds=100, pilot=pilot) as token:
+        b.record("start", kind="reserved work", pilot=pilot, reservation=token)
+        for consumed, remaining in [(1, 99), (20, 80), (99, 1)]:
+            now[0] = 1000. + consumed
+            assert b.poll().allowed is True
+            state = json.loads(b.path.read_bytes())
+            assert state["effective_seconds"] == cap - 100 + consumed
+            assert state["reservations"][token]["seconds"] == remaining
+            assert state["reservations"][token]["bytes"] == 1234
+            assert state["pilot_seconds"] == (cap - 100 + consumed if pilot else 0)
+        now[0] = 1100.
+        assert b.admit(seconds=0.01, pilot=pilot).allowed is False
+        now[0] = 1101.
+        assert b.poll().allowed is False
+        state = json.loads(b.path.read_bytes())
+        assert state["effective_seconds"] == cap + 1
+        assert state["reservations"][token]["seconds"] == 0
+        assert state["pilot_seconds"] == (cap + 1 if pilot else 0)
+        b.record("pause")
+
+
+@pytest.mark.parametrize("pilot", [False, True])
+def test_consumption_preserves_unrelated_future_reservation_and_paused_idle(api, tmp_path, pilot):
+    now = [1000.]
+    b = ledger(api, tmp_path, clock=lambda: now[0])
+    cap = 7200 if pilot else 259200
+    b.record("prior", seconds=cap - 100, kind="prior compute", pilot=pilot)
+    with b.reserve(23, seconds=60, pilot=pilot) as future:
+        with b.reserve(17, seconds=40, pilot=pilot) as current:
+            b.record("start", kind="current", pilot=pilot, reservation=current)
+            now[0] += 10
+            assert b.poll().allowed is True
+            b.record("pause")
+            now[0] += 10000
+            assert b.poll().effective_seconds == cap - 90
+            state = json.loads(b.path.read_bytes())
+            assert state["reservations"][future]["seconds"] == 60
+            assert state["reservations"][current]["seconds"] == 30
+            b.record("start", kind="continued", pilot=pilot, reservation=current)
+            now[0] += 5
+            assert b.poll().allowed is True
+            b.record("pause")
+            assert json.loads(b.path.read_bytes())["reservations"][current]["seconds"] == 25
+        assert b.admit(seconds=25, pilot=pilot).allowed is True
+        assert b.admit(seconds=26, pilot=pilot).allowed is False
+        state = json.loads(b.path.read_bytes())
+        assert state["reservations"] == {future: {"bytes": 23, "seconds": 60, "pilot": pilot}}
+
+
+@pytest.mark.parametrize("pilot", [False, True])
+def test_linked_reservation_resume_consumes_once_across_ledger_reload(api, tmp_path, pilot):
+    now = [1000.]
+    b = ledger(api, tmp_path, clock=lambda: now[0])
+    with b.reserve(0, seconds=40, pilot=pilot) as future:
+        with b.reserve(0, seconds=30, pilot=pilot) as current:
+            b.record("start", kind="interrupted", pilot=pilot, reservation=current)
+            now[0] += 7
+            recovered = ledger(api, tmp_path, clock=lambda: now[0])
+            assert recovered.poll().effective_seconds == 7
+            state = json.loads(b.path.read_bytes())
+            assert state["reservations"][current]["seconds"] == 23
+            assert state["reservations"][future]["seconds"] == 40
+            now[0] += 5
+            assert recovered.poll().effective_seconds == 12
+            assert recovered.poll().effective_seconds == 12
+            state = json.loads(b.path.read_bytes())
+            assert state["reservations"][current]["seconds"] == 18
+            assert state["pilot_seconds"] == (12 if pilot else 0)
+            recovered.record("pause")
+
+
+@pytest.mark.parametrize("pilot", [False, True])
+def test_reservation_overrun_is_fully_charged_without_consuming_other_work(api, tmp_path, pilot):
+    now = [1000.]
+    b = ledger(api, tmp_path, clock=lambda: now[0])
+    cap = 7200 if pilot else 259200
+    b.record("prior", seconds=cap - 40, kind="prior compute", pilot=pilot)
+    with b.reserve(0, seconds=20, pilot=pilot) as future:
+        with b.reserve(0, seconds=5, pilot=pilot) as current:
+            b.record("start", kind="overrun", pilot=pilot, reservation=current)
+            now[0] += 10
+            b.record("pause")
+            state = json.loads(b.path.read_bytes())
+            assert state["reservations"][current]["seconds"] == 0
+            assert state["reservations"][future]["seconds"] == 20
+            assert state["effective_seconds"] == cap - 30
+            assert b.admit(seconds=10, pilot=pilot).allowed is True
+            assert b.admit(seconds=11, pilot=pilot).allowed is False
+
+
+def test_reservation_link_validation_and_active_release_refusal(api, tmp_path):
+    b = ledger(api, tmp_path)
+    with pytest.raises(ValueError):
+        b.record("start", kind="unknown reservation", reservation="not-a-token")
+    with b.reserve(0, seconds=20, pilot=True) as token:
+        with pytest.raises(ValueError):
+            b.record("start", kind="wrong pilot accounting", reservation=token)
+        b.record("start", kind="pilot", pilot=True, reservation=token)
+        with pytest.raises(ValueError):
+            b.record("release", reservation=token, kind="cannot orphan active work")
+        b.record("pause")
+
+
+def test_linked_activity_consumes_duration_without_duplicating_forecast(api, tmp_path):
+    now = [1000.]
+    b = ledger(api, tmp_path, clock=lambda: now[0])
+    b.record("prior", seconds=259190, kind="prior compute")
+    with b.reserve(0, seconds=10) as token:
+        with b.activity("linked", reservation=token):
+            now[0] += 3
+            assert b.poll().allowed is True
+        assert json.loads(b.path.read_bytes())["reservations"][token]["seconds"] == 7
+
+
+def test_unlinked_legacy_active_state_keeps_unrelated_reservations(api, tmp_path):
+    now = [1000.]
+    b = ledger(api, tmp_path, clock=lambda: now[0])
+    with b.reserve(0, seconds=20) as future:
+        b.record("start", kind="legacy unlinked")
+        state = json.loads(b.path.read_bytes())
+        state["active"].pop("reservation", None)  # Prior schema-1 active record.
+        b.path.write_text(json.dumps(state))
+        now[0] += 3
+        resumed = ledger(api, tmp_path, clock=lambda: now[0])
+        assert resumed.poll().effective_seconds == 3
+        assert json.loads(b.path.read_bytes())["reservations"][future]["seconds"] == 20
+        resumed.record("pause")
