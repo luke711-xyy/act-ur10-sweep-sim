@@ -43,7 +43,7 @@ pac-act = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["sim*", "pac_act*", "residual_rl*"]
+include = ["sim*", "pac_act*", "residual_rl*", "wam_sweep*"]
 
 [tool.setuptools.package-data]
 sim = ["../configs/*.yaml"]

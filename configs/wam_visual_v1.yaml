@@ -1,0 +1,123 @@
+# Approved WAM v1 protocol. Unknown, missing, duplicate or changed settings fail closed.
+timing:
+  history_seconds: 2.0
+  observation_hz: 5
+  history_frames: 11
+  prediction_seconds: 1.0
+  execution_hz: 25
+  prediction_steps: 25
+  replan_seconds: 0.2
+  execute_steps: 5
+model:
+  object_features: 34
+  brush_features: 9
+  context_features: 15
+  graph_hidden: 128
+  message_passing_layers: 3
+  proposal_modes: 4
+  proposal_hidden: [256, 256]
+  proposal_output: 15
+  control_knots: 5
+  future_gru_hidden: 128
+  evaluation_hidden: [256, 128]
+  success_outputs: 1
+  count_outputs: 7
+  appearance_features: 16
+  physical_outputs: 9
+  position_velocity_log_std_outputs: 4
+  state_outputs: 3
+  shape_outputs: 2
+  visibility_outputs: 1
+  ensemble_size: 1
+  goal_in_physical_head: false
+control:
+  xy_residual_ratio: 0.8
+  yaw_residual_degrees: 45.0
+  yaw_residual_radians: 0.7853981633974483
+  accumulate_residual: false
+  modify_z: false
+  global_x_monotonic: false
+  act_local_forward_only: true
+  zero_xy_zero_correction: true
+  zero_residual_filter_preserves_act: true
+  warmup_frames: 0
+  episode_seconds: 45.0
+  episode_frames: 1200
+  first_entry_window_seconds: 2.0
+  reset_entry_window: false
+  recovery_rounds: 0
+  exact_count_no_partial_overlap: true
+  preserve_native_safety: true
+data:
+  object_count: 6
+  target_counts: [1, 2, 3, 4, 5, 6]
+  perception_bootstrap_trajectories: 120
+  bootstrap_perception_only: true
+  main_trajectories: [240, 120, 120]
+  teacher_starts: [600, 300, 300]
+  short_branches_per_start: 12
+  full_continuations_per_start: 3
+  continuation_kinds: [act, wam, wam]
+  continuation_phases: [-1, 0, 1]
+  final_model_phase: 2
+  min_success_starts_per_phase_per_n: 20
+  min_success_parent_layouts_per_phase_per_n: 10
+  all_failure_action_supervision: false
+  merge_old_physical_data: true
+  mix_unversioned_terminal_labels: false
+  parent_family_isolation: true
+training:
+  device: mps
+  dtype: float32
+  seed: 42
+  optimizer: AdamW
+  gradient_clip: 1.0
+  perception_learning_rate: 0.0003
+  dynamics_learning_rate: 0.0003
+  action_learning_rate: 0.0001
+  evaluation_learning_rate: 0.0001
+  batch_sizes: [4, 64, 64]
+  max_epochs: [30, 40, 40]
+  early_stopping_patience: 5
+  confidence: single_model_calibration
+  resumable_checkpoint: true
+  retain_curves_calibration_data_versions: true
+budget:
+  total_hours: 72.0
+  throughput_pilot_hours: 2.0
+  pilot_counts_toward_total: true
+  artifact_limit_gib: 45.0
+  artifact_warning_gib: 40.0
+  disk_min_free_gib: 25.0
+  disk_warning_free_gib: 30.0
+  include_temporary_and_other_process_usage: true
+  reserve_remaining_work: true
+  auto_delete_existing: false
+evaluation:
+  validation_parent_layouts: 60
+  calibration_parent_layouts: 60
+  starts_per_validation_calibration_parent: 1
+  preflight_layouts: 12
+  formal_layouts: 120
+  formal_layouts_per_n: 20
+  arms: [act, wam, no_future_prediction]
+  attempts_per_arm_per_layout: 1
+  filter_on_act_success: false
+  min_net_successes: 12
+  min_sample_gain: 0.10
+  mcnemar_alternative: greater
+  mcnemar_exact: true
+  mcnemar_p_threshold: 0.05
+  prediction_test_requires_main_gate: true
+  infrastructure_error_stops_batch: true
+  replace_failed_layouts: false
+frozen:
+  source_root: /Users/huazhi_luke/Documents/Codex/2026-09-08/zhe/exports/pac_act_bundle_resnet_mps_20261017_r8
+  backbone: resnet18
+  act_training_steps: 100000
+  camera_views: [corner_xminus_yminus, corner_xminus_yplus, corner_xplus_yminus, corner_xplus_yplus, wrist]
+  model_sha256: ee197896b8b79778ba185ad1db07ea83ff24a77a7da34f5397876e1523f3dc5f
+  preprocessing_frozen: true
+  native_control_frozen: true
+  online_geometry_source: vision_only
+  online_joint_or_wrench_inputs: false
