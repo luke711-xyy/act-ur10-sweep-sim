@@ -379,38 +379,32 @@ finally:
 ''')
 
 
-def test_retained_cache_and_source_identity_audit():
-    output = native_script(BACKEND.rsplit('backend = FrozenSweepBackend.open', 1)[0] + '''
-from wam_sweep.artifacts import owned_size
+def test_source_identity_and_owned_cache_fixture(tmp_path):
+    native_script(PREAMBLE + f'\nfixture = {str(tmp_path)!r}\n' + '''
+import hashlib, json
+from pathlib import Path
+from wam_sweep.artifacts import BudgetLedger, owned_size
+from wam_sweep.config import WAMConfig
 from wam_sweep.inputs import file_hash
-import inspect
 runtime = load_frozen_runtime(identity)
-cache = root/'.venv/task1-cache/torch/hub/checkpoints/resnet18-f37072fd.pth'
-info = cache.stat()
-roots = policy['roots']
-containing = [p for p in roots if Path(p) in cache.parents]
-assert containing == [str(root/'.venv')]
-single_inventory = owned_size(roots)
-duplicate_inventory = owned_size([*roots, cache])
-assert single_inventory == duplicate_inventory
-account_state = json.loads(account.read_bytes())
-charges = [e for e in account_state['events'] if e.get('kind')=='controller_task5_cache_audit_conservative_1s']
-assert len(charges)==1 and charges[0]['seconds']==1
-print(json.dumps(dict(
-    cache=dict(path=str(cache),bytes=info.st_size,allocated_bytes=info.st_blocks*512,
-               sha256=file_hash(cache),inode=info.st_ino,nlink=info.st_nlink,
-               containing_policy_root=containing[0],single_inventory_bytes=single_inventory,
-               inventory_with_repeated_cache_root_bytes=duplicate_inventory,
-               cache_charge_bytes=owned_size([cache])),
-    manifest_hash=identity.manifest_hash,model_hash=identity.model_hash,
-    selected_loader=dict(path=str(Path(identity.root)/'source/pac_act/hybrid.py'),
-                         sha256=identity.native_hashes['source/pac_act/hybrid.py'],
-                         definitions=['SolverLease(module,cls)','load_trial4()']),
-    modules={n:dict(path=m.__file__,sha256=file_hash(m.__file__)) for n,m in runtime.modules.items()},
-    roots=roots, controller_audit_prior_charges=charges), sort_keys=True))
+root = Path(fixture)
+payload = b'controlled cache fixture, not external model weights'
+cache = root/'cache.bin'
+cache.write_bytes(payload)
+account = root/'fresh-budget.json'
+budget = BudgetLedger(account, owned_roots=[root],
+    config=WAMConfig.load(Path.cwd()/'configs/wam_visual_v1.yaml').budget)
+assert json.loads(account.read_bytes())['events'] == []
+assert file_hash(cache) == hashlib.sha256(payload).hexdigest()
+assert owned_size([cache]) == max(len(payload), cache.stat().st_blocks*512)
+assert owned_size(budget.roots) == owned_size([*budget.roots, cache])
+assert budget.ensure_owned(cache) == cache
+source = Path(identity.root)/'source'
+for name, module in runtime.modules.items():
+    relative = 'source/' + str(Path(module.__file__).relative_to(source))
+    assert file_hash(module.__file__) == identity.native_hashes[relative], name
+runtime.check_origin()
 ''')
-    evidence = __import__('json').loads(output.splitlines()[-1])
-    (Path.cwd()/'.venv/task-5-source-evidence.json').write_text(__import__('json').dumps(evidence, indent=2, sort_keys=True))
 
 
 def test_preparation_private_contact_latch_and_provider_restore():
@@ -629,5 +623,112 @@ try:
         first_query_layers=layers, same_policy_binding=True, saved_visual_preprocessing_equal=True)))
 finally:
     for handle in handles: handle.remove()
+    backend.close()
+''')
+
+
+def test_step_target_rejects_reused_or_mismatched_decoded_action():
+    native_script(BACKEND + '''
+import copy, pickle, pytest
+from wam_sweep.actions import ActionCodec
+from wam_sweep.snapshots import capture_physics
+try:
+    assert backend.prepare_bootstrap_oracle().ready
+    nominal = backend.reference.copy()
+    nominal[0] += .01
+    backend.accept_act_chunk(np.tile(nominal,(25,1)), issued_at=backend.env.time-.2, received_at=backend.env.time)
+    root_state = backend.snapshot()
+    raw = np.array([.3,-.2,.1])
+    codec_root = backend.codec.snapshot()
+    action = backend.decode_target(raw)
+    assert backend.codec.snapshot() == codec_root, 'pending decode committed before execution'
+    with pytest.raises(RuntimeError, match='pending'):
+        backend.snapshot()
+    with pytest.raises(RuntimeError, match='pending'):
+        backend.step_target(None, raw=raw)
+    with pytest.raises(RuntimeError, match='pending'):
+        backend.decode_target(raw)
+    def rejected(candidate, **kwargs):
+        state = capture_physics(backend.env)
+        codec = backend.codec.snapshot()
+        scheduler = pickle.dumps(vars(backend.scheduler))
+        count = len(backend._commands)
+        with pytest.raises(ValueError):
+            backend.step_target(candidate, **kwargs)
+        np.testing.assert_array_equal(capture_physics(backend.env).integration, state.integration)
+        assert backend.codec.snapshot() == codec
+        assert pickle.dumps(vars(backend.scheduler)) == scheduler
+        assert len(backend._commands) == count
+    # Same legitimate payload/counter is NOT transferable to another object.
+    foreign_codec = ActionCodec(bounds=backend.native_context.xy_bounds)
+    foreign_codec.restore(codec_root)
+    foreign = foreign_codec.decode(np.r_[backend.env.tcp(),backend.env.ee.tcp_yaw()], nominal,raw,.04,True)
+    assert foreign.audit['frame_index'] == action.audit['frame_index']
+    rejected(foreign)
+    rejected(copy.deepcopy(action))
+    rejected(action, raw=raw)
+    first = backend.step_target(action)
+    assert len(first.actions) == 4
+    assert backend.codec.snapshot()['frames'] == codec_root['frames']+1
+    rejected(action)  # consumed even though caller still holds the object
+    # Independent raw execution from the same root produces EXACT commands
+    # and codec state; the owned path neither decodes twice nor post-clamps.
+    expected_codec = backend.codec.snapshot()
+    backend.restore(root_state)
+    direct = backend.step_target(None, raw=raw)
+    np.testing.assert_array_equal(first.actions, direct.actions)
+    assert backend.codec.snapshot() == expected_codec
+    # Every mutable payload channel (including nested audit) is revalidated.
+    for name in ('target','raw','filtered','residual','residual_rate','audit','active'):
+        backend.restore(root_state)
+        candidate = backend.decode_target(raw)
+        if name == 'audit':
+            candidate.audit['frame_index'] += 1
+        elif name == 'active':
+            object.__setattr__(candidate, 'active', False)
+        else:
+            getattr(candidate,name)[0] += .1
+        rejected(candidate)
+        backend.cancel_decoded_target()
+        assert backend.codec.snapshot() == codec_root
+        assert backend.snapshot().cutpoint == 'handoff:frame-boundary'
+    # Same-counter current-state drift: no physics or live scheduler mutation
+    # on failure, including previously accepted geometry becoming p==q.
+    for drift in ('tcp','reference','timestamp','codec','scheduler','zero_displacement'):
+        backend.restore(root_state)
+        candidate = backend.decode_target(raw)
+        if drift == 'tcp':
+            backend.env.data.site_xpos[backend.env.ee.tcp_site_id,0] += .001
+        elif drift == 'reference':
+            backend.reference[1] += .001
+        elif drift == 'timestamp':
+            backend.env.data.time += .001
+        elif drift == 'codec':
+            backend.codec.decode(np.r_[backend.env.tcp(),backend.env.ee.tcp_yaw()],nominal,raw,.04,True)
+        elif drift == 'scheduler':
+            backend.scheduler.mark_query(backend.env.time)
+        else:
+            current_q = backend.native_context.normalize(copy.deepcopy(backend.scheduler).action_for(backend.env.time))
+            backend.env.data.site_xpos[backend.env.ee.tcp_site_id,:2] = current_q[:2]
+        rejected(candidate)
+        backend.cancel_decoded_target()
+    # A fresh current-zero-displacement decode has exactly zero XY residual,
+    # even with a nonzero filter, and its FIRST consumption really steps.
+    backend.restore(root_state)
+    current_q = backend.native_context.normalize(copy.deepcopy(backend.scheduler).action_for(backend.env.time))
+    backend.env.data.site_xpos[backend.env.ee.tcp_site_id,:2] = current_q[:2]
+    zero = backend.decode_target(raw)
+    np.testing.assert_array_equal(zero.residual[:2], [0.,0.])
+    np.testing.assert_array_equal(zero.target[:2], current_q[:2])
+    assert len(backend.step_target(zero).actions) == 4
+    rejected(zero)
+    # Restoring a supported complete root invalidates all outstanding tickets,
+    # even when its timestamp/geometry/reference are identical.
+    backend.restore(root_state)
+    outstanding = backend.decode_target(raw)
+    backend.restore(root_state)
+    rejected(outstanding)
+    assert backend.snapshot().cutpoint == 'handoff:frame-boundary'
+finally:
     backend.close()
 ''')

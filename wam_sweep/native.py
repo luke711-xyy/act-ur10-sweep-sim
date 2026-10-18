@@ -279,6 +279,7 @@ class FrozenSweepBackend:
              (self.cfg.workspace.y_min, self.cfg.workspace.y_max)),
             (self.cfg.workspace.z_search_min, self.cfg.end_effector.z_home))
         self.codec = ActionCodec(bounds=self.native_context.xy_bounds)
+        self._pending_decode = None
         self.participants = {}
         self.belief_provider = None
         self._policy = None
@@ -799,13 +800,60 @@ class FrozenSweepBackend:
     def reference_preview(self):
         return preview_reference(self.scheduler, self.reference, float(self.env.time), native_context=self.native_context)
 
+    def _decode_frame(self):
+        """Read current decode provenance WITHOUT pruning the live scheduler."""
+        ready = bool(self.context and self.context['ready'])
+        q = copy.deepcopy(self.scheduler).action_for(self.env.time) if ready else None
+        scheduler = dict(vars(self.scheduler))
+        scheduler['chunk'] = None if self.scheduler.chunk is None else asdict(self.scheduler.chunk)
+        ensemble = self.scheduler.temporal_ensemble
+        scheduler['temporal_ensemble'] = (None if ensemble is None else
+            dict(vars(ensemble), chunks=[asdict(chunk) for chunk in ensemble.chunks]))
+        return copy.deepcopy(dict(timestamp=float(self.env.time), low_steps=self._low_steps,
+            phase=self.phase, ready=ready, active=q is not None,
+            actual_tcp=np.r_[self.env.tcp(), self.env.ee.tcp_yaw()],
+            nominal=self.reference.copy() if q is None else self.native_context.normalize(q),
+            held_reference=self.reference.copy(), codec=self.codec.snapshot(), scheduler=scheduler))
+
+    def decode_target(self, raw) -> DecodedAction:
+        """Issue ONE executable owned action for this exact complete frame.
+
+        Decode on an isolated clone using current measured TCP and normalized
+        accepted ACT reference; real codec state commits only on consumption.
+        Pass the exact returned object to step_target(action), not a copy or a
+        direct codec.decode result. Payload/audit mutation, time/TCP/reference/
+        scheduler/codec drift and reuse are rejected before physical stepping.
+        Snapshot is forbidden until consumed/cancelled; restore invalidates it.
+        No native mapping/bounds change and no post-clamping of corrections.
+        """
+        self._live()
+        if (getattr(self, '_busy', None) or self._preparing or self.done or self._paused
+                or self._pending_decode is not None):
+            raise RuntimeError('decode requires a live complete frame with no pending decoded target')
+        frame = self._decode_frame()
+        if not frame['active']:
+            raise ValueError('owned decode requires an executable accepted ACT reference')
+        codec = copy.deepcopy(self.codec)
+        action = codec.decode(frame['actual_tcp'], frame['nominal'], raw, .04, True)
+        self._pending_decode = dict(action=action, payload=copy.deepcopy(action),
+                                    frame=frame, owner=self.codec, after=codec.snapshot())
+        return action
+
+    def cancel_decoded_target(self):
+        """Discard an unconsumed ticket; physics and real codec stay unchanged."""
+        self._live()
+        if getattr(self, '_busy', None) or self._preparing:
+            raise RuntimeError('cancel requires a complete operation boundary')
+        self._pending_decode = None
+
     @_frame_operation
     def step_target(self, target=None, *, raw=None) -> StepResult:
         """Execute one 25Hz frame through unchanged 100Hz native control.
 
         ``None`` uses accepted ACT or native hold; ``raw`` runs the owned codec.
-        A supplied DecodedAction must come from this codec; its float64 target
-        is inserted AFTER nominal FP32 normalization and never requantized.
+        A supplied DecodedAction must be the exact single-use decode_target()
+        result for this frame. Its float64 target is inserted AFTER nominal
+        FP32 normalization and never requantized. Direct codec results fail.
         """
         return self._execute_target_frame(target, raw=raw)
 
@@ -815,6 +863,15 @@ class FrozenSweepBackend:
             raise RuntimeError('cannot step a terminal/interrupted preparation')
         from sim.controllers.hybrid import Command
         from sim.act.evaluate import _policy_reference_substep
+        if target is not None:
+            pending = self._pending_decode
+            if (type(target) is not DecodedAction or raw is not None or pending is None
+                    or target is not pending['action'] or self.codec is not pending['owner']
+                    or not _same_native_values(asdict(pending['payload']), asdict(target))
+                    or not _same_native_values(pending['frame'], self._decode_frame())):
+                raise ValueError('decoded target is foreign, consumed, tampered or stale for the current frame')
+        elif self._pending_decode is not None:
+            raise RuntimeError('consume or cancel the pending decoded target before raw/hold execution')
         ready = bool(self.context and self.context['ready'])
         q = self.scheduler.action_for(self.env.time) if ready else None
         active = q is not None
@@ -822,11 +879,10 @@ class FrozenSweepBackend:
             raise RuntimeError('only native inactive hold can end at a partial-frame boundary')
         nominal = self.reference.copy() if not active else self.native_context.normalize(q)
         if target is not None:
-            if not isinstance(target, DecodedAction) or raw is not None or not active:
-                raise ValueError('target requires an active owned-codec DecodedAction')
-            if target.audit['frame_index'] != self.codec.snapshot()['frames']:
-                raise ValueError('decoded target is not from current codec frame')
-            decoded = target
+            # Execute the private validated copy, never mutable caller arrays.
+            decoded = copy.deepcopy(pending['payload'])
+            self.codec.restore(pending['after'])
+            self._pending_decode = None  # consume BEFORE any physical command
         else:
             decoded = self.codec.decode(np.r_[self.env.tcp(), self.env.ee.tcp_yaw()], nominal,
                                         np.zeros(3) if raw is None else raw, .04, active)
@@ -864,6 +920,8 @@ class FrozenSweepBackend:
         self._live()
         if getattr(self, '_busy', None):
             raise RuntimeError('snapshot requires a complete frame/capture/query boundary')
+        if self._pending_decode is not None:
+            raise RuntimeError('snapshot requires consumption/cancellation of the pending decoded target')
         context = None if self.context is None else copy.deepcopy({k: v for k, v in self.context.items()
                                                                    if k not in {'env', 'handoff_governor'}})
         state = dict(origin=self.origin, phase=self.phase, done=self.done, reason=self.termination_reason,
@@ -895,6 +953,7 @@ class FrozenSweepBackend:
         if snapshot.images_externalized:
             snapshot = materialize_images(snapshot, image_reader)
         state = copy.deepcopy(snapshot.state)
+        self._pending_decode = None  # completed-root restore invalidates ALL old tickets
         restore_physics(self.env, snapshot.physics)
         self.origin, self.phase, self.done = state['origin'], state['phase'], state['done']
         self.termination_reason, self.frames, self._low_steps = state['reason'], state['frames'], state['low_steps']
