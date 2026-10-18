@@ -11,12 +11,21 @@ import torch
 from .contracts import HistoryBatch, OnlineObservation, PHASES
 
 
+def _clock_tick(timestamp: float, origin: float) -> int:
+    position = (timestamp - origin) * 5
+    tick = round(position)
+    if abs(position - tick) > 1e-6:
+        raise ValueError("observation must fall on the 5 Hz clock")
+    return tick
+
+
 class HistoryBuffer:
     """Right-aligned time slots; no waiting, resampling, or startup replication.
 
     Track IDs only associate object slots, including across missing detections.
     Six physical tracks are admitted per episode; reset by creating a new buffer.
-    Observations may skip whole 200 ms slots, but cannot move off the 5 Hz grid.
+    Observations may skip whole 200 ms slots, but cannot repeat a slot or move
+    off the 5 Hz grid (1e-6 tick tolerance). Retention uses integer tick distance.
     """
 
     def __init__(self) -> None:
@@ -30,15 +39,13 @@ class HistoryBuffer:
         # Re-run nested validation before changing any state, then own all buffers.
         frame = replace(observation)
         origin = frame.timestamp if self._origin is None else self._origin
-        tick = (frame.timestamp - origin) * 5
-        if abs(tick - round(tick)) > 1e-6:
-            raise ValueError("observation must fall on the 5 Hz clock")
-        if self._observations and frame.timestamp <= self._observations[-1].timestamp:
-            raise ValueError("observation timestamps must strictly increase")
+        tick = _clock_tick(frame.timestamp, origin)
+        if self._observations and tick <= _clock_tick(self._observations[-1].timestamp, origin):
+            raise ValueError("observation clock ticks must strictly increase")
         ids = self._track_ids + sorted({item.track_id for item in frame.objects} - set(self._track_ids))
         if len(ids) > 6:
             raise ValueError("more than six episode tracks; tracker identity is invalid")
-        retained = [old for old in self._observations if frame.timestamp - old.timestamp <= 2. + 1e-7]
+        retained = [old for old in self._observations if tick - _clock_tick(old.timestamp, origin) <= 10]
         self._observations = retained + [frame]
         self._track_ids = ids
         self._origin = origin
@@ -50,9 +57,10 @@ class HistoryBuffer:
         object_valid = torch.zeros((1, 11, 6), dtype=torch.float32)
         history_valid = torch.zeros((1, 11), dtype=torch.float32)
         if self._observations:
-            now = self._observations[-1].timestamp
+            assert self._origin is not None
+            now = _clock_tick(self._observations[-1].timestamp, self._origin)
             for frame in self._observations:
-                index = 10 - round((now - frame.timestamp) * 5)
+                index = 10 - (now - _clock_tick(frame.timestamp, self._origin))
                 history_valid[0, index] = 1
                 for item in frame.objects:
                     if not item.valid:

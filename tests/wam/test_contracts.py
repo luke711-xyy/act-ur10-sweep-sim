@@ -102,6 +102,76 @@ def test_invalid_history_time_is_rejected_atomically(time):
     torch.testing.assert_close(history.batch().history_valid, before.history_valid)
 
 
+def test_duplicate_clock_slot_is_rejected_atomically_and_snapshot_round_trips():
+    # Increasing raw times still occupy tick 1; none may enter the saved history.
+    history = HistoryBuffer()
+    history.append(observation(0.))
+    history.append(observation(.2))
+    before = history.batch()
+    for i in range(1, 12):
+        with pytest.raises(ValueError):
+            history.append(observation(.2 + i * 1e-8))
+        state = history.snapshot()
+        assert [frame.timestamp for frame in state["observations"]] == [0., .2]
+        assert state["origin"] == 0.
+        assert state["track_ids"] == [0, 1, 2, 3, 4, 5]
+        assert state["version"] == 1
+        after = history.batch()
+        for name in ("objects", "brush", "context", "object_valid", "history_valid"):
+            torch.testing.assert_close(getattr(after, name), getattr(before, name), rtol=0, atol=0)
+    assert before.history_valid.tolist() == [[0.] * 9 + [1., 1.]]
+    restored = HistoryBuffer()
+    restored.restore(history.snapshot())
+    for name in ("objects", "brush", "context", "object_valid", "history_valid"):
+        torch.testing.assert_close(getattr(restored.batch(), name), getattr(before, name), rtol=0, atol=0)
+    corrupted = history.snapshot()
+    corrupted["observations"].append(observation(.2 + 1e-8))
+    with pytest.raises(ValueError):
+        restored.restore(corrupted)
+    assert [frame.timestamp for frame in restored.snapshot()["observations"]] == [0., .2]
+    for name in ("objects", "brush", "context", "object_valid", "history_valid"):
+        torch.testing.assert_close(getattr(restored.batch(), name), getattr(before, name), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("origin", [0., 7.3])
+def test_jittered_two_second_and_rolling_history_use_integer_slots_and_round_trip(origin):
+    history = HistoryBuffer()
+    history.append(observation(origin, objects=[belief(4, center_xy=[0., 0.])]))
+    for step in range(1, 11):
+        # All samples are within 1e-6 ticks; the two-second boundary is late.
+        jitter = -1.5e-7 if step == 1 else 1.5e-7
+        history.append(observation(origin + step / 5 + jitter,
+                                   objects=[belief(4, center_xy=[float(step), 0.])]))
+    batch = history.batch()
+    assert batch.history_valid.tolist() == [[1.] * 11]
+    assert batch.objects[0, :, 0, 0].tolist() == [0., 1., 2., 3., 4., 5., 6., 7., 8., 9., 10.]
+    assert len(history.snapshot()["observations"]) == 11
+    restored = HistoryBuffer()
+    restored.restore(history.snapshot())
+    for name in ("objects", "brush", "context", "object_valid", "history_valid"):
+        torch.testing.assert_close(getattr(restored.batch(), name), getattr(batch, name), rtol=0, atol=0)
+
+    # Tick 11 must retain tick 1 even though their raw distance exceeds two seconds.
+    next_frame = observation(origin + 2.2 + 1.5e-7, objects=[belief(4, center_xy=[11., 0.])])
+    history.append(next_frame)
+    restored.append(next_frame)
+    rolling = history.batch()
+    assert rolling.history_valid.tolist() == [[1.] * 11]
+    assert rolling.objects[0, :, 0, 0].tolist() == [1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11.]
+    state = history.snapshot()
+    assert len(state["observations"]) == 11
+    assert state["observations"][0].timestamp == origin + .2 - 1.5e-7
+    assert state["origin"] == origin
+    assert state["track_ids"] == [4]
+    round_trip = HistoryBuffer()
+    round_trip.restore(state)
+    for candidate in (restored, round_trip):
+        assert [frame.timestamp for frame in candidate.snapshot()["observations"]] == [
+            frame.timestamp for frame in state["observations"]]
+        for name in ("objects", "brush", "context", "object_valid", "history_valid"):
+            torch.testing.assert_close(getattr(candidate.batch(), name), getattr(rolling, name), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("field", ["mass", "friction", "true_center", "true_radius",
     "true_type", "collision_boundary", "collected_mask", "first_entry_time",
     "joint_positions", "joint_velocities", "wrench", "true_count", "target_count"])
