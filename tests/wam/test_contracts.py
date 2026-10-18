@@ -269,12 +269,12 @@ def test_program_preview_and_score_reject_malformed_or_future_issuance():
 
 
 def test_world_prediction_shapes_and_finite_values():
-    values = dict(objects=torch.zeros(2, 25, 6, 9), object_log_std=torch.zeros(2, 25, 6, 4),
+    values = dict(object_mean=torch.zeros(2, 25, 6, 9), object_log_std=torch.zeros(2, 25, 6, 4),
         state_logits=torch.zeros(2, 25, 6, 3), shape_logits=torch.zeros(2, 25, 6, 2),
         visibility_logits=torch.zeros(2, 25, 6, 1), brush=torch.zeros(2, 25, 9),
         brush_log_std=torch.zeros(2, 25, 9), valid=torch.ones(2, 25))
     WorldPrediction(**values)
-    for changes in ({"objects": torch.zeros(2, 25, 6, 10)},
+    for changes in ({"object_mean": torch.zeros(2, 25, 6, 10)},
                     {"object_log_std": torch.full((2, 25, 6, 4), float("inf"))},
                     {"valid": torch.ones(2, 25) * .3}, {"brush": torch.zeros(2, 25, 9).double()}):
         with pytest.raises((TypeError, ValueError)):
@@ -283,6 +283,52 @@ def test_world_prediction_shapes_and_finite_values():
         HistoryBatch(objects=torch.zeros(1, 11, 6, 34), brush=torch.zeros(1, 11, 9),
             context=torch.zeros(1, 11, 15), object_valid=torch.ones(1, 11, 6),
             history_valid=torch.zeros(1, 11))
+
+
+def test_prediction_public_mean_matches_task9_consumer():
+    prediction = WorldPrediction(
+        object_mean=torch.zeros(1, 25, 6, 9), object_log_std=torch.zeros(1, 25, 6, 4),
+        state_logits=torch.zeros(1, 25, 6, 3), shape_logits=torch.zeros(1, 25, 6, 2),
+        visibility_logits=torch.zeros(1, 25, 6, 1), brush=torch.zeros(1, 25, 9),
+        brush_log_std=torch.zeros(1, 25, 9), valid=torch.ones(1, 25),
+    )
+    assert prediction.object_mean.shape == (1, 25, 6, 9)
+
+
+def test_canonical_episode_arms_match_task12_cli():
+    path = Path(__file__).resolve().parents[2] / "configs/wam_visual_v1.yaml"
+    assert WAMConfig.load(path).evaluation.arms == ("act", "wam", "no-prediction")
+    for arm in ("act", "wam", "no-prediction"):
+        EpisodeSpec("parent-1", 42, 3, "evaluation", 2, arm, 0)
+
+
+@pytest.mark.parametrize("arm", ["no_future_prediction", "no_prediction", "unknown"])
+def test_noncanonical_episode_arms_are_rejected(arm):
+    with pytest.raises(ValueError):
+        EpisodeSpec("parent-1", 42, 3, "evaluation", 2, arm, 0)
+
+
+def test_reference_command_clock_includes_root_time_before_resulting_state():
+    # Commands begin at root t; corresponding future states begin at t + 0.04.
+    preview = ReferencePreview(targets=np.zeros((25, 4)), times=2. + np.arange(25) * .04,
+                               valid=np.ones(25), issued_at=2., source_hash="native-sha")
+    assert preview.times[0] == 2.
+    assert preview.times[-1] == pytest.approx(2.96)
+
+
+@pytest.mark.parametrize("kind", ["pre_issuance", "off_cadence", "off_grid"])
+def test_reference_command_clock_rejects_pre_issuance_and_off_cadence(kind):
+    times = 2. + np.arange(25) * .04
+    if kind == "pre_issuance":
+        times -= .04
+    elif kind == "off_cadence":
+        times += .04
+        times[10] += .01
+    else:
+        times += .01
+    with pytest.raises(ValueError):
+        ReferencePreview(targets=np.zeros((25, 4)), times=times,
+                         valid=np.ones(25), issued_at=2., source_hash="native-sha")
 
 
 def test_identity_goal_versions_and_result_categories():

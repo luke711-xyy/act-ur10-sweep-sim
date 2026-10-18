@@ -17,6 +17,7 @@ CAMERA_VIEWS = (
     "corner_xplus_yplus", "wrist",
 )
 PHASES = ("prepare", "handoff", "sweep", "terminated")
+EPISODE_ARMS = ("act", "wam", "no-prediction")
 RESULT_STATUSES = (
     "success", "task_failure", "perception_invalid", "model_invalid", "safety_stop",
     "infrastructure_error", "incomplete",
@@ -228,6 +229,10 @@ class CandidateProgram:
 
 @dataclass(frozen=True, slots=True)
 class ReferencePreview:
+    """Absolute command targets on the 25 Hz grid, including command time t.
+
+    Resulting state predictions use t + (j + 1) * 0.04, a separate clock.
+    """
     targets: np.ndarray
     times: np.ndarray
     valid: np.ndarray
@@ -238,8 +243,12 @@ class ReferencePreview:
         for name, shape in (("targets", (25, 4)), ("times", (25,)), ("valid", (25,))):
             object.__setattr__(self, name, _array(getattr(self, name), shape, name))
         object.__setattr__(self, "issued_at", _scalar(self.issued_at, "issued_at", 0.))
-        if np.any(np.diff(self.times) <= 0) or np.any(self.times <= self.issued_at):
-            raise ValueError("reference times must increase strictly after issuance")
+        if np.any(self.times < self.issued_at):
+            raise ValueError("reference command times cannot precede issuance")
+        offset_ticks = (self.times[0] - self.issued_at) * 25
+        if (not np.allclose(np.diff(self.times), .04, atol=1e-7, rtol=0)
+                or abs(offset_ticks - round(offset_ticks)) > 1e-6):
+            raise ValueError("reference command times must follow the issued 25 Hz grid")
         if not np.isin(self.valid, (0, 1)).all():
             raise ValueError("reference valid must be binary")
         _text(self.source_hash, "source_hash")
@@ -247,7 +256,7 @@ class ReferencePreview:
 
 @dataclass(frozen=True, slots=True)
 class WorldPrediction:
-    objects: torch.Tensor
+    object_mean: torch.Tensor
     object_log_std: torch.Tensor
     state_logits: torch.Tensor
     shape_logits: torch.Tensor
@@ -257,13 +266,13 @@ class WorldPrediction:
     valid: torch.Tensor
 
     def __post_init__(self) -> None:
-        b = _batch_size(self.objects)
-        for name, shape in (("objects", (b, 25, 6, 9)), ("object_log_std", (b, 25, 6, 4)),
+        b = _batch_size(self.object_mean)
+        for name, shape in (("object_mean", (b, 25, 6, 9)), ("object_log_std", (b, 25, 6, 4)),
                             ("state_logits", (b, 25, 6, 3)), ("shape_logits", (b, 25, 6, 2)),
                             ("visibility_logits", (b, 25, 6, 1)), ("brush", (b, 25, 9)),
                             ("brush_log_std", (b, 25, 9)), ("valid", (b, 25))):
             _tensor(getattr(self, name), shape, name, mask=name == "valid")
-        _same_device(self.objects, self.object_log_std, self.state_logits, self.shape_logits,
+        _same_device(self.object_mean, self.object_log_std, self.state_logits, self.shape_logits,
                      self.visibility_logits, self.brush, self.brush_log_std, self.valid)
 
 
@@ -309,6 +318,8 @@ class EpisodeSpec:
     def __post_init__(self) -> None:
         for name in ("parent_id", "split", "arm"):
             _text(getattr(self, name), name)
+        if self.arm not in EPISODE_ARMS:
+            raise ValueError("arm must be act, wam or no-prediction")
         _integer(self.seed, "seed", 0)
         _integer(self.target_count, "target_count", 1, 6)
         _integer(self.phase, "phase", -1, 2)

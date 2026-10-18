@@ -100,7 +100,7 @@ evaluation:
   preflight_layouts: 12
   formal_layouts: 120
   formal_layouts_per_n: 20
-  arms: [act, wam, no_future_prediction]
+  arms: [act, wam, no-prediction]
   attempts_per_arm_per_layout: 1
   filter_on_act_success: false
   min_net_successes: 12

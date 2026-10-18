@@ -12,6 +12,8 @@ from typing import Any, Mapping
 
 import yaml
 
+from .contracts import EPISODE_ARMS
+
 
 @dataclass(frozen=True, slots=True)
 class TimingConfig:
@@ -133,7 +135,7 @@ class EvaluationConfig:
     preflight_layouts: int = 12
     formal_layouts: int = 120
     formal_layouts_per_n: int = 20
-    arms: tuple[str, ...] = ("act", "wam", "no_future_prediction")
+    arms: tuple[str, ...] = EPISODE_ARMS
     attempts_per_arm_per_layout: int = 1
     filter_on_act_success: bool = False
     min_net_successes: int = 12
