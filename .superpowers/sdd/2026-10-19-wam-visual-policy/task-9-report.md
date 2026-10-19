@@ -409,3 +409,181 @@ Concerns/limits and consumer obligations:
 No unresolved implementation test failure or out-of-scope producer change is
 present. No missing producer context was required to implement the authorized
 neural computations. Controller independent review is the next owner action.
+
+## FIX ROUND1 — known root-held information parity
+
+Status: scoped correction implemented and committed; controller independent
+scoped re-review remains pending. Task9 is NOT declared complete or published,
+and Task10 has NOT been dispatched. The original400-pass full-WAM result above
+is historical evidence for PRE-FIX code, not a new amended-code full-suite
+claim. This append supersedes the earlier root-reference masking description
+only at the causally known root row; all prior report/evidence history remains.
+
+Authority: `task-9-fix-round-1.md`, round1/5, continuing the SAME original
+implementer and worktree/branch. FIX_BASE is
+`26be92c53d9dbb603940dccf367349d8b5bbcaf7`. Read that exact fix brief first,
+then the original Task9 brief and committed report. Dirac's review was already
+closed; no helper/subagent/reviewer was started or contacted for this fix.
+
+### Exact open finding (verbatim)
+
+> **Important — Preserve the known root-held reference in both scoring arms.**
+>
+> [graph.py:48](/Users/huazhi_luke/.codex/worktrees/wam-visual-policy-v1/act-ur10-sweep-sim/wam_sweep/models/graph.py:48) zeros every reference pose whose validity bit is false. Both scoring heads consume that masked encoding through [quality.py:33](/Users/huazhi_luke/.codex/worktrees/wam-visual-policy-v1/act-ur10-sweep-sim/wam_sweep/models/quality.py:33).
+>
+> However, [dynamics.py:100](/Users/huazhi_luke/.codex/worktrees/wam-visual-policy-v1/act-ur10-sweep-sim/wam_sweep/models/dynamics.py:100) initializes the held command from `targets[0]` and uses it for inactive steps at line 108. For two entirely inactive previews differing only in their known root-held pose, the no-prediction head receives identical features, while the world receives different commands and can convey that information through its future predictions. This violates the matched-information requirement in [frame-interface-integration.md:13](/Users/huazhi_luke/.codex/worktrees/wam-visual-policy-v1/act-ur10-sweep-sim/.superpowers/sdd/2026-10-19-wam-visual-policy/frame-interface-integration.md:13).
+>
+> Preserve the causally known root-held pose in the shared reference encoding, retaining its inactive mode bit and masking later unknown placeholders. Add a focused regression covering an inactive root, reference sensitivity without world invocation, and continued immunity to later invalid-placeholder changes. Existing GREEN results do not answer this boundary case; no probe was run.
+
+### Root cause, source fix and exact scope
+
+The original shared `references()` multiplied pose features by ACT validity for
+EVERY row. With an entirely inactive preview this erased the known root-held
+xyz/yaw as well as the later unknown placeholders. The physical rollout still
+received root `targets[0]`, producing the information mismatch identified by
+review. The prior mixed-active→hold test did not cover this inactive-root case.
+
+Production fix is ONLY `wam_sweep/models/graph.py::references`: clone the
+validity tensor into `pose_known`, set ONLY `pose_known[:,0]=1`, and multiply
+the five pose features by that availability mask. Concatenate the ORIGINAL
+validity bit unchanged. Thus root `[xyz, sin(yaw), cos(yaw), active]` keeps its
+five causally known pose values with active0; later inactive rows stay all-zero
+features. Known active rows retain their existing behavior. Reference arrays,
+codec memory, dynamics/hold/reset/governor and native execution are unmodified.
+
+`tests/wam/test_models.py` adds a two-row fixture with identical history, goal,
+candidate and codec but different root-held xyz/yaw, plus two tests parameterized
+over real CPU and available MPS. Literal expected root rows are
+`[.125,-.25,.375,1,0,0]` and `[-.375,.5,.625,-1,0,0]` (yaw±pi/2, atol1e-6).
+All activity bits remain0 and later inactive features remain0. Real control
+encoder pre-hooks verify BOTH scorers receive the same171-wide safe input and
+the literal root rows at columns21..26. No head forward is mocked. The
+no-prediction scorer must distinguish the roots while GraphGRU.rollout is
+poisoned to raise if invoked; changing ONLY later placeholders leaves its
+success/count logits unchanged. Fresh OWN world predictions, physical outputs
+and full-head logits are likewise unchanged by those later placeholders.
+Caller codec states remain untouched.
+
+No fields, IDs, input/hidden widths or public signatures were added. Shared
+reference width6, control171→64, full592/no-future464 and proposal480 remain
+unchanged. Both scorers and the proposal consume the same corrected shared
+encoding. No privileged future command/GT input or producer/control change.
+
+Fix source/test commit: `16270351536fa993d2840f62977d65fb835d69bb`
+(`fix(wam): preserve inactive root reference information`). It changes ONLY
+`wam_sweep/models/graph.py` and `tests/wam/test_models.py`.
+This documentation-only follow-up APPENDS to the SAME tracked
+`.superpowers/sdd/2026-10-19-wam-visual-policy/task-9-report.md`.
+No prior commit was amended. All paths are relative to the same absolute
+worktree printed above. No other model/loss/test/producer/config/weight file
+was changed, and no dependency setup/download, actual collection/quota,
+training, profile, preflight, formal run or publication occurred.
+
+### Actual RED before production fix, then complete covering GREEN
+
+Both commands use the EXISTING admitted runner with240s/256MiB reservation,
+canonical run lease/account, existing offline TMP/XDG/MPL namespaces, and
+explicit `-o cache_dir=.venv/wam-pytest-cache`
+`-o tmp_path_retention_count=1000` (plus `-o addopts=`). These are focused model
+checks, for which that existing bound is sufficient. No new helper script,
+ledger/root or nested active clock was created. RED was observed before the
+production source edit; `git diff` then showed only the new test file changes.
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+./.venv/bin/python .venv/task-7-run.py task9-fix1-inactive-root-red \
+  tests/wam/test_models.py -k inactive_root -rP
+```
+
+Actual RED: **4 failed,17 deselected in1.44s**, exit1. CPU and MPS BOTH executed
+and failed independently: the expected root features were zeroed (8/12 elements
+mismatched, maximum absolute difference1), and the no-prediction root logits
+had exactly0 difference despite different known held poses. This was a real
+feature/output failure against the old production implementation, not a missing
+API, skipped device, mocked result or inferred reproduction.
+
+After the shared-mask source fix, ran BOTH complete covering files:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+./.venv/bin/python .venv/task-7-run.py task9-fix1-covering-green \
+  tests/wam/test_models.py tests/wam/test_model_losses.py -rP
+```
+
+Actual GREEN: **31 passed in3.49s**, exit0, no skipped case. Captured real
+device markers include:
+
+```text
+INACTIVE_ROOT cpu: real full/no forward; shared171 root pose/inactive0; no world call; later-placeholder immunity; independent two-row root conditioning
+INACTIVE_ROOT mps: real full/no forward; shared171 root pose/inactive0; no world call; later-placeholder immunity; independent two-row root conditioning
+31 passed in 3.49s
+```
+
+The complete covering run also retains the existing CPU/MPS forward/backward,
+actor/world/quality gradient isolation and freeze checks, own-future provenance,
+object/action/score permutation behavior, genuine two-row independent
+conditioning, mixed active→hold physical-rollout immunity, unchanged codec
+forward mapping and periodic/masked physical/proposal/terminal loss checks.
+Existing parameter counts and hidden widths printed unchanged. No optimizer
+step or actual training occurred. No duplicate native full-WAM or root run
+was made;694.71s/400passed remains the PRE-FIX historical run only.
+
+Exact logs/accounts are retained under the already-owned `.venv`:
+
+- `task-7-task9-fix1-inactive-root-red.log` / `-account.json`
+- `task-7-task9-fix1-covering-green.log` / `-account.json`
+- `task-9-fix1-final-account.json` (source/cache/evidence/account audit)
+
+### Account, unchanged-source/evidence audit and remaining concerns
+
+Self-review confirmed the fix changes pose availability independently of ACT
+activity, leaves original valid bits/arrays untouched and exposes no later
+placeholder. Final source audit held the existing `.venv/task-2-run.lock` and
+canonical ledger, with linked60s/1MiB reservation and activity
+`task9_fix1_final_source_account_audit`; it reran no model or native probe.
+It verified exact staged two-file source/test scope, `git diff --cached --check`,
+no unstaged tracked changes, old report unchanged before this append, the
+other SIX Task9 source/test hashes unchanged, every prior producer/config
+source hash/exact FIX_BASE bytes unchanged, r8 manifest/model/dependency hashes,
+and the complete new test-account chain. Audited amended SHA256s:
+
+- graph.py: `2acbb23f8ab21e517b43cbea4a7a14765993206328ae220f72ecac5158c93ffd`
+- test_models.py: `139fcc139c614100d53359621cad643356357161c89a75b05fb02bf69b24ecf8`
+
+Dispatch:5531.923959035874 effective seconds /309events /pilot0 /
+active=null /reservations={}. Final: **5539.608646173478 effective seconds /
+315events /pilot0 /active=null /reservations={}**, warnings=[]. Added fix cost
+**7.68468713760376 effective seconds**, including real RED, complete covering
+CPU/MPS GREEN and final source/cache/account audit.
+
+| Activity | Effective seconds before→after | End events |
+|---|---|---:|
+|task9-fix1-inactive-root-red|5531.923959035874→5533.949943084717|311|
+|task9-fix1-covering-green|5533.949943084717→5538.049547929764|313|
+|task9_fix1_final_source_account_audit|5538.049547929764→5539.608646173478|315|
+
+All inherited309/295/277/217 and167/179/191/197/209 prefixes are preserved;
+all previously recorded prefix digests match. The inherited309 prefix digest
+is `9e0696fdfe273ba00e5bb629410d246c3a3c5e136aca93446239bbf4b6ccf434`.
+Each runner verified its entire inherited event prefix and immutable policy
+after the run. Both distinct controller1s priors remain exactly once. Canonical
+roots and distinct run/native locks are unchanged. Audit-poll observations:
+owned2361438040bytes /free79270068224bytes; these are observations, not a
+throughput/volume profile. The audit JSON adds a small owned file after polling.
+
+Original Task9 RED/GREEN/full-run logs AND their accounts match their archived
+hashes/content; the original final account JSON was not replaced. Historical
+Task8 failed-full and complete-fix log hashes remain unchanged. Prior native
+proof JSONs in pytest-63 and pytest-64 match archived values. Retained root
+pytest cache hashes/inodes and180224bytes counted once remain intact; original
+cache source/root `.pytest_cache` remain absent. ResNet initializer and all
+sealed r8 dependency hashes are unchanged. No old cache, raw evidence or other
+resource was deleted, moved or overwritten; no duplicate native run or new
+policy root/ledger was introduced.
+
+No covering test failure or unresolved dependency gap remains for this scoped
+fix. Original untrained/uncalibrated-model, detached-codec and modeled future
+hold limitations remain as documented above. The repaired root-held pose is
+causally KNOWN, distinct from that unchanged future-hold modeling limitation.
+Controller alone owns independent scoped re-review and the final gate; this
+append does not claim Task9 completion/publication or authorize Task10.
