@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import sys
 from dataclasses import asdict, dataclass, field, replace
 from typing import Callable
 
@@ -23,6 +24,33 @@ from ..inputs import digest_json, file_hash
 from ..labels import CarriedLabeler
 from ..preparation import prepare_visually
 from .datasets import associate_root
+
+
+def _diagnostic(primary, operation):
+    """Secondary persistence must never replace the active producer exception."""
+    try:
+        return operation()
+    except BaseException as secondary:
+        if hasattr(primary,'add_note'):
+            primary.add_note(f'secondary diagnostic/cleanup failure: {type(secondary).__name__}: {secondary}')
+
+
+def _close_resources(*resources):
+    """Attempt EVERY release; propagate first failure only without a primary."""
+    primary = sys.exc_info()[1]
+    first = None
+    for resource in resources:
+        if resource is None:
+            continue
+        if primary is not None:
+            _diagnostic(primary,resource.close)
+        else:
+            try:
+                resource.close()
+            except BaseException as error:
+                primary = first = error
+    if first is not None:
+        raise first
 
 
 @dataclass(frozen=True)
@@ -142,6 +170,102 @@ def perception_identity(estimator):
     return digest_json(estimator.checkpoint()['manifest'])
 
 
+class VisualEntryContext:
+    """Causal VISUAL feature, not the native first-entry/task clock.
+
+    Shared by live/preparation histories and each version's full causal replay.
+    Input is already computed beliefs; no truth, N, encoder or ACT access.
+    """
+    protocol = 'visual-first-estimated-collected-v1'
+    threshold = .5
+
+    def __init__(self, perception_hash):
+        if not isinstance(perception_hash,str) or not perception_hash:
+            raise ValueError('visual context requires frozen perception identity')
+        self.perception_hash = perception_hash
+        self.first_entry = self.timestamp = None
+
+    def snapshot(self):
+        return dict(schema=1,protocol=self.protocol,threshold=self.threshold,
+                    perception_hash=self.perception_hash,first_entry=self.first_entry,timestamp=self.timestamp)
+
+    def restore(self, state):
+        expected = self.snapshot()
+        if (not isinstance(state,dict) or set(state)!=set(expected)
+                or any(state[k]!=expected[k] for k in ('schema','protocol','threshold','perception_hash'))):
+            raise ValueError('incompatible visual context protocol/perception identity')
+        first,last = state['first_entry'],state['timestamp']
+        if (any(t is not None and (type(t) not in (float,int) or not math.isfinite(t) or t<0) for t in (first,last))
+                or first is not None and (last is None or first>last)):
+            raise ValueError('invalid causal visual context clock')
+        self.first_entry,self.timestamp = first,last
+
+    def pair(self, timestamp):
+        return (0.,False) if self.first_entry is None or timestamp<self.first_entry else (timestamp-self.first_entry,True)
+
+    def apply(self, observation):
+        if type(observation) is not OnlineObservation:
+            raise TypeError('visual context requires safe estimated observation')
+        now = observation.timestamp
+        if self.timestamp is not None and now<=self.timestamp:
+            raise ValueError('visual context requires strictly causal captures')
+        first = self.first_entry
+        if first is None and any(b.valid and b.state_probabilities[2]>=self.threshold for b in observation.objects):
+            first = now
+        age,valid = (0.,False) if first is None else (now-first,True)
+        # All stored kinematics/control/time/phase stay bit-for-bit causal.
+        safe = replace(observation,robot=replace(observation.robot,visual_entry_age=age,visual_entry_valid=valid))
+        self.first_entry,self.timestamp = first,now
+        return safe
+
+
+class ContextHistory(HistoryBuffer):
+    """Task7-compatible history adapter with a versioned, restorable clock.
+
+    append(safe) enriches ONLY the two visual fields using existing beliefs and
+    returns that enriched observation. Task7 may ignore the return value; its
+    model history is still enriched. VisualSession returns it to controllers.
+    """
+    def __init__(self, perception_hash, *, backend=None):
+        super().__init__()
+        self.entry = VisualEntryContext(perception_hash)
+        self.backend = backend
+
+    def bind_backend(self, backend):
+        self.backend = backend
+        if self.entry.timestamp is not None:
+            backend.update_visual_entry(*self.entry.pair(self.entry.timestamp))
+
+    def append(self, observation):
+        previous = self.entry.snapshot()
+        try:
+            safe = self.entry.apply(observation)
+            super().append(safe)
+        except BaseException as error:
+            _diagnostic(error,lambda:self.entry.restore(previous))
+            raise
+        if self.backend is not None:
+            self.backend.update_visual_entry(safe.robot.visual_entry_age,safe.robot.visual_entry_valid)
+        return safe
+
+    def snapshot(self):
+        return dict(super().snapshot(),visual_context=self.entry.snapshot())
+
+    def restore(self, state):
+        context = VisualEntryContext(self.entry.perception_hash)
+        if not isinstance(state,dict) or 'visual_context' not in state:
+            raise ValueError('missing versioned visual context; rebuild from retained raw captures')
+        context.restore(state['visual_context'])
+        history = {k:v for k,v in state.items() if k!='visual_context'}
+        observations = history.get('observations',())
+        if ((observations[-1].timestamp if observations else None)!=context.timestamp
+                or any(not math.isclose(o.robot.visual_entry_age,context.pair(o.timestamp)[0],abs_tol=1e-7)
+                       or o.robot.visual_entry_valid!=context.pair(o.timestamp)[1] for o in observations)):
+            raise ValueError('history/visual context clock mismatch')
+        super().restore(history)
+        self.entry = context
+
+
 class OfflineWindow:
     """Private named participant; never reset carry windows at branch roots."""
     def __init__(self):
@@ -175,12 +299,14 @@ class CollectionIdentity:
 
     def snapshot(self):
         return copy.deepcopy(dict(schema=1,version=self.version,source_role=self.source_role,
-                                  run_identity=self.run_identity,producer_hashes=self.producer_hashes))
+                                  run_identity=self.run_identity,producer_hashes=self.producer_hashes,
+                                  visual_context=VisualEntryContext(self.version.perception_hash).snapshot()))
 
     def validate(self, state):
         if (state.get('schema')!=1 or state.get('version')!=self.version
                 or state.get('source_role')!=self.source_role or state.get('producer_hashes')!=self.producer_hashes):
             raise ValueError('collection source version/role/producer dependency mismatch')
+        VisualEntryContext(self.version.perception_hash).restore(state.get('visual_context'))
 
     def restore(self, state):
         self.validate(state)
@@ -205,7 +331,7 @@ class RetainedTap:
             capture_id = None if not self.persist else self.store.put_capture(raw,calibration,supervision=evidence)
             packet = function(raw)
         except BaseException as error:
-            self.store.put_failed_capture(raw,calibration,error)
+            _diagnostic(error,lambda:self.store.put_failed_capture(raw,calibration,error))
             raise
         self.metadata[raw.timestamp] = calibration
         if capture_id is not None:
@@ -234,13 +360,15 @@ class RetainedTap:
 class VisualSession:
     """Concrete Task6/7 producer chain. Factories load matching weights first."""
     def __init__(self, backend, tap, estimator, history):
+        if not isinstance(history,ContextHistory):
+            raise TypeError('ContextHistory required for version-specific visual context')
         self.backend,self.tap,self.estimator,self.history = backend,tap,estimator,history
+        history.bind_backend(backend)
 
     def from_raw(self, raw, *, query=False):
         packet = self.tap.query_act_and_features(raw) if query else self.tap.features_only(raw)
         safe = OnlineObservation(raw.timestamp,self.estimator.estimate(packet),raw.robot,raw.images)
-        self.history.append(safe)
-        return safe
+        return self.history.append(safe)
 
     def observe(self, *, query=False):
         return self.from_raw(self.backend.observe(),query=query)
@@ -425,7 +553,7 @@ def replay_perception(capture_ids, *, store, tap, estimator, controller=None):
     all model/replay work on its existing active clock.
     """
     retained = tap.snapshot()
-    history = HistoryBuffer()
+    history = ContextHistory(perception_identity(estimator))
     previous = None
     try:
         for key in capture_ids:
@@ -437,20 +565,37 @@ def replay_perception(capture_ids, *, store, tap, estimator, controller=None):
             tap.restore(packet_state)
             packet = tap.replay_features()
             safe = OnlineObservation(raw.timestamp,estimator.estimate(packet),raw.robot,raw.images)
-            history.append(safe)
+            safe = history.append(safe)
             if controller is not None:
                 if previous is None:
                     controller.reset(safe)
                 controller.observe(safe)
             previous = raw.timestamp
     finally:
-        tap.restore(retained)
+        primary = sys.exc_info()[1]
+        if primary is None:
+            tap.restore(retained)
+        else:
+            _diagnostic(primary,lambda:tap.restore(retained))
     if previous is None:
         raise ValueError('nonempty retained causal history required')
     return history
 
 
 def collect_root(root, programs, continuation_factory, backend, store) -> RootRecord:
+    # A valid paused preparation checkpoint is not consumed/closed by rejection.
+    from ..snapshots import EpisodeSnapshot
+    if type(root) is EpisodeSnapshot:
+        _require_counterfactual_root(root)
+    try:
+        return _collect_root(root,programs,continuation_factory,backend,store)
+    except BaseException:
+        retained = backend.participants.get('features')
+        _close_resources(getattr(retained,'tap',None),backend)
+        raise
+
+
+def _collect_root(root, programs, continuation_factory, backend, store) -> RootRecord:
     """Twelve fixed1s branches, only three unique versioned terminal continuations.
 
     No post-root ACT query during fixed branches. FiveHz features-only captures
@@ -561,12 +706,11 @@ def collect_root(root, programs, continuation_factory, backend, store) -> RootRe
             store.publish_cursor(root.root_id,dict(record=key,complete=len(branches)==12))
     except BaseException as error:
         failed = True
-        store.put('failures',dict(root_id=root.root_id,completed=tuple(branches),
+        _diagnostic(error,lambda:store.put('failures',dict(root_id=root.root_id,completed=tuple(branches),
                                   failed_branch=i,trace=trace,continuation=continuation,
                                   native_commands=np.asarray(backend._commands),
                                   native_reason=backend.termination_reason,
-                                  exception_type=type(error).__name__,reason=str(error)))
-        backend.close()
+                                  exception_type=type(error).__name__,reason=str(error))))
         raise
     finally:
         if not failed and not backend.closed:
@@ -696,7 +840,7 @@ def _attach(backend, store, config, controller, *, monitor=False, source_role='t
     if perception_identity(estimator)!=config.version.perception_hash:
         tap.close()
         raise ValueError('main frozen perception dependency mismatch')
-    history,offline = HistoryBuffer(),OfflineWindow()
+    history,offline = ContextHistory(config.version.perception_hash,backend=backend),OfflineWindow()
     offline.tick(backend.capture_truth())
     def supervision(raw):
         truth = backend.capture_camera_truth(raw.timestamp) if config.capture_visibility else backend.capture_truth()
@@ -735,7 +879,8 @@ def _root(backend, session, store, version, spec, proposal_hash, run_identity=No
                                time=offline.truth.timestamp))
     captures = tuple(session.tap.capture_ids)
     cache = PerceptionCache(version.perception_hash,inputs.history,association,
-                            bool(inputs.history.object_valid[0,-1].sum()==6),captures,offline.truth.timestamp)
+                            bool(inputs.history.object_valid[0,-1].sum()==6),captures,offline.truth.timestamp,
+                            session.history.entry.snapshot())
     return RootRecord(root_id,spec,version,snapshot_id,inputs,captures,RootSupervision(offline.truth,offline.snapshot(),association),
                       proposal_version=proposal_hash or 'bounded-geometric-v1',
                       perception_caches={version.perception_hash:cache},run_identity=run_identity)
@@ -855,28 +1000,31 @@ def _main(layout, backend_factory, store, config, controller, *, bootstrap,
             record = replace(record,deferred_records=())
     except BaseException as error:
         if trace.controls:
-            chunks.append(store.put('trajectories',trace))
+            _diagnostic(error,lambda:chunks.append(store.put('trajectories',trace)))
         captures = () if session is None else tuple(session.tap.capture_ids)
         record = replace(record,capture_ids=captures,chunk_ids=tuple(chunks),
                          result=EpisodeResult('infrastructure_error',str(error) or type(error).__name__))
-        _publish_main(record,store)
-        store.put('failures',dict(episode_id=episode_id,type=type(error).__name__,reason=str(error)))
+        _diagnostic(error,lambda:_publish_main(record,store))
+        _diagnostic(error,lambda:store.put('failures',dict(episode_id=episode_id,type=type(error).__name__,reason=str(error))))
         raise  # stop the batch, retain the ORIGINAL producer exception
     finally:
-        if backend is not None:
-            evidence = dict(origin=getattr(backend,'origin',None),native_reason=getattr(backend,'termination_reason',None),
-                            native_result=episode_result(backend,preparation=preparation),
-                            commands=None if not hasattr(backend,'_commands') else np.asarray(backend._commands),
-                            frames=getattr(backend,'frames',None),
-                            preparation_status=None if preparation is None else getattr(preparation,'status','native_bootstrap'),
-                            backend_closed=getattr(backend,'closed',None))
-            evidence_id = store.put('evidence',evidence)
-            record = replace(record,native_evidence_id=evidence_id)
-        final_key = _publish_main(record,store)
-        if tap is not None:
-            tap.close()
-        if backend is not None:
-            backend.close()
+        def finalize():
+            final_record = record
+            if backend is not None:
+                evidence = dict(origin=getattr(backend,'origin',None),native_reason=getattr(backend,'termination_reason',None),
+                                native_result=episode_result(backend,preparation=preparation),
+                                commands=None if not hasattr(backend,'_commands') else np.asarray(backend._commands),
+                                frames=getattr(backend,'frames',None),
+                                preparation_status=None if preparation is None else getattr(preparation,'status','native_bootstrap'),
+                                backend_closed=getattr(backend,'closed',None))
+                evidence_id = store.put('evidence',evidence)
+                final_record = replace(final_record,native_evidence_id=evidence_id)
+            return _publish_main(final_record,store)
+        try:
+            primary = sys.exc_info()[1]
+            final_key = finalize() if primary is None else _diagnostic(primary,finalize)
+        finally:
+            _close_resources(tap,backend)
     # Closed visual failures are never revived as deferred opportunities.
     if record.result.status in ('perception_invalid','model_invalid','infrastructure_error'):
         deferred = []
@@ -946,9 +1094,7 @@ def collect_phase(phase, controller, continuation_factory, backend_factory, stor
                                          target_count=root.spec.target_count,proposal=config.proposal)
             roots.append(collect_root(root,programs,continuation_factory,backend,store))
         finally:
-            if session is not None:
-                session.tap.tap.close()
-            backend.close()
+            _close_resources(None if session is None else session.tap.tap,backend)
         extra_counts[row.target_count] += 1
         report = coverage_report(roots,perception_hash=config.version.perception_hash,phase=phase)
     ready = report.ready and len(roots)>=data.teacher_starts[phase] and len(mains)==data.main_trajectories[phase]

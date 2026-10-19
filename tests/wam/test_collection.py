@@ -245,6 +245,303 @@ def test_reserved_phase_forecast_controls_backend_admission_before_any_reset(tmp
         assert opened==[] and not (store.directory/'cursors').exists()
 
 
+@pytest.fixture
+def resource_backend(tmp_path):
+    """Real native close method, real OS lease/FD; NO physics-success double."""
+    import tempfile
+    from types import SimpleNamespace
+    from wam_sweep.artifacts import RunLease, LeaseBusy
+    from wam_sweep.native import FrozenSweepBackend
+    from wam_sweep.actions import ActionCodec
+    from test_dataset_lineage import role_root
+    root = role_root()
+    lock = Path('.venv/task-5-native.lock')
+    lease = RunLease(lock).__enter__()
+    resource = tempfile.TemporaryFile(dir=tmp_path)
+    tap_resource = tempfile.TemporaryFile(dir=tmp_path)
+    backend = FrozenSweepBackend.__new__(FrozenSweepBackend)
+    backend.closed,backend._solver = False,lease
+    backend.env = SimpleNamespace(time=1.,close=resource.close)
+    backend.spec,backend.input_identity = root.spec,root.version.input_identity
+    backend.done,backend.termination_reason = True,'45-second shared episode timeout'
+    backend.guards,backend._commands,backend._queries = {},[],[]
+    backend.origin,backend.frames,backend.codec = .4,0,ActionCodec()
+    backend.participants = {'collection_identity':SimpleNamespace(run_identity=None)}
+    backend.reset_fingerprint = lambda:SimpleNamespace(sha256='settled-fixture')
+    backend.selected_preparation_plan = lambda:None
+    with pytest.raises(LeaseBusy):
+        with RunLease(lock): pass
+    try:
+        yield backend,resource,tap_resource,lock,root
+    finally:
+        backend.close()
+        resource.close()
+        tap_resource.close()
+
+
+def assert_resource_released(backend,resource,lock):
+    from wam_sweep.artifacts import RunLease
+    assert backend.closed and resource.closed
+    with RunLease(lock): pass  # actual reacquisition, not a close-call counter
+
+
+@pytest.mark.parametrize('site',['evidence','final-record','producer','capture'])
+def test_main_releases_native_lease_despite_rejected_diagnostics(resource_backend,tmp_path,monkeypatch,site):
+    from types import SimpleNamespace
+    from wam_sweep.artifacts import BudgetExceeded
+    from wam_sweep.data.store import EpisodeStore
+    from test_dataset_lineage import canonical_budget
+    module = collection_api()
+    backend,resource,tap_resource,lock,root = resource_backend
+    store = EpisodeStore(tmp_path,canonical_budget())
+    primary = ValueError('original pixel/producer contract')
+    rejection = BudgetExceeded('controlled evidence admission rejection')
+    rejected = []
+    original_put = store.put
+    def put(namespace,value):
+        reject = (site=='evidence' and namespace=='evidence' or
+                  site=='final-record' and namespace=='trajectories' and getattr(value,'native_evidence_id',None) is not None or
+                  site in ('producer','capture') and rejected)
+        if reject: raise rejection
+        return original_put(namespace,value)
+    monkeypatch.setattr(store,'put',put)
+    session = SimpleNamespace(tap=SimpleNamespace(tap=SimpleNamespace(close=tap_resource.close),capture_ids=[]),
+                              estimator=None,history=None)
+    monkeypatch.setattr(module,'_attach',lambda *a,**kw:session)
+    def prepare(*a,**kw):
+        if site in ('producer','capture'):
+            rejected.append(True)
+            if site=='capture':
+                from wam_sweep.contracts import CAMERA_VIEWS, OnlineObservation, RobotContext
+                robot = RobotContext([0.,0.,.1],0.,[0.,0.,0.],0.,'prepare',[0.,0.,0.],[0.,0.,0.],0.,False,False,0.,False)
+                raw = OnlineObservation(1.,(),robot,{v:np.zeros((320,320,3),np.uint8) for v in CAMERA_VIEWS})
+                backend.capture_metadata = lambda t:None
+                def producer(raw): raise primary
+                retained = module.RetainedTap(SimpleNamespace(features_only=producer),store,backend=backend)
+                retained.persist = False
+                monkeypatch.setattr(store,'put_failed_capture',lambda *a:(_ for _ in ()).throw(rejection))
+                retained.features_only(raw)
+            raise primary
+        return SimpleNamespace(ready=False,status='native_failure')
+    monkeypatch.setattr(module,'prepare_visually',prepare)
+    if site in ('producer','capture'):
+        # Even env.close failure must still release the solver lease and must
+        # NOT replace the producer exception (FrozenSweepBackend.close finally).
+        def bad_close():
+            resource.close()
+            raise RuntimeError('secondary environment cleanup failure')
+        backend.env.close = bad_close
+    config = module.CollectionConfig(root.version,lambda *a:None,'existing-token')
+    layout = SimpleNamespace(parent_id=root.spec.parent_id,seed=root.spec.seed,target_count=1,split='train',phase=0,
+                             physical_fingerprint='settled-fixture')
+    expected = primary if site in ('producer','capture') else rejection
+    try:
+        with pytest.raises(type(expected)) as caught:
+            module._main(layout,lambda spec:backend,store,config,module.ACTReferenceController(root.version),bootstrap=False)
+        assert caught.value is expected
+        if expected is primary:
+            names = []
+            tb = caught.value.__traceback__
+            while tb is not None:
+                names.append(tb.tb_frame.f_code.co_name); tb = tb.tb_next
+            assert ('producer' if site=='capture' else 'prepare') in names
+        assert_resource_released(backend,resource,lock)
+        assert tap_resource.closed
+        assert list((tmp_path/'trajectories').iterdir())  # claimed evidence retained
+    finally:
+        backend.env.close = resource.close  # failed RED cannot strand fixture cleanup
+
+
+@pytest.mark.parametrize('site',['root-record','cursor','snapshot-load','final-restore','producer','healthy'])
+def test_root_failure_cleanup_preserves_primary_but_healthy_root_stays_open(resource_backend,tmp_path,monkeypatch,site):
+    from types import SimpleNamespace
+    from wam_sweep.artifacts import BudgetExceeded, LeaseBusy, RunLease
+    from wam_sweep.data.store import EpisodeStore
+    from wam_sweep.snapshots import EpisodeSnapshot
+    from test_dataset_lineage import canonical_budget
+    module = collection_api()
+    backend,resource,tap_resource,lock,root = resource_backend
+    store = EpisodeStore(tmp_path,canonical_budget())
+    snapshot = EpisodeSnapshot('fixture',None,dict(context={'ready':True}),{},'sweep:frame-boundary')
+    def load(key):
+        if site=='snapshot-load': raise rejection
+        return snapshot
+    monkeypatch.setattr(store,'load_snapshot',load)
+    restored = []
+    def restore(*a,**kw):
+        backend.done=False; restored.append(1)
+        if site=='final-restore' and len(restored)==13: raise rejection
+    backend.restore = restore
+    backend.capture_truth = lambda:SimpleNamespace(raw=SimpleNamespace(fields={
+        'native_collected':np.zeros(6,bool),'native_valid':np.ones(6,bool)}))
+    retained = module.RetainedTap(SimpleNamespace(close=tap_resource.close),store,backend=backend)
+    backend.participants['features'] = retained
+    monkeypatch.setattr(module,'_session',lambda backend:SimpleNamespace(tap=retained))
+    primary = ValueError('original branch producer exception')
+    rejection = BudgetExceeded('all forensic writes rejected')
+    failed = []
+    original_put,original_cursor = store.put,store.publish_cursor
+    def put(namespace,value):
+        if (site=='root-record' and namespace=='roots' or failed
+                or namespace=='failures' and site!='healthy'): raise rejection
+        return original_put(namespace,value)
+    def cursor(*args):
+        if site=='cursor': raise rejection
+        return original_cursor(*args)
+    monkeypatch.setattr(store,'put',put)
+    monkeypatch.setattr(store,'publish_cursor',cursor)
+    def execute(*args):
+        if site=='producer':
+            failed.append(True)
+            raise primary
+        backend.done=True
+    monkeypatch.setattr(module,'_execute',execute)  # only the physical step is outside this resource test
+    if site=='producer':
+        def bad_close():
+            resource.close()
+            raise RuntimeError('secondary branch cleanup failure')
+        backend.env.close = bad_close
+    factory = module.ContinuationFactory(root.version,module.ACTReferenceController,lambda *a:None)
+    programs = module.generate_programs(root.inputs,seed=3,target_count=1)
+    try:
+        if site=='healthy':
+            result = module.collect_root(root,programs,factory,backend,store)
+            assert len(result.branches)==12 and len(restored)==13
+            assert not backend.closed and not resource.closed and not tap_resource.closed
+            with pytest.raises(LeaseBusy):
+                with RunLease(lock): pass
+        else:
+            expected = primary if site=='producer' else rejection
+            with pytest.raises(type(expected)) as caught:
+                module.collect_root(root,programs,factory,backend,store)
+            assert caught.value is expected
+            assert_resource_released(backend,resource,lock)
+            assert tap_resource.closed
+    finally:
+        backend.env.close = resource.close
+
+
+def visual_context_fixture(tmp_path):
+    """Explicit fixed belief packets, actual store/history; not learned models."""
+    import copy
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from wam_sweep.contracts import OnlineObservation
+    from wam_sweep.native import CaptureMetadata, CameraCalibration
+    from wam_sweep.data.store import EpisodeStore
+    from test_dataset_lineage import canonical_budget, association_fixture
+    source,_ = association_fixture()
+    template = source.snapshot()['observations'][-1]
+    frames = [replace(template,timestamp=t,objects=(),robot=replace(template.robot,
+        episode_time=t-.4,residual=[.01,.02,.03],residual_rate=[.04,.05,.06],
+        visual_entry_age=40.+t,visual_entry_valid=True)) for t in (1.,1.2,1.4,1.6,1.8,2.,2.2)]
+    store = EpisodeStore(tmp_path,canonical_budget())
+    ids = []
+    metadata = {}
+    for raw in frames:
+        calibration = CaptureMetadata(raw.timestamp,{v:CameraCalibration(np.eye(3),np.eye(4)) for v in raw.images},'fixture')
+        metadata[raw.timestamp] = calibration
+        ids.append(store.put_capture(raw,calibration))
+    class FixedBeliefs:
+        def __init__(self,event): self.event = event
+        def checkpoint(self): return {'manifest':{'explicit-fixed-belief-fixture':self.event}}
+        def estimate(self,packet):
+            t = packet.timestamp
+            if t==1.4: return ()  # an occlusion must not reset an earlier event
+            collected = self.event is not None and (t==self.event or t==2.)
+            p = [.25,.25,.5] if collected else [.5,.01,.49]
+            return tuple(replace(b,state_probabilities=p) for b in template.objects)
+    class PacketTap:
+        def __init__(self): self.state = {'observation':None}; self.forwards = 0
+        def snapshot(self): return copy.deepcopy(self.state)
+        def restore(self,state): self.state = copy.deepcopy(state)
+        def features_only(self,raw): self.forwards += 1; return raw
+        def replay_features(self): return self.features_only(self.state['observation'])
+        def capture_metadata(self,timestamp): return metadata[timestamp]
+    return store,PacketTap(),frames,tuple(ids),FixedBeliefs
+
+
+@pytest.mark.parametrize('event,ages,valid',[
+    (1.2,[0.,0.,.2,.4,.6,.8,1.],[False,True,True,True,True,True,True]),
+    (1.6,[0.,0.,0.,0.,.2,.4,.6],[False,False,False,True,True,True,True]),
+    (None,[0.]*7,[False]*7)])
+def test_shared_visual_entry_live_replay_and_controller_use_new_beliefs(tmp_path,event,ages,valid):
+    from dataclasses import fields
+    from types import SimpleNamespace
+    module = collection_api()
+    assert hasattr(module,'ContextHistory'), 'shared versioned visual-entry history missing'
+    store,tap,raws,ids,estimator_type = visual_context_fixture(tmp_path)
+    estimator = estimator_type(event)
+    perception = module.perception_identity(estimator)
+    history = module.ContextHistory(perception)
+    updated = []
+    backend = SimpleNamespace(update_visual_entry=lambda age,valid:updated.append((age,valid)),
+                              origin=.4,done=False,termination_reason='',native_first_entry=None)
+    session = module.VisualSession(backend,tap,estimator,history)
+    live = [session.from_raw(raw) for raw in raws]
+    assert tap.forwards==7
+    class Observer:
+        def __init__(self): self.seen=[]
+        def reset(self,safe): self.initial=safe
+        def observe(self,safe): self.seen.append(safe)
+    controller = Observer()
+    rebuilt = module.replay_perception(ids,store=store,tap=tap,estimator=estimator_type(event),controller=controller)
+    replayed = rebuilt.snapshot()['observations']
+    assert tap.forwards==14 and len(controller.seen)==7
+    for stream in (live,replayed,controller.seen):
+        assert [s.robot.visual_entry_age for s in stream]==pytest.approx(ages)
+        assert [s.robot.visual_entry_valid for s in stream]==valid
+        for old,new in zip(raws,stream):
+            for f in fields(old.robot):
+                if f.name not in ('visual_entry_age','visual_entry_valid'):
+                    np.testing.assert_array_equal(getattr(old.robot,f.name),getattr(new.robot,f.name))
+    assert updated[-1]==pytest.approx((ages[-1],valid[-1]))
+    assert (backend.origin,backend.done,backend.termination_reason,backend.native_first_entry)==(.4,False,'',None)
+    restored = module.ContextHistory(perception)
+    restored.restore(history.snapshot())
+    from dataclasses import replace
+    next_raw = replace(raws[-1],timestamp=2.4,objects=())
+    expected = 1.2 if event==1.2 else .8 if event==1.6 else 0.
+    assert restored.append(next_raw).robot.visual_entry_age==pytest.approx(expected)
+    poisoned = history.snapshot()
+    poisoned['visual_context']['threshold']=.6
+    with pytest.raises(ValueError,match='visual.*context'):
+        restored.restore(poisoned)
+    with pytest.raises(ValueError,match='visual.*context'):
+        module.ContextHistory('different-perception').restore(history.snapshot())
+
+
+def test_invalid_estimate_does_not_start_visual_entry(tmp_path):
+    from dataclasses import replace
+    module = collection_api()
+    assert hasattr(module,'ContextHistory'), 'shared visual-entry history missing'
+    _,_,raws,_,estimator_type = visual_context_fixture(tmp_path)
+    history = module.ContextHistory('fixed-fixture')
+    invalid = tuple(replace(b,valid=False) for b in estimator_type(1.).estimate(raws[0]))
+    safe = history.append(replace(raws[0],objects=invalid))
+    assert not safe.robot.visual_entry_valid and safe.robot.visual_entry_age==0.
+
+
+def test_replay_cleanup_cannot_replace_original_estimator_exception(tmp_path,monkeypatch):
+    from wam_sweep.artifacts import BudgetExceeded
+    module = collection_api()
+    store,tap,_,ids,estimator_type = visual_context_fixture(tmp_path)
+    estimator = estimator_type(None)
+    primary = ValueError('original replay estimator fault')
+    def estimate(packet): raise primary
+    estimator.estimate = estimate
+    original_restore = tap.restore
+    restored = []
+    def restore(state):
+        restored.append(1)
+        if len(restored)==2: raise BudgetExceeded('secondary tap restoration failure')
+        original_restore(state)
+    monkeypatch.setattr(tap,'restore',restore)
+    with pytest.raises(ValueError) as caught:
+        module.replay_perception(ids,store=store,tap=tap,estimator=estimator)
+    assert caught.value is primary
+
+
 @pytest.fixture(scope='module')
 def portable_directory(tmp_path_factory):
     data_api()
@@ -295,7 +592,7 @@ from wam_sweep.config import WAMConfig
 from wam_sweep.contracts import EpisodeSpec
 from wam_sweep.data.store import EpisodeStore
 from wam_sweep.data.collection import (RetainedTap, OfflineWindow, VisualSession, RootRecord,
-    SafeInputs, RootSupervision, CollectionIdentity, perception_identity, ContinuationFactory, generate_programs, collect_root, ACTReferenceController)
+    SafeInputs, RootSupervision, CollectionIdentity, ContextHistory, perception_identity, ContinuationFactory, generate_programs, collect_root, ACTReferenceController)
 from wam_sweep.data.datasets import associate_root, PerceptionCache
 from wam_sweep.history import HistoryBuffer
 from wam_sweep.inputs import verify_inputs, assert_native_origin
@@ -326,14 +623,16 @@ try:
     centers = [[-.05,-.14],[-.08,-.02],[.04,.08],[-.15,.18],[.12,.23],[-.12,-.27]]
     def measurement(out):
         def t(a): return torch.tensor(a,dtype=torch.float32,device='mps')
+        state = np.tile([20.,-20.,-20.],(1,6,1))
+        if out.timestamp>=.8-1e-7: state[0,0]=[-20.,-20.,20.]
         return DetectionOutput(out.timestamp,t([centers]),t(np.zeros((1,6,2))),
             t(np.full((1,6,2),.008)),t(np.tile([0.,1.],(1,6,1))),t(np.zeros((1,6,1))),
             t(np.tile([100.,-100.],(1,6,1))),t(np.full((1,6,1),20.)),
-            t(np.tile([20.,-20.,-20.],(1,6,1))),t(np.tile(np.eye(2)*1e-6,(1,6,1,1))),
+            t(state),t(np.tile(np.eye(2)*1e-6,(1,6,1,1))),
             t(np.eye(6,16)[None]))
     detector.forward = measurement
     estimator = VisualStateEstimator(bev,detector,identity,tap.capture_metadata)
-    history = HistoryBuffer()
+    history = ContextHistory(perception_identity(estimator),backend=backend)
     retained = RetainedTap(tap,store,backend=backend)
     from wam_sweep.contracts import ModelVersion
     from wam_sweep.inputs import digest_json, file_hash
@@ -372,6 +671,8 @@ try:
         checkpoint_id = store.put('models',estimator.checkpoint())
         paused_history = history.batch()
         paused_monitor = backend.participants['visual_preparation'].snapshot()
+        paused_context = history.entry.snapshot()
+        assert abs(paused_context['first_entry']-.8)<1e-7
         wrist = tap.capture_metadata(history.snapshot()['observations'][-1].timestamp)
         ready = prepare_visually(backend,estimator,tap=retained,history=history,resume=True)
         assert ready.ready, (ready.status,ready.visual_reason,ready.termination_reason)
@@ -400,7 +701,7 @@ try:
         key = store.put('evidence',dict(pid=os.getpid(),snapshot_id=snapshot_id,checkpoint_id=checkpoint_id,
             ready_snapshot_id=ready_snapshot_id,ready_commands=np.asarray(ready_commands),
             ready_integration=ready_future.physics.integration,ready_time=float(backend.env.time),
-            history=paused_history,monitor=paused_monitor,wrist=wrist,expected=dict(
+            history=paused_history,visual_context=paused_context,monitor=paused_monitor,wrist=wrist,expected=dict(
                 integration=expected.physics.integration,commands=expected.state['commands'],
                 low_steps=expected.state['low_steps'],origin=expected.state['origin'],
                 reason=expected.state['reason'],done=expected.state['done'])))
@@ -416,6 +717,7 @@ try:
         for name in ('objects','brush','context','object_valid','history_valid'):
             torch.testing.assert_close(getattr(history.batch(),name),getattr(saved['history'],name),rtol=0,atol=0)
         assert monitor.snapshot() == saved['monitor']
+        assert history.entry.snapshot() == saved['visual_context']
         actual_wrist = tap.capture_metadata(saved['wrist'].timestamp)
         np.testing.assert_array_equal(actual_wrist.cameras['wrist'].camera_to_world,
                                       saved['wrist'].cameras['wrist'].camera_to_world)
@@ -451,6 +753,8 @@ try:
             fresh_process=True,no_replan=True,commands_equal=True,state_equal=True,
             history_equal=True,calibration_equal=True,monitor_equal=True,termination_equal=True,
             replayed_backbone=replay_counts['backbone'],replayed_act=replay_counts['act'],
+            visual_context_restored=True,visual_context_protocol=history.entry.protocol,
+            visual_context_first_entry=history.entry.first_entry,
             fixture='fixed detector measurements; no trained perception claim',
             commands=len(actual.state['commands']),absolute_time=float(backend.env.time),
             episode_age=backend.episode_time)).encode(),budget)
@@ -467,23 +771,43 @@ try:
             snapshot_id = saved['ready_snapshot_id']
             inputs = SafeInputs(history.batch(),backend.reference_preview(),backend.codec.snapshot())
             cache = PerceptionCache(version.perception_hash,history.batch(),association,True,
-                                    tuple(retained.capture_ids),raw.timestamp)
+                                    tuple(retained.capture_ids),raw.timestamp,history.entry.snapshot())
             root_record = RootRecord('real-branch-fixture',spec,version,snapshot_id,inputs,tuple(retained.capture_ids),
                                      RootSupervision(offline.truth,offline.snapshot(),association),
                                      perception_caches={version.perception_hash:cache})
             synchronizations = []
+            continuation_observations = []
             class ACTReference(ACTReferenceController):
+                def observe(self,safe):
+                    super().observe(safe)
+                    # THIS frozen continuation sees its own first event at2.0,
+                    # never the root producer's0.8 clock carried by stored RGB.
+                    want_valid = safe.timestamp>=2.-1e-7
+                    want_age = safe.timestamp-2. if want_valid else 0.
+                    assert safe.robot.visual_entry_valid==want_valid
+                    assert abs(safe.robot.visual_entry_age-want_age)<1e-7
+                    continuation_observations.append((safe.timestamp,safe.robot.visual_entry_age))
                 def synchronize(self,*,codec_state,executed):
                     super().synchronize(codec_state=codec_state,executed=executed)
                     assert all(not hasattr(e,'commands') and not hasattr(e,'truth') for e in executed)
                     synchronizations.append(len(executed))
-            def load_estimator(version,metadata_provider):
+            checkpoint = store.get('models',saved['checkpoint_id'])
+            def continuation_measurement(out):
+                value = measurement(out)
+                logits = torch.tensor(np.tile([20.,-20.,-20.],(1,6,1)),dtype=torch.float32,device='mps')
+                if out.timestamp>=2.-1e-7: logits[0,0]=torch.tensor([-20.,-20.,20.],device='mps')
+                return replace(value,state_logits=logits)
+            def load_estimator(requested,metadata_provider):
                 b,d = BEVEncoder().to('mps'),SixQueryDetector().to('mps')
-                d.forward = measurement
-                e = VisualStateEstimator(b,d,identity,metadata_provider)
-                e.load_checkpoint(store.get('models',saved['checkpoint_id']))
-                return e
-            factory = ContinuationFactory(version,lambda version:ACTReference(version),load_estimator)
+                b.load_state_dict(checkpoint['weights']['bev'])
+                d.load_state_dict(checkpoint['weights']['detector'])
+                with torch.no_grad(): next(b.parameters()).add_(.00002)
+                d.forward = continuation_measurement
+                return VisualStateEstimator(b,d,identity,metadata_provider)
+            frozen_continuation = replace(version,perception_hash=perception_identity(load_estimator(version,tap.capture_metadata)),
+                continuation_hash=digest_json(dict(source=version.continuation_hash,fixture='different-frozen-perception-entry2.0-v1')))
+            assert frozen_continuation.perception_hash!=version.perception_hash
+            factory = ContinuationFactory(frozen_continuation,lambda v:ACTReference(v),load_estimator)
             collected = collect_root(store.load_snapshot(snapshot_id),generate_programs(inputs,seed=83,target_count=1),factory,backend,store)
             assert len(collected.branches)==12
             assert sum(b.terminal_result is not None for b in collected.branches)==3
@@ -503,8 +827,10 @@ try:
                     assert event.codec_state['program_anchor']==root_record.inputs.codec_state['program_anchor']
                     different_tcp |= event.reference_valid and not np.array_equal(measured,event.nominal_reference)
             assert different_tcp  # this probe could detect substituting nominal target for TCP
-            assert all(b.continuation_version==version for b in collected.branches if b.selection is not None)
+            assert all(b.continuation_version==frozen_continuation for b in collected.branches if b.selection is not None)
             assert synchronizations.count(25)==3  # full actual residual prefix synchronization
+            assert sum(abs(t-44.2)<1e-7 and abs(age-42.2)<1e-7 for t,age in continuation_observations)==3
+            assert abs(history.entry.first_entry-.8)<1e-7  # healthy ROOT version restored, still open
             assert not backend.done and backend.origin==actual.state['origin']
             # A distinct CURRENT perception version replays retained causal RGB
             # with the same backbone and recomputes OFFLINE slot correspondence.
@@ -526,9 +852,11 @@ try:
             assert cache2.association.perception_hash==current_version.perception_hash
             assert cache2.association is not collected.association
             assert cache2.capture_ids==root_record.capture_ids and cache2.root_time==root_record.root_truth.timestamp
+            assert abs(float(cache2.history.context[0,-1,13])-42.4)<1e-5
+            assert cache2.context_state['protocol']==history.entry.protocol
             assert len(TeacherDataset([updated],perception_hash=current_version.perception_hash))==sum(b.terminal_result.success for b in collected.branches if b.terminal_result is not None)
             assert len(TerminalDataset([updated],perception_hash=current_version.perception_hash,
-                                      continuation_hash=version.continuation_hash))==3
+                                      continuation_hash=frozen_continuation.continuation_hash))==3
             evidence = dict(branches=len(collected.branches),terminal_labels=3,
                 steps=[len(b.trace.controls) for b in collected.branches],
                 selected=[b.index for b in collected.branches if b.selection is not None],
@@ -537,7 +865,10 @@ try:
                 no_future_act=True,actual_tcp_codec=True,restored_origin_unchanged=True,
                 current_perception_replayed=True,current_mapping_recomputed=True,
                 old_perception_hash=version.perception_hash,current_perception_hash=current_version.perception_hash,
-                continuation_hash=version.continuation_hash,
+                continuation_perception_hash=frozen_continuation.perception_hash,
+                continuation_hash=frozen_continuation.continuation_hash,
+                root_visual_first_entry=history.entry.first_entry,continuation_visual_first_entry=2.,
+                continuation_observe_endpoint_age=42.2,current_root_visual_age=float(cache2.history.context[0,-1,13]),
                 probabilities=[b.selection.probability for b in collected.branches if b.selection is not None])
             atomic_checkpoint(Path(directory)/'branch-evidence.json',json.dumps(evidence).encode(),budget)
 finally:

@@ -125,6 +125,11 @@ def role_root(*, success=True, role='teacher', current_valid=True, continuation_
     from wam_sweep.data.collection import SafeInputs, RootRecord, RootSupervision, BranchRecord, ExecutionTrace, Selection
     module = lineage_api()
     history,truth = association_fixture()
+    from wam_sweep.data.collection import ContextHistory
+    context_history = ContextHistory('p1')
+    for observation in history.snapshot()['observations']:
+        context_history.append(observation)
+    history = context_history
     association = module.associate_root(history,truth(1.),perception_hash='p1',label_hash='l1')
     inputs = SafeInputs(history.batch(),ReferencePreview(np.tile([.1,0.,.01,0.],(25,1)),
                         1.+np.arange(25)*.04,np.ones(25),1.,'known'),ActionCodec().snapshot())
@@ -136,7 +141,7 @@ def role_root(*, success=True, role='teacher', current_valid=True, continuation_
     branch = BranchRecord(0,CandidateProgram(np.zeros((5,3))),trace,result,
                           selection=Selection(0,'reference',1.),
                           continuation_version=version,terminal_result=result,terminal_count=n)
-    cache = module.PerceptionCache('p1',inputs.history,association,current_valid,('capture',),1.)
+    cache = module.PerceptionCache('p1',inputs.history,association,current_valid,('capture',),1.,history.entry.snapshot())
     seed = int(hashlib.sha256(parent.encode()).hexdigest()[:8],16)
     return RootRecord(parent+str(n),EpisodeSpec(parent,seed,n,'train',0,'act',0),version,'private',inputs,
                       ('capture',),RootSupervision(truth(1.),{},association),(branch,),role,perception_caches={'p1':cache})
@@ -174,6 +179,26 @@ def test_terminal_versions_and_current_perception_coverage_are_not_mixed():
         teacher[0]
 
 
+def test_requested_teacher_phase_cannot_return_an_undercovered_other_phase():
+    from dataclasses import replace
+    module = lineage_api()
+    qualifying = [role_root(parent=f'phase0-{i}',n=n) for n in range(1,7) for i in range(20)]
+    other = role_root(parent='phase1-only')
+    other = replace(other,spec=replace(other.spec,phase=1))
+    records = [other,*qualifying]  # put the undercovered positive FIRST
+    phase0 = module.TeacherDataset(records,perception_hash='p1',phase=0)
+    assert phase0.coverage.ready and len(phase0)==120
+    assert {phase0[i]['audit']['root_id'] for i in range(len(phase0))} == {r.root_id for r in qualifying}
+    phase1 = module.TeacherDataset(records,perception_hash='p1',phase=1)
+    assert len(phase1)==1 and not phase1.coverage.ready
+    with pytest.raises(ValueError,match='not_ready'):
+        phase1[0]
+    mixed = module.TeacherDataset(records,perception_hash='p1',phase=None)
+    assert len(mixed)==121 and not mixed.coverage.ready
+    with pytest.raises(ValueError,match='not_ready'):
+        mixed[1]
+
+
 def test_new_perception_hash_cannot_reuse_old_offline_association():
     from dataclasses import replace
     module = lineage_api()
@@ -184,12 +209,34 @@ def test_new_perception_hash_cannot_reuse_old_offline_association():
         module.TeacherDataset([root],perception_hash='p2')
 
 
+def test_current_cache_rebuilds_its_own_visual_clock_from_poisoned_raw_context(tmp_path):
+    from dataclasses import replace
+    from test_collection import visual_context_fixture, collection_api
+    module = lineage_api()
+    collection = collection_api()
+    store,tap,raws,ids,estimator_type = visual_context_fixture(tmp_path)
+    root = role_root()
+    _,truth = association_fixture()
+    root = replace(root,capture_ids=ids,supervision=replace(root.supervision,truth=truth(2.2)))
+    versions = []
+    for event,expected in ((1.2,1.),(1.6,.6),(None,0.)):
+        version = replace(root.version,perception_hash=collection.perception_identity(estimator_type(event)))
+        updated = module.with_current_perception(root,version,store=store,tap=tap,
+            estimator_factory=lambda v,m:estimator_type(event))
+        cache = updated.perception_caches[version.perception_hash]
+        assert float(cache.history.context[0,-1,13])==pytest.approx(expected)
+        assert bool(cache.history.context[0,-1,14])==(event is not None)
+        versions.append(version.perception_hash)
+    assert len(set(versions))==3 and tap.forwards==21
+
+
 def test_updated_current_cache_survives_duplicate_root_progress_versions():
     from dataclasses import replace
     module = lineage_api()
     root = role_root()
     cache = root.perception_caches['p1']
-    current = replace(cache,perception_hash='p2',audit=replace(cache.audit,perception_hash='p2'))
+    current = replace(cache,perception_hash='p2',audit=replace(cache.audit,perception_hash='p2'),
+                      context_state={**cache.context_state,'perception_hash':'p2'})
     updated = replace(root,perception_caches={**root.perception_caches,'p2':current})
     assert len(module.TeacherDataset([root,updated],perception_hash='p2'))==1
 

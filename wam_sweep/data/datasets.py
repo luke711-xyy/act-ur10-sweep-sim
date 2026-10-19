@@ -141,6 +141,7 @@ class PerceptionCache:
     valid: bool
     capture_ids: tuple[str, ...]
     root_time: float
+    context_state: dict | None = None
 
     @property
     def association(self):
@@ -175,10 +176,11 @@ def with_current_perception(root, version, *, estimator_factory, store, tap):
                                   label_hash=root.association.label_hash)
     valid = bool(history.batch().object_valid[0,-1].sum()==6)
     cache = PerceptionCache(version.perception_hash,history.batch(),association,valid,
-                            root.capture_ids,root.root_truth.timestamp)
+                            root.capture_ids,root.root_truth.timestamp,history.entry.snapshot())
     # Cache lineage includes raw-frame sequence and complete label identity.
     lineage = digest_json(dict(root_id=root.root_id,perception_hash=version.perception_hash,
-                               label_hash=association.label_hash,capture_ids=root.capture_ids))
+                               label_hash=association.label_hash,capture_ids=root.capture_ids,
+                               visual_context=cache.context_state))
     key = store.put('perception',dict(lineage=lineage,cache=cache))
     store.publish_cursor('perception-'+lineage,dict(record=key))
     return replace(root,perception_caches={**root.perception_caches,version.perception_hash:cache})
@@ -192,6 +194,11 @@ def _cache(root, perception_hash):
             or cache.capture_ids!=root.capture_ids or abs(cache.root_time-root.root_truth.timestamp)>1e-7
             or cache.association.label_hash!=root.association.label_hash):
         raise ValueError('stale/mismatched current-perception cache lineage')
+    from .collection import VisualEntryContext
+    context = VisualEntryContext(perception_hash)
+    context.restore(cache.context_state)
+    if context.timestamp is None or abs(context.timestamp-cache.root_time)>1e-7:
+        raise ValueError('stale current-perception visual context endpoint')
     return cache
 
 
@@ -348,6 +355,8 @@ class TeacherDataset:
         self.coverage = coverage_report(records,perception_hash=perception_hash,phase=phase)
         self.rows = []
         for root in records:
+            if phase is not None and root.spec.phase!=phase:
+                continue
             cache = _cache(root,perception_hash)
             if root.source_role!='teacher' or cache is None or not cache.valid:
                 continue
