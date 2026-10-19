@@ -189,6 +189,87 @@ def test_hold_does_not_use_future_placeholder_as_actual_command():
     assert (a.valid == 1).all()  # hold is a physical prediction, not an invalid future.
 
 
+def inactive_root_fixture(device):
+    h, references, programs, states = fixture(1)
+    # Identical history/goal/program/codec: ONLY the known root-held pose differs.
+    h = HistoryBatch(*(getattr(h, key).repeat((2,)+(1,)*(getattr(h, key).ndim-1)).to(device)
+                       for key in h.__dataclass_fields__))
+    refs = []
+    for pose in ([.125, -.25, .375, np.pi/2], [-.375, .5, .625, -np.pi/2]):
+        targets = np.tile([.9, -.8, .2, .3], (25, 1))
+        targets[0] = pose
+        refs.append(replace(references[0], targets=targets, valid=np.zeros(25)))
+    return h, refs, programs*2, [copy.deepcopy(states[0]) for _ in range(2)]
+
+
+@pytest.mark.parametrize('device', ['cpu', pytest.param('mps', marks=pytest.mark.skipif(
+    not torch.backends.mps.is_available(), reason='MPS unavailable'))])
+def test_inactive_root_reference_features_preserve_only_known_pose(device):
+    from wam_sweep.models.graph import references
+    h, refs, _, _ = inactive_root_fixture(device)
+    _, features = references(refs, 2, h.objects.device)
+    expected = torch.tensor([[.125, -.25, .375, 1., 0., 0.],
+                             [-.375, .5, .625, -1., 0., 0.]], device=device)
+    assert features.shape == (2, 25, 6) and features.dtype == torch.float32
+    torch.testing.assert_close(features[:, 0], expected, rtol=0, atol=1e-6)
+    assert (features[:, 1:] == 0).all()
+    assert (features[..., 5] == 0).all()  # A known hold is NOT active ACT.
+    assert all(not ref.valid.any() for ref in refs)
+
+
+@pytest.mark.parametrize('device', ['cpu', pytest.param('mps', marks=pytest.mark.skipif(
+    not torch.backends.mps.is_available(), reason='MPS unavailable'))])
+def test_inactive_root_scoring_parity_without_future_placeholder_leak(device, monkeypatch):
+    h, refs, programs, states = inactive_root_fixture(device)
+    before = copy.deepcopy(states)
+    world = api().GraphGRU().to(device)
+    full = api().TaskQualityHead(world, allow_uncalibrated=True).to(device).eval()
+    no = api().HistoryOnlyQualityHead(world.encoder, allow_uncalibrated=True).to(device).eval()
+    goal = torch.tensor([3, 3], device=device)
+    seen = {'full': [], 'no': []}
+    handles = [head.control_encoder.register_forward_pre_hook(
+        lambda module, args, name=name: seen[name].append(args[0].detach().clone()))
+        for name, head in [('full', full), ('no', no)]]
+    poisoned = []
+    for ref in refs:
+        targets = ref.targets.copy()
+        targets[1:] = [50., -50., 30., 2.]
+        poisoned.append(replace(ref, targets=targets))
+    def forbidden(*args, **kwargs):
+        raise AssertionError('inactive-root no-prediction scorer invoked GraphGRU')
+    try:
+        with torch.no_grad():
+            # Full scorer uses its own frozen future, never a fabricated future.
+            original = world.rollout(h, refs, programs, codec_state=states)
+            full_score = full.evaluate_task(h, goal, programs, original, reference=refs, codec_state=states)
+            with monkeypatch.context() as patch:
+                patch.setattr(world, 'rollout', forbidden)
+                no_score = no.evaluate_task(h, goal, programs, reference=refs, codec_state=states)
+                # This must distinguish root-held poses with everything else fixed.
+                assert (no_score.success_logit[0]-no_score.success_logit[1]).abs().max() > 1e-6
+                no_poisoned = no.evaluate_task(h, goal, programs, reference=poisoned, codec_state=states)
+                torch.testing.assert_close(no_score.success_logit, no_poisoned.success_logit)
+                torch.testing.assert_close(no_score.final_count_logits, no_poisoned.final_count_logits)
+            changed = world.rollout(h, poisoned, programs, codec_state=states)
+            full_poisoned = full.evaluate_task(h, goal, programs, changed, reference=poisoned, codec_state=states)
+            torch.testing.assert_close(original.object_mean, changed.object_mean)
+            torch.testing.assert_close(original.brush, changed.brush)
+            torch.testing.assert_close(full_score.success_logit, full_poisoned.success_logit)
+            torch.testing.assert_close(full_score.final_count_logits, full_poisoned.final_count_logits)
+        assert seen['full'][0].shape == seen['no'][0].shape == (2, 171)
+        torch.testing.assert_close(seen['full'][0], seen['no'][0])
+        expected = torch.tensor([[.125, -.25, .375, 1., 0., 0.],
+                                 [-.375, .5, .625, -1., 0., 0.]], device=device)
+        torch.testing.assert_close(seen['full'][0][:, 21:27], expected, rtol=0, atol=1e-6)
+        assert (seen['full'][0][:, 27:] == 0).all()
+        assert states == before
+        print(f'INACTIVE_ROOT {device}: real full/no forward; shared171 root pose/inactive0; '
+              'no world call; later-placeholder immunity; independent two-row root conditioning')
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
 def test_quality_permutation_freeze_gradients_and_matched_ablation(monkeypatch):
     h, r, c, s = fixture()
     world = api().GraphGRU()

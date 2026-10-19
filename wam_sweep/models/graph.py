@@ -44,8 +44,11 @@ def references(value, batch, device):
     target = torch.tensor(np.stack([r.targets for r in result]), dtype=torch.float32, device=device)
     valid = torch.tensor(np.stack([r.valid for r in result]), dtype=torch.float32, device=device)
     features = torch.cat((target[..., :3], target[..., 3:4].sin(), target[..., 3:4].cos()), -1)
-    # Invalid preview rows are placeholders, not known future executed controls.
-    features = torch.cat((features * valid[..., None], valid[..., None]), -1)
+    # The root-held pose is known even when inactive; later invalid rows are
+    # unknown future placeholders. Pose availability must not activate ACT.
+    pose_known = valid.clone()
+    pose_known[:, 0] = 1
+    features = torch.cat((features * pose_known[..., None], valid[..., None]), -1)
     return result, features
 
 
