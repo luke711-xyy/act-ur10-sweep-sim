@@ -87,11 +87,15 @@ button:disabled{opacity:.55;cursor:not-allowed}button:focus-visible,select:focus
 <input id="frameSlider" type="range" min="0" max="0" value="0" oninput="seekFrame(this.value)"><div id="episodeMeta" class="meta">No episode loaded.</div>
 </section>
 <section class="panel telemetry"><div class="telemetry-head"><div><h2>Frame inspector <span class="muted">· synchronized observation and action traces</span></h2><div class="hint">拖动上方帧滑块，图线游标、五路画面和右侧数值会同步更新。</div></div><label>Signal group<select id="signalGroup" onchange="renderTelemetry(Number($('frameSlider').value||0))"><option value="tcp">TCP pose</option><option value="action">ACT label</option><option value="zcontrol">Policy / applied Z</option><option value="wrench">6D wrench</option><option value="joints">UR10 joints</option><option value="counts">Counts & contact</option></select></label></div><div class="telemetry-layout"><div class="telemetry-chart"><svg viewBox="0 0 900 260" role="img" aria-label="Selected episode signals"><g id="telemetryGrid"></g><g id="telemetryPaths"></g><line id="telemetryCursor" class="fz-cursor" x1="42" y1="18" x2="42" y2="224"></line><text id="telemetryEmpty" class="signal-empty" x="450" y="126" text-anchor="middle">Select an episode with detailed signals</text></svg><div id="telemetryLegend" class="telemetry-legend"></div><div class="axis"><span id="telemetryStart">0 s</span><span id="telemetryRange">—</span><span id="telemetryEnd">—</span></div></div><div class="frame-detail"><table class="frame-table"><tbody id="frameData"><tr><th>Frame</th><td>—</td></tr></tbody></table></div></div></section>
-<section class="panel training"><h2>Training <span class="muted">· local ACT</span></h2>
+<section class="panel training"><h2>Training <span class="muted">· local policy</span></h2>
+<label>Policy<select id="trainPolicy" onchange="selectTrainPolicy()"><option value="act">ACT</option><option value="diffusion">Diffusion Policy</option></select></label>
+<label>Resume checkpoint (optional)<input id="trainResume" placeholder="DP: pilot/step_*.pt or full/step_*.pt"></label>
 <label>Dataset directory<input id="trainDataset" value="runs/act_dataset"></label><label>Output directory<input id="trainOut" value="runs/act_model"></label><label>Steps (optional)<input id="trainSteps" type="number" min="1" placeholder="use config default"></label>
 <div class="row"><button class="primary" onclick="startTraining()">Start training job</button><button class="danger" onclick="stopLatest('train')">Stop</button></div><div id="trainJob" class="job">No training job.</div>
 </section>
 <section class="panel inference"><h2>Inference <span class="muted">· MuJoCo rollout</span></h2>
+<label>Policy<select id="inferPolicy" onchange="selectInferPolicy()"><option value="act">ACT</option><option value="diffusion">Diffusion Policy</option></select></label>
+<div class="hint">DP: two frames at25Hz, paused inference, execute5 actions; no200ms realtime claim.</div>
 <label>Model checkpoint<input id="inferModel" value="__INFERENCE_MODEL__"></label><label>Exact target count (of 6)<select id="inferTarget"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></label><label>Seed<input id="inferSeed" type="number" value="0"></label><label class="check"><input id="inferRandomize" type="checkbox" checked> Randomize layout seed on each run</label><label class="check"><input id="inferPreview" type="checkbox" checked> Simulation preview · allow late inference</label>
 <div class="row"><button class="primary" onclick="startInference()">Run inference</button><button class="danger" onclick="stopLatest('inference')">Stop</button></div><div id="inferJob" class="job">No inference job.</div>
 <div class="hint" style="margin-top:10px">五视角 MP4 自动保存到 <span id="inferVideoFolder">__INFERENCE_VIDEO_DIR__</span></div><div id="inferVideo" class="hint" style="margin-top:8px"></div>
@@ -134,8 +138,10 @@ async function resetScene(){if(timer){clearInterval(timer);timer=null;$('playBut
 function fillParameters(c){$('pForce').value=c.controller.desired_force;$('pSpeed').value=c.controller.sweep_speed;$('pSafe').value=c.controller.safe_max_force;$('pTime').value=c.episode.max_time;$('pTarget').value=c.task.target_count;$('previewTarget').value=c.task.target_count;$('inferTarget').value=c.task.target_count;$('pBatch').value=c.act.batch_size}
 async function initParameters(){try{fillParameters(await json('/api/config'))}catch(e){$('parameterStatus').textContent=e.message}}
 async function applyParameters(){const values={"controller.desired_force":Number($('pForce').value),"controller.sweep_speed":Number($('pSpeed').value),"controller.safe_max_force":Number($('pSafe').value),"episode.max_time":Number($('pTime').value),"task.target_count":Number($('pTarget').value),"act.batch_size":Number($('pBatch').value)};try{await json('/api/config/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});$('parameterStatus').textContent='Applied and saved to runs/workbench/config.yaml.';await refreshAll()}catch(e){$('parameterStatus').textContent='Rejected: '+e.message}}
-async function startTraining(){try{const body={dataset:$('trainDataset').value,out:$('trainOut').value};if($('trainSteps').value)body.steps=Number($('trainSteps').value);await json('/api/jobs/train',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await refreshJobs()}catch(e){$('trainJob').textContent=e.message}}
-async function startInference(){try{let seed=Number($('inferSeed').value);if($('inferRandomize').checked){seed=Math.floor(Math.random()*1000000000);$('inferSeed').value=seed}await json('/api/jobs/inference',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:$('inferModel').value,seed,target_count:Number($('inferTarget').value),preview:$('inferPreview').checked})});await refreshJobs()}catch(e){$('inferJob').textContent=e.message}}
+function selectTrainPolicy(){const dp=$('trainPolicy').value==='diffusion';$('trainDataset').value=dp?'__DP_DATASET__':'runs/act_dataset';$('trainOut').value=dp?'runs/diffusion_policy_mvp':'runs/act_model';$('trainResume').value='';$('trainSteps').value=''}
+function selectInferPolicy(){$('inferModel').value=$('inferPolicy').value==='diffusion'?'runs/diffusion_policy_mvp/final_ema.pt':'__INFERENCE_MODEL__'}
+async function startTraining(){try{const body={policy_type:$('trainPolicy').value,dataset:$('trainDataset').value,out:$('trainOut').value,resume:$('trainResume').value||null};if($('trainSteps').value)body.steps=Number($('trainSteps').value);await json('/api/jobs/train',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await refreshJobs()}catch(e){$('trainJob').textContent=e.message}}
+async function startInference(){try{let seed=Number($('inferSeed').value);if($('inferRandomize').checked){seed=Math.floor(Math.random()*1000000000);$('inferSeed').value=seed}await json('/api/jobs/inference',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({policy_type:$('inferPolicy').value,model:$('inferModel').value,seed,target_count:Number($('inferTarget').value),preview:$('inferPreview').checked})});await refreshJobs()}catch(e){$('inferJob').textContent=e.message}}
 function renderJob(jobNode,j){const outputNode=jobNode.querySelector('pre');const scrollTop=outputNode?.scrollTop||0;const wasAtBottom=outputNode?outputNode.scrollTop+outputNode.clientHeight>=outputNode.scrollHeight-8:true;jobNode.innerHTML=`<strong>${j.state}</strong> · ${j.job_id}<pre>${(j.output||[]).join('\n')}</pre>`;const nextOutputNode=jobNode.querySelector('pre');if(nextOutputNode)nextOutputNode.scrollTop=wasAtBottom?nextOutputNode.scrollHeight:scrollTop;if(j.kind==='inference')renderInferenceVideo(j)}
 function renderInferenceVideo(j){const node=$('inferVideo');node.replaceChildren();for(const line of [...(j.output||[])].reverse()){let summary;try{summary=JSON.parse(line)}catch(e){continue}if(summary.video_path){const name=summary.video_path.split(/[\\/]/).pop();const link=document.createElement('a');link.href='/api/inference-videos/'+encodeURIComponent(name);link.target='_blank';link.rel='noopener';link.textContent='查看五视角视频 ↗';node.append(link);const path=document.createElement('div');path.textContent=summary.video_path;path.style.overflowWrap='anywhere';node.append(path);return}if(summary.video_error){node.textContent='视频导出失败：'+summary.video_error;return}}if(['starting','running'].includes(j.state))node.textContent='推理和回放完成后自动生成视频。'}
 async function refreshJobs(){const jobs=await json('/api/jobs');const videoJob=videoExportJobId?jobs.find(x=>x.kind=== 'video_export'&&x.job_id===videoExportJobId):jobs.find(x=>x.kind==='video_export');if(videoJob)renderVideoExport(videoJob);for(const kind of ['train','inference']){const j=jobs.find(x=>x.kind===kind);if(j){const jobNode=$(kind==='train'?'trainJob':'inferJob');renderJob(jobNode,j)}}const preview=previewJobId?jobs.find(x=>x.kind==='preview'&&x.job_id===previewJobId):jobs.find(x=>x.kind==='preview'&&['starting','running','stopping'].includes(x.state));if(preview&&!previewJobId)previewJobId=preview.job_id;if(!preview)return;const p=preview.progress||{};if(preview.state==='stopping'){$('globalStatus').textContent=`正在停止示教生成… · ${p.completed||0}/${p.total||'?'} · 请等待当前回合退出`;}else if(['starting','running'].includes(preview.state)){$('globalStatus').textContent=`后台生成示教中 · ${p.completed||0}/${p.total||'?'} · 工作台仍可操作`;}else if(previewJobHandled!==preview.job_id){previewJobHandled=preview.job_id;await loadEpisodes();if(p.latest_episode_id)await selectEpisode('preview:'+p.latest_episode_id);$('globalStatus').textContent=`示教生成${preview.state==='done'?'完成':'结束'} · ${p.completed||0}/${p.total||'?'} 条已保存`}}
@@ -209,7 +215,8 @@ def create_app(cfg):
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return HTML.replace(
+        from sim.diffusion.config import DEFAULT_DATASET
+        return HTML.replace("__DP_DATASET__", escape(DEFAULT_DATASET)).replace(
             "100 Hz filtered / raw peak",
             "100 Hz filtered / 1 ms substep peak",
         ).replace("__INFERENCE_VIDEO_DIR__", escape(str(app.state.inference_video_root))).replace(
@@ -499,11 +506,20 @@ def create_app(cfg):
 
     @app.post("/api/jobs/train")
     def train(payload: dict):
+        policy_type = payload.get("policy_type", "act")
+        if policy_type not in {"act", "diffusion"}:
+            raise HTTPException(status_code=422, detail="policy_type must be act or diffusion")
+        if policy_type == "diffusion":
+            from sim.diffusion.config import DEFAULT_DATASET, DEFAULT_OUT
+            dataset = payload.get("dataset") or DEFAULT_DATASET
+            out = payload.get("out") or DEFAULT_OUT
+        else:
+            dataset = payload.get("dataset", str(app.state.cfg.act.dataset_dir))
+            out = payload.get("out", str(app.state.cfg.act.model_dir))
         argv = build_train_argv(project_root, payload.get("config", str(app.state.cfg.get_path("_source_config"))),
-                                payload.get("dataset", str(app.state.cfg.act.dataset_dir)),
-                                payload.get("out", str(app.state.cfg.act.model_dir)), payload.get("steps"),
+                                dataset, out, payload.get("steps"),
                                 preview_training=bool(payload.get("preview_training", False)),
-                                resume=payload.get("resume"))
+                                resume=payload.get("resume"), policy_type=policy_type)
         try:
             return app.state.jobs.start("train", argv)
         except RuntimeError as exc:
@@ -546,6 +562,9 @@ def create_app(cfg):
 
     @app.post("/api/jobs/inference")
     def inference(payload: dict):
+        policy_type = payload.get("policy_type", "act")
+        if policy_type not in {"act", "diffusion"}:
+            raise HTTPException(status_code=422, detail="policy_type must be act or diffusion")
         try:
             target_count = int(payload.get(
                 "target_count", app.state.cfg.get_path("task.target_count", 3)
@@ -559,7 +578,11 @@ def create_app(cfg):
         model = payload.get("model")
         if model is not None and not isinstance(model, str):
             raise HTTPException(status_code=422, detail="model must be a checkpoint path")
-        model = (model or "").strip() or latest_inference_model(project_root)
+        default_model = (str(project_root/"runs/diffusion_policy_mvp/final_ema.pt")
+                         if policy_type == "diffusion" else latest_inference_model(project_root))
+        if policy_type == "diffusion" and not Path(default_model).is_file():
+            default_model = ""
+        model = (model or "").strip() or default_model
         if not model:
             raise HTTPException(status_code=503,
                                 detail="No complete published checkpoint is available; select an explicit model path")
@@ -568,7 +591,7 @@ def create_app(cfg):
                                     payload.get("config", str(app.state.cfg.get_path("_source_config"))),
                                     payload.get("seed", app.state.cfg.seed), model,
                                     target_count, preview=preview,
-                                    video_root=app.state.inference_video_root)
+                                    video_root=app.state.inference_video_root, policy_type=policy_type)
         try:
             return app.state.jobs.start("inference", argv)
         except RuntimeError as exc:

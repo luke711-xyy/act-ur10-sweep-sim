@@ -78,3 +78,16 @@ def test_rejects_non_40ms_history(demos):
     np.savez(p,**data)
     with pytest.raises(ValueError,match="40ms"):
         DiffusionDataset(demos)
+
+
+def test_short_terminal_invalid_stability_frame_is_not_a_training_condition(demos):
+    from sim.diffusion.dataset import DiffusionDataset
+    p = demos/"0.npz"
+    with np.load(p) as z:
+        data = dict(z)
+    data["action_valid"][3] = False
+    data["t"][-1] = .1
+    np.savez(p,**data)
+    ds = DiffusionDataset(demos)
+    assert ds[1]["timestamps"].tolist() == pytest.approx([0,.04])
+    assert not ds[1]["valid_mask"][2:].any()

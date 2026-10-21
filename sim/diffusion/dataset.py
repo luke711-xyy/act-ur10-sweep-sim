@@ -47,7 +47,8 @@ class DiffusionDataset(ActDataset):
             if (data["environment_state"].shape != (n,1)
                     or data["action_valid"].shape != (n,)
                     or data["t"].shape != (n,)
-                    or not np.allclose(np.diff(data["t"]),.04,atol=1e-5,rtol=0)):
+                    or not np.allclose(np.diff(data["t"])[data["action_valid"][1:]],
+                                       .04,atol=1e-5,rtol=0)):
                 raise ValueError("DP requires target count1 and consecutive 40ms frames")
             for key in ("state","environment_state","action"):
                 if not np.isfinite(data[key]).all():

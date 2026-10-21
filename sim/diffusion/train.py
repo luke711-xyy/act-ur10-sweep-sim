@@ -23,9 +23,7 @@ from .policy import DiffusionPolicy
 from .training import (WeightedCursor, ResourceGuard, atomic_json,
                        save_checkpoint, restore_checkpoint, load_payload)
 from .vendor.model.diffusion.ema_model import EMAModel
-
-DEFAULT_DATASET = "/Users/huazhi_luke/.codex/worktrees/act-five-view/runs/act_dataset_five_view_rudra_300_smooth320_v1"
-DEFAULT_OUT = "runs/diffusion_policy_mvp"
+from .config import DEFAULT_DATASET, DEFAULT_OUT
 
 
 def training_config(steps=None):
