@@ -32,3 +32,20 @@ def test_acceptance_requires_checkpoint_run_and_actual_dataset_identity():
     ]:
         with pytest.raises(ValueError,match="identity"):
             require_training_identity(checkpoint,run,audit)
+
+
+def test_pipeline_never_accepts_stopped_failed_or_zero_update_training():
+    from sim.diffusion.pipeline import ready_for_acceptance
+    valid=dict(state="training_complete",pilot=dict(passed=True),
+               full=dict(completed_updates=1))
+    assert ready_for_acceptance(valid)
+    for state in ("failed","stopped","pilot_passed","pilot_running"):
+        assert not ready_for_acceptance(dict(valid,state=state))
+    assert not ready_for_acceptance(dict(valid,full=dict(completed_updates=0)))
+
+
+def test_acceptance_stop_flag_is_checked_before_starting_any_case():
+    from sim.diffusion.acceptance import check_stop
+    with pytest.raises(InterruptedError,match="stopped"):
+        check_stop({"requested":True})
+    check_stop({"requested":False})

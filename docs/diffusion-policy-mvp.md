@@ -25,6 +25,8 @@ ACT 请求默认行为不变；新工作树运行旧 ACT 时需明确选择原�
 .venv/bin/python -m sim.diffusion.train --pilot-only
 # 对同一已存在输出只能显式恢复，保持原 steps/config
 .venv/bin/python -m sim.diffusion.train --resume runs/diffusion_policy_mvp/full/step_000500.pt
+# 本计划的持久作业：全量完成后自动运行六个一次性验收，不挑结果重跑
+.venv/bin/python -m sim.diffusion.pipeline --resume runs/diffusion_policy_mvp/pilot/step_000100.pt
 ```
 
 第一次命令自动先跑固定12窗口小样本门，通过后重新seed42初始化全量模型。

@@ -20,6 +20,11 @@ def acceptance_cases():
     return [dict(seed=81000000+n,target_count=n) for n in range(1,7)]
 
 
+def check_stop(stop):
+    if stop["requested"]:
+        raise InterruptedError("acceptance stopped")
+
+
 def require_new_layout(fingerprint, training_fingerprints):
     if fingerprint in training_fingerprints:
         raise RuntimeError("duplicate actual layout; stop, do not replace seed")
@@ -47,6 +52,11 @@ def main(argv=None):
     parser.add_argument("--dataset",default=DEFAULT_DATASET)
     parser.add_argument("--run",default=DEFAULT_OUT)
     args = parser.parse_args(argv)
+    stop = {"requested":False}
+    def request_stop(_signal,_frame):
+        stop["requested"] = True
+    signal.signal(signal.SIGTERM,request_stop)
+    signal.signal(signal.SIGINT,request_stop)
     run = Path(args.run).resolve()
     workspace = Path(__file__).resolve().parents[2]
     if not run.is_relative_to(workspace/"runs"):
@@ -82,6 +92,7 @@ def main(argv=None):
         layouts = []
         # Preflight all six before executing any policy. No model in preflight.
         for case in acceptance_cases():
+            check_stop(stop)
             cfg = load_config(args.config,overrides=[f"task.target_count={case['target_count']}"])
             env = SweepEnv(cfg,seed=case["seed"])
             try:
@@ -96,6 +107,7 @@ def main(argv=None):
                     completed_updates=step,not_a_generalization_benchmark=True))
         guard = ResourceGuard(workspace)
         for case in layouts:
+            check_stop(stop)
             guard.check(reserve=2*2**30)
             rows = reserve_case(attempts_path,case)
             log_path = root/f"N{case['target_count']}.log"
@@ -110,6 +122,7 @@ def main(argv=None):
                                            cwd=workspace,start_new_session=True)
                 try:
                     while process.poll() is None:
+                        check_stop(stop)
                         guard.check()
                         if time.perf_counter()-started >= 1200:
                             raise TimeoutError("20-minute wall-clock limit")

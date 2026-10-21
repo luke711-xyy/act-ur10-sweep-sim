@@ -33,3 +33,10 @@ def test_pilot_only_never_dispatches_full_resume_and_requires_current_sidecar():
     fresh=dict(budget_seconds=1790,pilot=dict(completed_updates=25,
                 elapsed_seconds=1790,initial_loss=1,initial_parameter_hashes={}))
     assert validate_resume(fresh,payload,pilot_only=False) == "pilot"
+
+
+def test_a_completed_pilot_is_never_trained_again_when_starting_full():
+    from sim.diffusion.train import pilot_needed
+    assert pilot_needed("pilot",{}) is True
+    assert pilot_needed("pilot",{"pilot":{"passed":True}}) is False
+    assert pilot_needed("full",{"pilot":{"passed":True}}) is False

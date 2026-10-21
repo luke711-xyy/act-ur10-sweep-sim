@@ -63,6 +63,10 @@ def validate_resume(book, payload, pilot_only=False):
     return stage
 
 
+def pilot_needed(stage, book):
+    return stage=="pilot" and not bool(book.get("pilot",{}).get("passed"))
+
+
 def to_device(batch):
     if isinstance(batch,dict):
         return {k:to_device(v) for k,v in batch.items()}
@@ -323,10 +327,12 @@ def main(argv=None):
         if stage == "full":
             if not book.get("pilot",{}).get("passed"):
                 raise RuntimeError("full training requires recorded successful pilot")
-        else:
+        elif pilot_needed(stage,book):
             passed = train_stage(ds,out,config,book,stage="pilot",resume=args.resume,stop=stop)
             if not passed or args.pilot_only or stop["requested"]:
                 return 0 if passed else 2
+        if args.pilot_only:
+            return 0
         # Fresh initialization inside train_stage; pilot weights are never promoted.
         train_stage(ds,out,config,book,stage="full",
                     resume=args.resume if stage=="full" else None,stop=stop)
