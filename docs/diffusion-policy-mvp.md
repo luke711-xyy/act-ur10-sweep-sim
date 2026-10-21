@@ -9,7 +9,7 @@
 ```sh
 uv venv --python 3.12 .venv
 uv pip sync --python .venv/bin/python requirements-diffusion.lock.txt
-.venv/bin/python -m sim.web.run --port 8773
+.venv/bin/python -m sim.web.run --port 8773 --diffusion-workspace
 ```
 
 新工作树不复制示教与旧模型。工作台选择 Diffusion Policy 后自动使用原300条
@@ -33,6 +33,8 @@ ACT 请求默认行为不变；新工作树运行旧 ACT 时需明确选择原�
 没有验证集，`final_ema.pt` 是最后完成更新的EMA，不是最佳验证模型。
 24小时累计预算、30分钟累计pilot预算与磁盘门由 `status.json` 保持，
 显式恢复不能重置；检查点保存完整优化器、LR、EMA、随机数与采样游标。
+恢复必须同时保留原run的 `status.json`，缺失或旧于检查点则明确拒绝。
+DP工作台模式只读浏览原示教，拒绝删除原记录，新回放和视频保留在本工作树。
 
 `curves.jsonl` 保存训练曲线，`training_config.json` / `data_audit.json`
 记录配置与只读数据身份；`pilot/` 和 `full/` 各保留最近两份恢复点。

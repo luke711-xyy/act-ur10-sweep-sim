@@ -31,7 +31,8 @@ def _font(size: int):
     return ImageFont.load_default(size=size)
 
 
-def export_inference_video(episode_dir: str | Path, output_root: str | Path) -> Path:
+def export_inference_video(episode_dir: str | Path, output_root: str | Path,
+                           resource_check=None) -> Path:
     """Export a published replay, preserving old videos and partial-error cleanup.
 
     Image paths, frame rate, target and checkpoint come from the replay manifest.
@@ -135,6 +136,8 @@ def export_inference_video(episode_dir: str | Path, output_root: str | Path) -> 
                 watchdog.start()
                 try:
                     for i in range(count):
+                        if resource_check is not None:
+                            resource_check()
                         frame = Image.new("RGB", (960, 640), "#111923")
                         draw = ImageDraw.Draw(frame)
                         for name, label, (x, y) in views:
@@ -144,7 +147,7 @@ def export_inference_video(episode_dir: str | Path, output_root: str | Path) -> 
                             draw.rectangle((x, y, x + 319, y + 28), fill="#101820")
                             draw.text((x + 9, y + 5), label, font=font, fill="white")
                         lines = (
-                            (332, f"ACT {checkpoint} | target {target}", "white"),
+                            (332, f"{'DP' if record.get('policy_type')=='diffusion' else 'ACT'} {checkpoint} | target {target}", "white"),
                             (386, f"Frame {i + 1}/{count} | t {data['t'][i]:.2f} s", "#dae1e9"),
                             (408, (f"Raw Fz       {raw[i]:7.2f} N" if raw is not None
                                    else "Raw Fz       not recorded"), "#65b7ff"),

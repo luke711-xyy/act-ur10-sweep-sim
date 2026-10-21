@@ -94,4 +94,5 @@ class DiffusionDataset(ActDataset):
         return dict(identity=self.identity,episodes=len(self.records),
                     frames=sum(len(d["t"]) for d in self.numeric.values()),
                     valid_windows=len(self.index),camera_views=list(self.camera_views),
-                    split="train",validation=None,normalization=self.normalization)
+                    split="train",validation=None,normalization=self.normalization,
+                    layout_fingerprints=sorted(r.get("layout_fingerprint","") for r in self.records))

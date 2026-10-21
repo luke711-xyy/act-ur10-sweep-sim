@@ -25,6 +25,12 @@ def require_new_layout(fingerprint, training_fingerprints):
         raise RuntimeError("duplicate actual layout; stop, do not replace seed")
 
 
+def require_training_identity(checkpoint_identity, run, audit):
+    if not checkpoint_identity or not (
+            checkpoint_identity == run.get("identity") == audit.get("identity")):
+        raise ValueError("checkpoint/run/dataset identity mismatch")
+
+
 def reserve_case(path, case):
     path = Path(path)
     rows = json.loads(path.read_text()) if path.exists() else []
@@ -53,10 +59,18 @@ def main(argv=None):
     if payload["stage"]!="full" or payload["step"]<1:
         raise RuntimeError("no completed full-training optimizer update")
     step = payload["step"]
+    checkpoint_identity = payload["identity"]
     del payload
-    records = [json.loads(line) for line in
-               (Path(args.dataset)/"manifest.jsonl").read_text().splitlines() if line.strip()]
-    fingerprints = {r["layout_fingerprint"] for r in records}
+    saved_audit = json.loads((run/"data_audit.json").read_text())
+    from .dataset import DiffusionDataset
+    actual = DiffusionDataset(args.dataset)
+    audit = actual.audit()
+    require_training_identity(checkpoint_identity,status,audit)
+    require_training_identity(checkpoint_identity,status,saved_audit)
+    if saved_audit["layout_fingerprints"] != audit["layout_fingerprints"]:
+        raise ValueError("training layout fingerprints changed")
+    fingerprints = set(saved_audit["layout_fingerprints"])
+    del actual
     root = run/"acceptance"
     root.mkdir(parents=True,exist_ok=True)
     with (root/".acceptance.lock").open("a+") as lease:

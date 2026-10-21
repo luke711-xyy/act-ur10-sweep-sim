@@ -80,12 +80,13 @@ def set_rng_state(state):
 
 
 def save_checkpoint(root,model,ema,optimizer,scheduler,sampler,*,step,seconds,
-                    identity,stage,config):
+                    identity,stage,config,stage_elapsed=0):
     root = Path(root)
     root.mkdir(parents=True,exist_ok=True)
     checkpoint = root/f"step_{step:06d}.pt"
     tmp = root/(checkpoint.name+".tmp")
     payload = dict(format_version=1,policy_type="diffusion",stage=stage,step=step,
+                   stage_elapsed=float(stage_elapsed),
                    seconds=seconds,identity=identity,config=config,
                    normalization=getattr(model,"normalization",None),
                    model=model.state_dict(),ema=ema.averaged_model.state_dict(),
@@ -133,3 +134,31 @@ def restore_checkpoint(path,model,ema,optimizer,scheduler,sampler,identity,confi
     sampler.load_state_dict(state["sampler"])
     set_rng_state(state["rng"])
     return state
+
+
+def verify_continuation(path,model,ema,optimizer,scheduler,sampler,identity,config,
+                        update,predict):
+    """Replay the same real update twice; leave committed model/RNG unchanged."""
+    def restore():
+        restore_checkpoint(path,model,ema,optimizer,scheduler,sampler,identity,config)
+    def snapshot(module):
+        return {k:v.detach().cpu().clone() for k,v in module.state_dict().items()}
+    restore()
+    first = predict().detach().cpu()
+    update()
+    expected = snapshot(model)
+    expected_ema = snapshot(ema.averaged_model)
+    expected_cursor = sampler.cursor
+    restore()
+    second = predict().detach().cpu()
+    torch.testing.assert_close(first,second,rtol=1e-5,atol=1e-6)
+    update()
+    if sampler.cursor != expected_cursor:
+        raise RuntimeError("resume sampler continuation mismatch")
+    for module,reference in ((model,expected),(ema.averaged_model,expected_ema)):
+        for k,v in module.state_dict().items():
+            torch.testing.assert_close(v.detach().cpu(),reference.pop(k),rtol=1e-5,atol=1e-6)
+    error = float((first-second).abs().max().item())
+    restore()
+    return dict(passed=True,output_max_absolute_error=error,
+                replayed_optimizer_updates=2,rtol=1e-5,atol=1e-6)

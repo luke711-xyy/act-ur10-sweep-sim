@@ -144,7 +144,8 @@ def _contact_z_command(cfg, admittance, z_nominal: float,
 
 def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                     preview: bool = False, capture_replay: bool = False,
-                    policy_type: str = "act", wall_seconds: float = 1200) -> ActRolloutResult:
+                    policy_type: str = "act", wall_seconds: float = 1200,
+                    resource_check=None) -> ActRolloutResult:
     """Run one causal, full-episode ACT policy from the fixed reset pose.
 
     No geometric planner, object position, target identity, or supervisor
@@ -279,6 +280,8 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
     try:
         while sampled_frames < max_frames:
             if is_diffusion:
+                if resource_check is not None:
+                    resource_check()
                 if time.perf_counter()-wall_started >= wall_seconds:
                     termination_reason = "wall-clock limit"
                     break
@@ -547,6 +550,12 @@ def _run_main(argv=None) -> int:
     if args.target_count is not None and not 1 <= args.target_count <= 6:
         parser.error("--target-count must be between 1 and 6")
     cfg = load_config(args.config)
+    resource_check = None
+    if args.policy_type=="diffusion":
+        from sim.diffusion.runtime import inference_resource_guard
+        workspace = Path(__file__).resolve().parents[2]
+        args.video_root = args.video_root or str(workspace/"runs/diffusion_policy_mvp/videos")
+        resource_check = inference_resource_guard(workspace,args.replay_root,args.video_root)
     if args.target_count is not None:
         cfg.set_path("task.target_count", args.target_count)
     # Snapshot latest once, before loading; a concurrent trainer can update the
@@ -558,7 +567,8 @@ def _run_main(argv=None) -> int:
         resolved_model = _resolve_model_path(args.model)
     if resolved_model:
         resolved_model = str(Path(resolved_model).resolve())
-    extra = ({"policy_type": "diffusion", "wall_seconds": args.wall_seconds}
+    extra = ({"policy_type": "diffusion", "wall_seconds": args.wall_seconds,
+              "resource_check": resource_check}
              if args.policy_type == "diffusion" else {})
     result = run_act_episode(cfg, seed=args.seed, model_path=resolved_model,
                              preview=args.preview, capture_replay=args.record_replay, **extra)
@@ -593,6 +603,8 @@ def _run_main(argv=None) -> int:
     image_cleanup_error = ""
     replay_input_path = None
     if args.record_replay:
+        if resource_check is not None:
+            resource_check()
         # Replay uses the causal command trace, not the cached query images.
         # Release those after inference, before rendering another five views.
         if getattr(result, "observations", None) is not None:
@@ -608,6 +620,7 @@ def _run_main(argv=None) -> int:
             replay_episode_id = save_inference_replay(
                 cfg, args.seed, result, args.replay_root, model=resolved_model,
                 image_format=args.replay_image_format,
+                **({"resource_check":resource_check} if resource_check is not None else {}),
             )
         except Exception as exc:  # keep the physical result visible if replay fails
             replay_error = f"{type(exc).__name__}: {exc}"
@@ -623,7 +636,8 @@ def _run_main(argv=None) -> int:
 
                 output_root = args.video_root or inference_video_root(cfg, Path.cwd())
                 video_path = str(export_inference_video(
-                    Path(args.replay_root) / replay_episode_id, output_root))
+                    Path(args.replay_root) / replay_episode_id, output_root,
+                    **({"resource_check":resource_check} if resource_check is not None else {})))
                 from .media_retention import finalize_inference_video
                 try:
                     finalize_inference_video(
@@ -642,6 +656,8 @@ def _run_main(argv=None) -> int:
                       "video_deferred": bool(args.defer_video and replay_episode_id),
                       "frame_images_deleted": frame_images_deleted,
                       "image_cleanup_error": image_cleanup_error}, ensure_ascii=False), flush=True)
+    if args.policy_type=="diffusion" and (replay_error or video_error):
+        raise RuntimeError(f"DP media infrastructure failed: {replay_error or video_error}")
     return 0 if result.success else 1
 
 

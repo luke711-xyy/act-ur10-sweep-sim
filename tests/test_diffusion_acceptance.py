@@ -20,3 +20,15 @@ def test_layout_duplicate_stops_without_replacement():
     with pytest.raises(RuntimeError,match="duplicate"):
         require_new_layout("abc",{"abc"})
     require_new_layout("new",{"abc"})
+
+
+def test_acceptance_requires_checkpoint_run_and_actual_dataset_identity():
+    from sim.diffusion.acceptance import require_training_identity
+    require_training_identity("a",{"identity":"a"},{"identity":"a","layout_fingerprints":["x"]})
+    for checkpoint,run,audit in [
+        ("b",{"identity":"a"},{"identity":"a"}),
+        ("a",{"identity":"b"},{"identity":"a"}),
+        ("a",{"identity":"a"},{"identity":"other"}),
+    ]:
+        with pytest.raises(ValueError,match="identity"):
+            require_training_identity(checkpoint,run,audit)

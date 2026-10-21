@@ -67,3 +67,25 @@ def test_resource_guard_reserves_checkpoint_space(tmp_path):
     (tmp_path/"owned").write_bytes(b"0123456789")
     with pytest.raises(RuntimeError,match="artifact"):
         guard.check(reserve=1)
+
+
+def test_continuation_probe_restores_start_and_repeats_output_and_update(tmp_path):
+    from sim.diffusion.training import (WeightedCursor,save_checkpoint,verify_continuation)
+    from sim.diffusion.vendor.model.diffusion.ema_model import EMAModel
+    model=torch.nn.Linear(3,4)
+    ema=EMAModel(copy.deepcopy(model),power=.75)
+    opt=torch.optim.AdamW(model.parameters(),lr=1e-4)
+    lr=torch.optim.lr_scheduler.LambdaLR(opt,lambda _:1.)
+    sampler=WeightedCursor([.35,.65],42)
+    def update():
+        sampler.next(); opt.zero_grad()
+        model(torch.randn(1,3)).square().mean().backward()
+        opt.step();lr.step();ema.step(model)
+    def predict():
+        with torch.no_grad(): return ema.averaged_model(torch.randn(1,3))
+    path=save_checkpoint(tmp_path,model,ema,opt,lr,sampler,step=0,seconds=0,
+                         identity="probe",stage="pilot",config={})
+    report=verify_continuation(path,model,ema,opt,lr,sampler,"probe",{},update,predict)
+    assert report["passed"]
+    assert sampler.cursor == 0
+    assert ema.optimization_step == 0

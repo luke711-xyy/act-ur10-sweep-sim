@@ -191,6 +191,7 @@ def create_app(cfg):
     app = FastAPI(title="ACT MuJoCo Sweep Workbench")
     app.state.cfg = cfg
     app.state.inference_video_root = inference_video_root(cfg, project_root)
+    app.state.diffusion_video_root = project_root/"runs/diffusion_policy_mvp/videos"
     app.state.episode_video_root = app.state.inference_video_root / "workbench_exports"
     app.state.env = None
     app.state.env_lock = RLock()
@@ -226,6 +227,8 @@ def create_app(cfg):
     @app.get("/api/inference-videos/{filename}")
     def inference_video(filename: str):
         root = app.state.inference_video_root
+        if not (root/filename).is_file():
+            root = app.state.diffusion_video_root
         video = (root / filename).resolve()
         if (filename != Path(filename).name or not filename.startswith("inference_")
                 or video.suffix != ".mp4" or video.parent != root or not video.is_file()):
@@ -316,6 +319,8 @@ def create_app(cfg):
     def delete_episode(episode_id: str):
         try:
             return app.state.workbench.delete_episode(episode_id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403,detail=str(exc)) from exc
         except (EpisodeNotFound, FileNotFoundError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -591,7 +596,8 @@ def create_app(cfg):
                                     payload.get("config", str(app.state.cfg.get_path("_source_config"))),
                                     payload.get("seed", app.state.cfg.seed), model,
                                     target_count, preview=preview,
-                                    video_root=app.state.inference_video_root, policy_type=policy_type)
+                                    video_root=(app.state.diffusion_video_root if policy_type=="diffusion"
+                                                else app.state.inference_video_root), policy_type=policy_type)
         try:
             return app.state.jobs.start("inference", argv)
         except RuntimeError as exc:

@@ -16,3 +16,20 @@ def test_training_limits_cannot_expand_approved_budget():
     for steps in (0,-1,100001):
         with pytest.raises(ValueError):
             training_config(steps)
+
+
+def test_pilot_only_never_dispatches_full_resume_and_requires_current_sidecar():
+    from sim.diffusion.train import validate_resume
+    payload=dict(stage="full",step=500,seconds=2000,stage_elapsed=100)
+    book=dict(budget_seconds=2000,full=dict(completed_updates=500,elapsed_seconds=100))
+    with pytest.raises(ValueError,match="pilot.only"):
+        validate_resume(book,payload,pilot_only=True)
+    payload=dict(stage="pilot",step=25,seconds=1790,stage_elapsed=1790)
+    with pytest.raises(ValueError,match="status"):
+        validate_resume({},payload,pilot_only=False)
+    stale=dict(budget_seconds=1500,pilot=dict(completed_updates=25,elapsed_seconds=1500))
+    with pytest.raises(ValueError,match="stale"):
+        validate_resume(stale,payload,pilot_only=False)
+    fresh=dict(budget_seconds=1790,pilot=dict(completed_updates=25,
+                elapsed_seconds=1790,initial_loss=1,initial_parameter_hashes={}))
+    assert validate_resume(fresh,payload,pilot_only=False) == "pilot"

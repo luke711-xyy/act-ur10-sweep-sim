@@ -7,6 +7,17 @@ import numpy as np
 from .dataset import VIEWS
 
 
+def inference_resource_guard(workspace, replay_root, video_root):
+    from .training import ResourceGuard
+    workspace = Path(workspace).resolve()
+    for path in (replay_root,video_root):
+        if not Path(path).resolve().is_relative_to(workspace/"runs"):
+            raise ValueError("DP inference artifacts must stay in this worktree's runs directory")
+    guard = ResourceGuard(workspace)
+    guard.check(reserve=2*2**30)
+    return lambda:guard.check(reserve=128*2**20)
+
+
 class TwoFrameHistory:
     def __init__(self):
         self.frames = deque(maxlen=2)

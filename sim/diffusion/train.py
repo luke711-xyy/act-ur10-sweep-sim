@@ -21,7 +21,8 @@ from sim.config import load_config
 from .dataset import DiffusionDataset
 from .policy import DiffusionPolicy
 from .training import (WeightedCursor, ResourceGuard, atomic_json,
-                       save_checkpoint, restore_checkpoint, load_payload)
+                       save_checkpoint, restore_checkpoint, load_payload,
+                       verify_continuation)
 from .vendor.model.diffusion.ema_model import EMAModel
 from .config import DEFAULT_DATASET, DEFAULT_OUT
 
@@ -43,6 +44,23 @@ def training_config(steps=None):
 def pilot_passes(initial, final, updates):
     return (math.isfinite(initial) and math.isfinite(final) and initial > 0
             and final <= initial*.7 and all(updates.values()))
+
+
+def validate_resume(book, payload, pilot_only=False):
+    stage = payload["stage"]
+    if pilot_only and stage=="full":
+        raise ValueError("pilot-only cannot resume a full-training checkpoint")
+    if not book:
+        raise ValueError("resume requires the original status.json sidecar")
+    info = book.get(stage,{})
+    if (float(book.get("budget_seconds",-1)) < float(payload["seconds"])
+            or float(info.get("elapsed_seconds",-1)) < float(payload.get("stage_elapsed",0))
+            or int(info.get("completed_updates",-1)) < int(payload["step"])):
+        raise ValueError("stale status.json would reset a training budget")
+    if stage=="pilot" and payload["step"]>0 and not {
+            "initial_loss","initial_parameter_hashes"}.issubset(info):
+        raise ValueError("stale pilot gate state in status.json")
+    return stage
 
 
 def to_device(batch):
@@ -132,6 +150,7 @@ def train_stage(ds, out, config, book, *, stage, resume=None, stop):
             step = restored["step"]
             base_seconds = max(base_seconds,restored["seconds"])
             deadline = min(deadline,started+86400-base_seconds)
+            del restored
         # Reserve an entire next recovery checkpoint before starting work.
         recovery_bytes = count*4*4+32*2**20
         guard.check(reserve=recovery_bytes)
@@ -139,7 +158,8 @@ def train_stage(ds, out, config, book, *, stage, resume=None, stop):
             nonlocal checkpoint
             guard.check(reserve=recovery_bytes)
             checkpoint = save_checkpoint(root,model,ema,optimizer,scheduler,sampler,
-                step=step,seconds=seconds(),identity=ds.identity,stage=stage,config=config)
+                step=step,seconds=seconds(),identity=ds.identity,stage=stage,config=config,
+                stage_elapsed=stage_prior+time.perf_counter()-started)
             status(recovery_checkpoint=str(checkpoint))
         save()
         windows = None
@@ -154,7 +174,8 @@ def train_stage(ds, out, config, book, *, stage, resume=None, stop):
             status(state="pilot_running")
         else:
             status(state="training")
-        limit = 500 if stage=="pilot" else config["max_steps"]
+        # Two actual optimizer executions are reserved for the resume probe.
+        limit = 498 if stage=="pilot" else config["max_steps"]
         reason = "step_limit"
         while step < limit:
             if stop["requested"] or time.perf_counter() >= deadline:
@@ -202,6 +223,28 @@ def train_stage(ds, out, config, book, *, stage, resume=None, stop):
                     break
         save()
         if stage=="pilot":
+            if reason=="pilot_passed":
+                def probe_update():
+                    if time.perf_counter() >= deadline:
+                        raise TimeoutError("pilot30-minute budget exhausted before resume probe")
+                    optimizer.zero_grad(set_to_none=True)
+                    for micro in range(2):
+                        sampler.next()
+                        batch = to_device(windows[(step*2+micro)%12])
+                        loss = model.loss(batch)
+                        if not torch.isfinite(loss).item():
+                            raise RuntimeError("nonfinite MPS resume probe loss")
+                        (loss/2).backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(),1.,error_if_nonfinite=True)
+                    optimizer.step(); scheduler.step(); ema.step(model)
+                    torch.mps.synchronize()
+                stage_info["mps_resume_equivalence"] = verify_continuation(
+                    checkpoint,model,ema,optimizer,scheduler,sampler,ds.identity,config,
+                    probe_update,lambda:ema.averaged_model.predict(to_device(windows[0])["obs"]))
+                stage_info["executed_optimizer_updates"] = step+2
+                if time.perf_counter() >= deadline:
+                    raise TimeoutError("pilot30-minute budget exhausted during resume probe")
+                save()
             stage_info["passed"] = reason=="pilot_passed"
             status(state=reason if stage_info["passed"] else "pilot_stopped",
                    stop_reason=reason)
@@ -255,6 +298,11 @@ def main(argv=None):
         book = json.loads(status_path.read_text()) if status_path.exists() else {}
         if book and not args.resume:
             raise RuntimeError("existing run must be explicitly resumed; no budget reset")
+        stage = "pilot"
+        if args.resume:
+            payload = load_payload(args.resume)
+            stage = validate_resume(book,payload,args.pilot_only)
+            del payload
         ds = DiffusionDataset(args.dataset)
         from collections import Counter
         counts = Counter(int(r["target_count"]) for r in ds.records)
@@ -272,7 +320,6 @@ def main(argv=None):
             stop["requested"] = True
         signal.signal(signal.SIGTERM,request_stop)
         signal.signal(signal.SIGINT,request_stop)
-        stage = load_payload(args.resume)["stage"] if args.resume else "pilot"
         if stage == "full":
             if not book.get("pilot",{}).get("passed"):
                 raise RuntimeError("full training requires recorded successful pilot")

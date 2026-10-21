@@ -20,6 +20,44 @@ def test_diffusion_api_uses_independent_defaults_and_resume(tmp_path,monkeypatch
         response = client.post("/api/jobs/inference",json={"policy_type":"diffusion","model":"x.pt","target_count":2})
         assert response.status_code == 200
         assert "--policy-type" in response.json()["argv"]
+        argv = response.json()["argv"]
+        video = argv[argv.index("--video-root")+1]
+        from pathlib import Path
+        assert Path(video).is_relative_to(Path(__file__).resolve().parents[1]/"runs")
+
+
+def test_diffusion_workspace_browses_original_data_read_only(tmp_path):
+    from sim.web.run import diffusion_workspace_config
+    from sim.config import load_config
+    from sim.diffusion.config import DEFAULT_DATASET
+    cfg = diffusion_workspace_config(load_config(),tmp_path)
+    assert str(cfg.act.dataset_dir) == DEFAULT_DATASET
+    assert cfg.web.readonly_dataset
+    assert str(cfg.web.inference_video_dir) == str(tmp_path/"runs/diffusion_policy_mvp/videos")
+    assert cfg.act.camera_views == load_config().act.camera_views
+
+
+def test_readonly_dataset_delete_is_rejected_without_touching_files(tmp_path):
+    import json
+    from sim.config import load_config
+    from sim.web.workbench import WorkbenchState
+    episode=tmp_path/"keep"
+    episode.mkdir()
+    np.savez(episode/"arrays.npz",action=np.zeros((1,4)))
+    content=json.dumps(dict(episode_id="keep",arrays="keep/arrays.npz",frame_count=1))+"\n"
+    (tmp_path/"manifest.jsonl").write_text(content)
+    cfg=load_config(overrides=["web.readonly_dataset=true"])
+    state=WorkbenchState(cfg,dataset_root=tmp_path,preview_root=tmp_path/"previews")
+    with pytest.raises(PermissionError,match="read.only"):
+        state.delete_episode("dataset:keep")
+    assert episode.is_dir()
+    assert (tmp_path/"manifest.jsonl").read_text() == content
+
+
+def test_dp_inference_artifacts_cannot_escape_independent_worktree(tmp_path):
+    from sim.diffusion.runtime import inference_resource_guard
+    with pytest.raises(ValueError,match="worktree"):
+        inference_resource_guard(tmp_path,tmp_path.parent/"external",tmp_path/"video")
 
 
 def test_act_legacy_and_diffusion_commands_are_separate(tmp_path):
