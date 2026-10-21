@@ -46,7 +46,7 @@ pac-act = [
 include = ["sim*", "pac_act*", "residual_rl*"]
 
 [tool.setuptools.package-data]
-sim = ["../configs/*.yaml"]
+sim = ["../configs/*.yaml", "web/*.js"]
 pac_act = ["*.html"]
 
 [tool.pytest.ini_options]
