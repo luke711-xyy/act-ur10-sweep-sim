@@ -238,7 +238,12 @@ def stall_failure_sidewall_ok(result: ActRolloutResult, cfg) -> bool:
                 and np.all(np.abs(missed_positions[:, 1]) >= wall_band))
 
 
-def _force_loop(cfg):
+def _force_loop(cfg, env=None):
+    if cfg.get_path("scene.contact_profile", None) == "trial4_1n":
+        if env is None:
+            raise ValueError("trial-4 force loop requires its physical environment")
+        from ..controllers.rudra_contact import Trial4Contact
+        return Trial4Contact(env)
     c = cfg.controller
     return AdmittanceController1D(
         AdmittanceParams(float(c.admittance.m), float(c.admittance.b), float(c.admittance.k)),
@@ -270,6 +275,8 @@ def _overforce_relief_loop(cfg):
 
 def _contact_z_command(cfg, admittance, relief, z_nominal: float,
                        measured_force: float) -> float:
+    if hasattr(admittance,"command_z"):
+        return admittance.command_z(cfg,z_nominal,measured_force,relief)
     correction = (
         float(admittance.step(
             float(cfg.controller.desired_force), float(measured_force)))
@@ -340,7 +347,8 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
     """
     builder = ACTObservationBuilder(cfg)
     builder.reset()
-    admittance = _force_loop(cfg)
+    admittance = (_force_loop(cfg,env) if cfg.get_path("scene.contact_profile",None)
+                  else _force_loop(cfg))
     overforce_relief = _overforce_relief_loop(cfg)
     if contact_z_mode not in {"geometric", "admittance", "expert_admittance"}:
         raise ValueError(
@@ -385,6 +393,10 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
         completion_target_count = len(selected_indices)
     initial_object_positions = np.asarray(env.component_positions(), dtype=np.float64).copy()
     max_frames = max(1, int(cfg.episode.get("max_frames", 500)))
+    image_spool = None
+    if collect_observations and cfg.get_path("act.image_spool_dir",None):
+        from .image_spool import NativeImageSpool
+        image_spool = NativeImageSpool(cfg.act.image_spool_dir,max_frames)
     sampled_frames = 0
     brush_inside_time = 0.0
     brush_inside_timeout = max(0.0, float(cfg.episode.get(
@@ -424,6 +436,8 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
                 ).astype(np.uint8)
                 for view in builder.camera_views
             }
+            if image_spool is not None:
+                images = image_spool.store(images)
             wrench = np.asarray(env.wrench(), dtype=np.float32).reshape(6)
             tcp = np.asarray(env.tcp(), dtype=np.float32).reshape(3)
             joints = np.asarray(env.ee.joint_state(), dtype=np.float32).reshape(6)
@@ -506,6 +520,12 @@ def run_action_path(env: SweepEnv, cfg, path: np.ndarray,
             break
         action, phase = execution[execution_index]
         execution_index += 1
+        if phase=="sweep" and hasattr(admittance,"ready") and not admittance.ready:
+            # Preserve trial-4's force-confirmed acquisition before any XY
+            # sweep. Retain the reference, history and shared frame budget.
+            execution_index -= 1
+            action = executed_reference.copy()
+            phase = "contact_build"
         policy_phase = phase in {"approach", "descent", "contact_build", "sweep"}
         if contact and uses_admittance and not admittance_active:
             z_nominal = float(env.tcp()[2])
@@ -999,11 +1019,19 @@ def _annotate_expert_result(result: ActRolloutResult, plan: ExpertPlan,
     return result
 
 
+def _episode_environment(cfg, seed):
+    """Explicit scene opt-in; ordinary collection/inference keeps its backend."""
+    if cfg.get_path("scene.backend", None) == "rudra_native":
+        from ..environments.rudra_sweep_env import RudraSweepEnv
+        return RudraSweepEnv(cfg,seed=seed)
+    return SweepEnv(cfg,seed=seed)
+
+
 def _screen_expert_candidate_process(payload):
     """Run one render-free candidate rollout in an isolated worker process."""
     cfg_data, seed, total, failure_mode, plan, attempt = payload
     cfg = Config(cfg_data)
-    env = SweepEnv(cfg, seed=seed)
+    env = _episode_environment(cfg,seed)
     try:
         env.reset(seed=seed)
         path, phases = _expert_execution_path(
@@ -1086,7 +1114,7 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
     elif failure_mode == "misroute":
         planning_cfg = cfg.copy()
         planning_cfg.set_path("task.target_count", 6)
-    probe = SweepEnv(planning_cfg, seed=seed)
+    probe = _episode_environment(planning_cfg,seed)
     probe.reset(seed=seed)
     try:
         candidates = expert_plan_candidates(probe, planning_cfg)
@@ -1111,7 +1139,7 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
         candidates = candidates[:1]
     def execute(candidate: ExpertPlan, attempt: int,
                 capture_observations: bool) -> ActRolloutResult:
-        env = SweepEnv(cfg, seed=seed)
+        env = _episode_environment(cfg,seed)
         env.reset(seed=seed)
         try:
             path, phases = _expert_execution_path(
@@ -1241,7 +1269,7 @@ def run_expert_episode(cfg, seed: int = 0, collect_observations: bool = True,
     if best_failure is not None and not failure_mode and alignment_lead > 1e-6:
         fallback_cfg = planning_cfg.copy()
         fallback_cfg.set_path("planner.expert_tray_alignment_lead", 0.0)
-        fallback_probe = SweepEnv(fallback_cfg, seed=seed)
+        fallback_probe = _episode_environment(fallback_cfg,seed)
         fallback_probe.reset(seed=seed)
         try:
             fallback_candidates = expert_plan_candidates(

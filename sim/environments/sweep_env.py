@@ -40,6 +40,9 @@ class SweepEnv:
             cfg.get_path("act.record_raw_force_peaks", True))
         self.last_raw_force_peak: float | None = None
         self.last_raw_force_peak_time: float | None = None
+        self.record_physics_contacts = bool(cfg.get_path("act.record_physics_contacts",False))
+        self.last_contact_samples = 0
+        self.last_brush_contact_any = False
         self.component_body_ids: List[int] = []
         self.component_geom_ids: List[List[int]] = []
         self.geom_to_component: Dict[int, int] = {}
@@ -186,8 +189,13 @@ class SweepEnv:
         raw_force_peak = 0.0
         raw_force_peak_time = float(self.data.time)
         raw_force_sampled = False
+        self.last_contact_samples = 0
+        self.last_brush_contact_any = False
         for _ in range(self.decimation):
             mujoco.mj_step(self.model, self.data)
+            if self.record_physics_contacts and self.brush_table_contact():
+                self.last_contact_samples += 1
+                self.last_brush_contact_any = True
             if (self.record_raw_force_peaks
                     and hasattr(self.ee, "raw_normal_force")):
                 mujoco.mj_rnePostConstraint(self.model, self.data)

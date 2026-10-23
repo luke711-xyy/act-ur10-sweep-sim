@@ -20,6 +20,7 @@ class UR10CB3EndEffector(CartesianEndEffector):
     JOINT_NAMES = ("shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
                    "wrist_1_joint", "wrist_2_joint", "wrist_3_joint")
     ACTUATOR_NAMES = ("shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3")
+    IK_CONVERGENCE_TOLERANCE = 1e-4
 
     def __init__(self, model, data, cfg):
         import mujoco
@@ -125,7 +126,7 @@ class UR10CB3EndEffector(CartesianEndEffector):
             # simplified arm.
             rot_error = Rotation.from_matrix(desired @ mat.T).as_rotvec()
             error = np.concatenate((target[:3] - pos, rot_error))
-            if np.linalg.norm(error) < 1e-4:
+            if np.linalg.norm(error) < self.IK_CONVERGENCE_TOLERANCE:
                 break
             mj.mj_jacSite(self.model, self.data, jacp, jacr, self.tcp_site_id)
             cols = [self.qvel_adr[n] for n in self.joint_names]

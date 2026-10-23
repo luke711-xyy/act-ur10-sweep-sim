@@ -1,3 +1,27 @@
+# Rudra 原生桌面扫零件仿真
+
+分支：`codex/rudra-native-sweep-environment`。在 Ubuntu 交接代码上保留 Rudra
+原生 UR10/PincOpen、木桌、腕部相机及支架，接入收集槽、黑色零件、夹持刷板、
+原布局生成规则及前上方相机；双路 top＋wrist 示教保存原生 640×480。
+第三方场景源码、模型资产、来源提交和许可证随分支提供。
+
+使用已安装本项目依赖的 Python 环境启动工作台：
+
+```bash
+MUJOCO_GL=egl OMP_NUM_THREADS=1 python -m sim.web.run \
+  --rudra-scene --scene-config configs/rudra-sweep-scene.yaml \
+  --host 127.0.0.1 --port 8780
+```
+
+参见[场景、坐标与机位](docs/rudra-sweep-preview.md)、
+[导纳检查与专家示教入口](docs/rudra-six-demo-collection.md)、
+[300条原生尺寸示教与失败补足](docs/rudra-seed-matched-300.md)。
+当前工作台用于新场景预览；Diffusion/ACT 策略推理尚未接入新基座和夹爪。
+示教载荷、权重、视频、运行日志和本机 Python/CUDA 环境不上传。
+开发回归中的浏览器脚本检查需要 PATH 中可找到 Node.js。
+
+以下保留分支起点的 Ubuntu 交接说明；本分支的 Rudra 入口与验证范围以上述文档为准。
+
 # Ubuntu 模型训练与推理交接：UR10 / MuJoCo Sweep
 
 本分支 `feat/ubuntu-model-handoff` 是 2026-10-15 的**代码迁移与 AI 交接分支**，基于
