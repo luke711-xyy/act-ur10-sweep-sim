@@ -49,7 +49,8 @@ def persist_replay_input(cfg, seed: int, result, root: str | Path,
             "scheduler_queries", "scheduler_timeouts", "scheduler_late_results",
             "peak_force", "termination_reason", "first_contact_position",
             "peak_collected", "final_collected", "first_entry_time",
-            "collection_window_seconds", "initial_object_poses")
+            "collection_window_seconds", "initial_object_poses",
+            "policy_type", "inference_latencies", "wall_seconds")
     values = {key: getattr(result, key) for key in keys if hasattr(result, key)}
     values["trace"] = list(result.trace)
     document = {"schema_version": 1, "config": cfg.to_dict(),
@@ -96,7 +97,7 @@ def recover_replay_input(path: str | Path, cfg, *, seed: int,
 
 def save_inference_replay(cfg, seed: int, result, root: str | Path,
                           model: str | None = None,
-                          image_format: str = "png") -> str | None:
+                          image_format: str = "png", resource_check=None) -> str | None:
     """Replay the recorded commands and save five policy cameras plus telemetry.
 
     The inference process itself does not render frames, so its 5 Hz/25 Hz
@@ -118,7 +119,11 @@ def save_inference_replay(cfg, seed: int, result, root: str | Path,
                        or cfg.get_path("task.target_count", 0))
     replay_cfg = cfg.copy()
     replay_cfg.set_path("task.target_count", target_count)
-    env = SweepEnv(replay_cfg, seed=int(seed))
+    if replay_cfg.get_path("scene.backend",None)=="rudra_native":
+        from .rollout import _episode_environment
+        env = _episode_environment(replay_cfg,int(seed))
+    else:
+        env = SweepEnv(replay_cfg, seed=int(seed))
     env.reset(seed=int(seed))
     initial_poses = np.concatenate((env.component_positions(), env.component_quats()), axis=1).astype("<f4")
     if getattr(result, "initial_object_poses", None) is not None:
@@ -138,6 +143,8 @@ def save_inference_replay(cfg, seed: int, result, root: str | Path,
     def frames():
         nonlocal previous_policy_reference
         for index, row in enumerate(trace):
+            if resource_check is not None:
+                resource_check()
             command = np.asarray(row.get("command"), dtype=np.float32).reshape(4)
             if recorded_states:
                 import mujoco
@@ -235,6 +242,7 @@ def save_inference_replay(cfg, seed: int, result, root: str | Path,
             del obs, images, frame_observation
 
     episode_id = _episode_id(root, target_count, model)
+    policy_type = str(getattr(result,"policy_type","act"))
     metadata = {
         "schema_version": ACT_SCHEMA_VERSION,
         "episode_kind": "inference",
@@ -247,9 +255,9 @@ def save_inference_replay(cfg, seed: int, result, root: str | Path,
         "target_count": target_count,
         "collected": int(getattr(result, "collected", 0)),
         "fps": float(replay_cfg.act.action_hz),
-        "planner": "act_inference",
+        "planner": f"{policy_type}_inference",
         "planner_status": "completed",
-        "planner_strategy": "contact_act_admittance",
+        "planner_strategy": f"contact_{policy_type}_admittance",
         "target_mode": "exact",
         "spawn_mode": str(replay_cfg.components.get("spawn_mode", "cluster")),
         "generation_outcome": "inference",
@@ -269,6 +277,11 @@ def save_inference_replay(cfg, seed: int, result, root: str | Path,
         ),
         "failure_reason": str(getattr(result, "failure_reason", "")),
     }
+    if policy_type == "diffusion":
+        metadata.update(policy_type="diffusion",
+                        inference_latencies=list(getattr(result,"inference_latencies",[])),
+                        wall_seconds=getattr(result,"wall_seconds",None),
+                        real_time_200ms_claim=False)
     if getattr(result, "peak_collected", None) is not None:
         # These counts belong to the causal inference, not the fresh scene
         # used to render images. Keep both achievement and terminal retention.

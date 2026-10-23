@@ -128,7 +128,10 @@ def export_saved_episode(root, record, output_root, *, video_root=None,
 
     check_cancel()
     images = record.get("images") or {}
-    if set(images) != {v[0] for v in VIEWS}:
+    native=set(images)=={"top","wrist"}
+    views=(("top","Front camera",0,0),("wrist","Wrist camera",320,0)) if native else VIEWS
+    tile_size=(320,240) if native else (320,320)
+    if set(images) != {v[0] for v in views}:
         raise ValueError("record is not a complete five-camera episode; missing views are not invented")
     fps = float(record.get("fps", 25))
     if not math.isfinite(fps) or fps <= 0:
@@ -141,7 +144,7 @@ def export_saved_episode(root, record, output_root, *, video_root=None,
     if (not count or any(len(a) != count for a in arrays.values())
             or not np.isfinite(arrays["t"]).all() or not np.isfinite(arrays["normal_force"]).all()):
         raise ValueError("saved telemetry has invalid frame lengths or non-finite values")
-    layout = {v: [x, y + 24, 320, 320] for v, _, x, y in VIEWS}
+    layout = {v: [x, y + 24, *tile_size] for v, _, x, y in views}
     result = {"episode_id": name, "episode_kind": record.get("episode_kind", "unknown"),
               "seed": record.get("seed"), "target_count": record.get("target_count"),
               "success": bool(record.get("success")), "frames": count, "fps": fps,
@@ -158,8 +161,10 @@ def export_saved_episode(root, record, output_root, *, video_root=None,
         expected_layout = {v: [x, y, 320, 320] for v, (x, y) in zip(
             ("corner_xminus_yminus", "corner_xminus_yplus", "corner_xplus_yminus",
              "corner_xplus_yplus", "wrist"), ((0, 0), (320, 0), (0, 320), (320, 320), (640, 0)))}
+        if native:expected_layout={"top":[0,0,320,240],"wrist":[320,0,320,240]}
+        suffix="two_view" if native else "five_view"
         if (record.get("episode_kind") != "inference"
-                or not re.fullmatch(re.escape(name) + r"_five_view(?:_\d{2,})?\.mp4", original_video.name)
+                or not re.fullmatch(re.escape(name) + rf"_{suffix}(?:_\d{{2,}})?\.mp4", original_video.name)
                 or record.get("video_layout") != expected_layout
                 or video_root is None or original_video.is_symlink()
                 or not resolved.is_relative_to(Path(video_root).resolve())
@@ -176,7 +181,7 @@ def export_saved_episode(root, record, output_root, *, video_root=None,
             raise ValueError("unsupported saved inference video layout")
         source_hashes[str(original_video)] = verification["sha256"]
     else:
-        for view, _, _, _ in VIEWS:
+        for view, _, _, _ in views:
             if len(images[view]) != count:
                 raise ValueError(f"saved {view} camera has {len(images[view])} of {count} frames")
             paths[view] = [_episode_file(root, episode, relative) for relative in images[view]]
@@ -197,7 +202,8 @@ def export_saved_episode(root, record, output_root, *, video_root=None,
             shutil.copyfile(original_video, temporary)
         else:
             font, small = _font(17), _font(15)
-            kind = "ACT inference" if record.get("episode_kind") == "inference" else "Expert demonstration"
+            kind = (("Diffusion inference" if record.get("policy_type")=="diffusion" else "ACT inference")
+                    if record.get("episode_kind") == "inference" else "Expert demonstration")
             with tempfile.TemporaryFile() as errors:
                 process = subprocess.Popen([
                     imageio_ffmpeg.get_ffmpeg_exe(), "-nostdin", "-hide_banner", "-loglevel", "error",
@@ -225,11 +231,11 @@ def export_saved_episode(root, record, output_root, *, video_root=None,
                         check_cancel()
                         frame = Image.new("RGB", size, "#111923")
                         draw = ImageDraw.Draw(frame)
-                        for view, label, x, y in VIEWS:
+                        for view, label, x, y in views:
                             raw = paths[view][i].read_bytes()
                             source_hashes[str(paths[view][i])] = hashlib.sha256(raw).hexdigest()
                             with Image.open(io.BytesIO(raw)) as tile:
-                                frame.paste(tile.convert("RGB").resize((320, 320)), (x, y + 24))
+                                frame.paste(tile.convert("RGB").resize(tile_size), (x, y + 24))
                             draw.text((x + 8, y + 3), label, font=font, fill="#e5edf5")
                         lines = [kind, "Saved frames - no new simulation", name,
                                  f"Seed: {record.get('seed', 'not recorded')}",

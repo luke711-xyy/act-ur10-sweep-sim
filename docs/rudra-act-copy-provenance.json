@@ -1,0 +1,272 @@
+{
+  "environment_commit": "632f33e69d4a44b83d910c6f8cc3f8741fd8c53f",
+  "workbench_commit": "ca29785a3acc2ea454b2304badad648d3985cdbb",
+  "dino_commit": "c91f3667658b6a0d16605a006b9be58f7e3846e3",
+  "copied_files": [
+    {
+      "path": "sim/web/__init__.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "eaac7ca27325d1953d26d919a0a6bc631f89bb8f69fc2a03e56f176b56f00e11"
+    },
+    {
+      "path": "sim/web/app.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "19dd9d15f01dbaf5378501d161f1501808a06ad4bc3f23496ad371d9795b50c8"
+    },
+    {
+      "path": "sim/web/jobs.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "cd4cbba9b6d201e70c49f8c95ecb7a95c3ebea038215f429d876b60e9b17695b"
+    },
+    {
+      "path": "sim/web/rudra_preview.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "94b80d6bc56a01a29b24c92e49bda54c6893e6bb1673c856cc54e499124777e8"
+    },
+    {
+      "path": "sim/web/run.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "4fff693973b53dde0a6f9a3e8ef3c9cf0e0df3c76efe2b8d2d3e6a3c3ff10760"
+    },
+    {
+      "path": "sim/web/training_monitor.js",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "3f2f9ff4acdf92559688030d19b44804c79f471b686fc13e8b5f9d51290e4afc"
+    },
+    {
+      "path": "sim/web/training_progress.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "fb21b7299de45abe868015ba5fc6eb5c7ed685042df40c600d84891d04039d60"
+    },
+    {
+      "path": "sim/web/video_export.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "977bc1efe50a6dab28f375b2cb8c82b18f16b5a344020c78bcbcf4608f2d67bd"
+    },
+    {
+      "path": "sim/web/workbench.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "155e629c9d3eaa3accd6982c933196425d4e723d0a038635ea7b1781b24aba72"
+    },
+    {
+      "path": "sim/diffusion/__init__.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "9f5550938b5e1f336c4d6be181f723b8c489e0ea018ca73936a278e5da6ef91a"
+    },
+    {
+      "path": "sim/diffusion/acceptance.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "fe419ba660cb291eab0c414d0ef93eaa91704613c9bd24655e82665054ed3450"
+    },
+    {
+      "path": "sim/diffusion/benchmark.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "08e8c4119e81eb49ca006468abbbcef99dc69a1d0d84fe0b4dacbfed5dddf78d"
+    },
+    {
+      "path": "sim/diffusion/checkpoints.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "b5ff031f1d8feb8fa9cac764284d7cca501661972a6c1c6b5699201a2ab2f3d1"
+    },
+    {
+      "path": "sim/diffusion/config.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "ec4ebd92cfd8e4c2169065aba62e071e01abee3dfd11c9ee4c5aa3fa7104286e"
+    },
+    {
+      "path": "sim/diffusion/dataset.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "a92cd44132a49b579df8b27a0a6d27e5370059215f1f0992c08ec46f58aed113"
+    },
+    {
+      "path": "sim/diffusion/device.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "00894d32e070ccdc8468bd98191b8b6e2f3a3dcc6e0f0f3eb032a1f3bd3b9040"
+    },
+    {
+      "path": "sim/diffusion/launch.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "246bf235471d34bca10ab5b1b4ef01989c79551f236da26822fa39047057f149"
+    },
+    {
+      "path": "sim/diffusion/pipeline.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "97159bb7ebaaa9f08ce18ea880a9c427dc9e7c3faad5476c030f4601270b3971"
+    },
+    {
+      "path": "sim/diffusion/policy.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "69ff01b5ff1776876e7ee04e99ceb3b7658deae28972917fa930932ed06f5d99"
+    },
+    {
+      "path": "sim/diffusion/profiles.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "dae7efd10dab48405659651cd6f15d976d4a3bdcca900b2f138bae4c6d4e94ff"
+    },
+    {
+      "path": "sim/diffusion/runtime.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "b3a974a2e68018eff0290fe4092850f2fd5551fd43d73e620a240789b69fdf5e"
+    },
+    {
+      "path": "sim/diffusion/train.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "8c7f497331fe1f50a801a8d45efcabbf07f99ef8acf58c28f2bf0b557ca99a1b"
+    },
+    {
+      "path": "sim/diffusion/training.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "68c54961ba0fa087eb8758acd56a73969de56bc514e41b62691f6d51996a72fd"
+    },
+    {
+      "path": "sim/diffusion/vendor/LICENSE",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "304e99a48271e10820f71a1b86ef395c06c100d7f68dd1d308790d1064fc4d41"
+    },
+    {
+      "path": "sim/diffusion/vendor/PROVENANCE.md",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "63bd59ab77bba9efaa897245e2a54ed9e8bce5f9a2c6842e108aafe990cb0211"
+    },
+    {
+      "path": "sim/diffusion/vendor/__init__.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "7e4658e381f9f128a1e0c58ae97d978cf1636bd3ae011f7a80b61399401002ee"
+    },
+    {
+      "path": "sim/diffusion/vendor/common/__init__.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "7e4658e381f9f128a1e0c58ae97d978cf1636bd3ae011f7a80b61399401002ee"
+    },
+    {
+      "path": "sim/diffusion/vendor/common/pytorch_util.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "96ce50e191b4c837532529040af65d2b9a1f433f33a5187f8cf256b62d84b6b4"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/__init__.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "7e4658e381f9f128a1e0c58ae97d978cf1636bd3ae011f7a80b61399401002ee"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/common/__init__.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "7e4658e381f9f128a1e0c58ae97d978cf1636bd3ae011f7a80b61399401002ee"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/common/module_attr_mixin.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "658dececa20f7628960fc1a8db89e4be3693e1bba47f63d1ff8a4faa2d481e45"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/diffusion/__init__.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "7e4658e381f9f128a1e0c58ae97d978cf1636bd3ae011f7a80b61399401002ee"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/diffusion/conditional_unet1d.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "ba37bde91fdd089d506845cbb236b81e87a8af85a72bf59bc2f168ca5f18f4b9"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/diffusion/conv1d_components.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "ea2aa10e297cf253bc1a1919ba47fe6ae32049b5eaaab292ed9cc145d8d2adc0"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/diffusion/ema_model.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "f683be124722abe0703e2cf003566ab2d446783383cdcd5202063e20148ae467"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/diffusion/positional_embedding.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "2266c75ecc9c9ac8ca126839d39a7bafbdd7af8800d6de903f66815e64cc366c"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/diffusion/transformer_for_diffusion.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "63ff28fdbd78b089c97cf5fb35d8c174bed4ea468e10c5f2cd208929fcbcdd7c"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/vision/__init__.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "7e4658e381f9f128a1e0c58ae97d978cf1636bd3ae011f7a80b61399401002ee"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/vision/model_getter.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "1040afebde10070f68e658a00241e8190bfa152e353c1d20675375e2d7e6dd30"
+    },
+    {
+      "path": "sim/diffusion/vendor/model/vision/multi_image_obs_encoder.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "91e9712807abce26bc66020ffb93c6131da5c2df43535faa519d289254a9c3a3"
+    },
+    {
+      "path": "sim/act/evaluate.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "745be6cd0aa28c74be0b870cba9096f08abc7b0c91780ae5006dd1fb755e547e"
+    },
+    {
+      "path": "sim/act/media_retention.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "39893373928bef8af001e6883eb4ed6604df7ebdd431ca925d97a54044b68da5"
+    },
+    {
+      "path": "sim/act/replay.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "205712e492a6862c539ecf9dae30c7af3db4019900d1d54987ea819a64cb1ada"
+    },
+    {
+      "path": "sim/act/video.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "82c9817a72796370a2d24bb8b5d167a05dddb098780f70279fc29f53f3248819"
+    },
+    {
+      "path": "tests/test_workbench_training_progress.py",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "00e791ccf4217b92eaf397ed02a72b84f951507f37047879b457fb3fa7d04dee"
+    },
+    {
+      "path": "tests/training_monitor.test.mjs",
+      "source": "rudra-diffusion-workbench",
+      "sha256": "bef2ebbc2a347b81ad53e48662ebd35324a2980b0e17bbacb84c074ec75f3712"
+    },
+    {
+      "path": "sim/act/configuration_dinov3.py",
+      "source": "existing-dinov3-act",
+      "sha256": "541ed2aaca67a1fe38fe2db5bff1e1c35bff830364243f512418d23c11e62a61"
+    },
+    {
+      "path": "sim/act/dinov3.py",
+      "source": "existing-dinov3-act",
+      "sha256": "9c08f1710f4c16f80df78dfdc20c2b95b92855f280b793db4290fa0be00411fd"
+    },
+    {
+      "path": "sim/act/policy.py",
+      "source": "existing-dinov3-act",
+      "sha256": "1cbf1e07c98417cdcbc07160e04b979812ff711b8bc17567cce12bda0aaf0148"
+    },
+    {
+      "path": "sim/act/train.py",
+      "source": "existing-dinov3-act",
+      "sha256": "dd2c7a13ad33f1347bc8ca12a0d4be197291642fa83c93a9b5efa3c5733e8a79"
+    },
+    {
+      "path": "tests/test_act_dinov3.py",
+      "source": "existing-dinov3-act",
+      "sha256": "f17b7ca8c05f9a45323fb3c9c3ea2b4a3ca4478a2ff6518b769ffe3b9cbd6370"
+    },
+    {
+      "path": "configs/five-view-dinov3-frozen-300.yaml",
+      "source": "existing-dinov3-act",
+      "sha256": "9faccbd6ad3f246170c7e49f9338e0ebb891f133fb3127f26e5ede27bc2265da"
+    },
+    {
+      "path": "configs/five-view-dinov3-frozen-300-cuda.yaml",
+      "source": "existing-dinov3-act",
+      "sha256": "f6d1517300f4dfbaf5c6696ef427802c24519ad90124db3ac27ccc21605f0ebf"
+    }
+  ]
+}

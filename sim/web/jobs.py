@@ -15,21 +15,31 @@ from pathlib import Path
 
 
 def build_train_argv(project_root, config, dataset, out, steps=None,
-                     preview_training=False, resume=None):
-    argv = [sys.executable, "-m", "sim.act.train", "--config", str(config),
+                     preview_training=False, resume=None, policy_type="act", training_config=None,
+                     pilot_only=False):
+    if policy_type not in {"act", "diffusion"}:
+        raise ValueError("policy_type must be act or diffusion")
+    module = "sim.diffusion.train" if policy_type == "diffusion" else "sim.act.train"
+    argv = [sys.executable, "-m", module, "--config", str(config),
             "--dataset", str(dataset), "--out", str(out)]
     if steps is not None:
         argv.extend(["--steps", str(int(steps))])
-    if preview_training:
+    if preview_training and policy_type == "act":
         argv.append("--preview-training")
     if resume:
         argv.extend(["--resume", str(resume)])
+    if policy_type == "diffusion" and training_config:
+        argv.extend(["--training-config", str(training_config)])
+    if policy_type == "diffusion" and pilot_only:
+        argv.append("--pilot-only")
     return argv
 
 
 def build_inference_argv(project_root, config, seed, model=None, target_count=None,
                          replay_root="runs/workbench_previews", preview=False,
-                         video_root="runs/inference_videos"):
+                         video_root="runs/inference_videos", policy_type="act"):
+    if policy_type not in {"act", "diffusion"}:
+        raise ValueError("policy_type must be act or diffusion")
     argv = [sys.executable, "-m", "sim.act.evaluate", "--config", str(config),
             "--seed", str(int(seed))]
     if model:
@@ -40,6 +50,8 @@ def build_inference_argv(project_root, config, seed, model=None, target_count=No
         argv.append("--preview")
     argv.extend(["--record-replay", "--replay-root", str(replay_root)])
     argv.extend(["--video-root", str(video_root)])
+    if policy_type == "diffusion":
+        argv.extend(["--policy-type", "diffusion"])
     return argv
 
 

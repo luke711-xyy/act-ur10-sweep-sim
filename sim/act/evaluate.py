@@ -131,6 +131,8 @@ def _contact_z_command(cfg, admittance, z_nominal: float,
     """Compute contact Z from admittance plus the upward over-force reflex."""
     if relief is None:
         relief = _overforce_relief_loop(cfg)
+    if cfg.get_path("scene.contact_profile",None)=="trial4_1n":
+        return float(admittance.command_z(cfg,z_nominal,measured_force,relief))
     correction = (
         float(admittance.step(
             float(cfg.controller.desired_force), float(measured_force)))
@@ -142,8 +144,18 @@ def _contact_z_command(cfg, admittance, z_nominal: float,
     return max(float(cfg.workspace.z_search_min), z)
 
 
+def _retained_query_observation(observation, *, capture_replay: bool):
+    """Causal replay uses state traces, so do not retain float camera history."""
+    if not capture_replay:
+        return observation
+    return {key: value for key, value in observation.items()
+            if not key.startswith("observation.images.")}
+
+
 def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
-                    preview: bool = False, capture_replay: bool = False) -> ActRolloutResult:
+                    preview: bool = False, capture_replay: bool = False,
+                    policy_type: str = "act", wall_seconds: float = 1200,
+                    resource_check=None) -> ActRolloutResult:
     """Run one causal, full-episode ACT policy from the fixed reset pose.
 
     No geometric planner, object position, target identity, or supervisor
@@ -152,7 +164,19 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
     configured wrist-force admittance loop while ACT continues to own X, Y,
     and yaw.
     """
-    env = SweepEnv(cfg, seed=seed)
+    if policy_type not in {"act", "diffusion"}:
+        raise ValueError("policy_type must be act or diffusion")
+    is_diffusion = policy_type == "diffusion"
+    wall_started = time.perf_counter()
+    runtime = None
+    if is_diffusion:
+        from sim.diffusion.runtime import DiffusionRuntime
+        runtime = DiffusionRuntime(model_path, cfg, seed=seed)
+    if cfg.get_path("scene.backend",None)=="rudra_native":
+        from .rollout import _episode_environment
+        env = _episode_environment(cfg,seed)
+    else:
+        env = SweepEnv(cfg, seed=seed)
     env.reset(seed=seed)
     if capture_replay:
         import mujoco
@@ -174,16 +198,17 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
     target_count = int(np.clip(
         int(cfg.get_path("task.target_count", total)), 1, total
     ))
-    resolved_model_path = _resolve_model_path(model_path)
-    policy, policy_cfg = build_act_policy(cfg, pretrained_path=resolved_model_path)
-    dataset_stats = _inference_dataset_stats(cfg, resolved_model_path)
-    preprocessor, postprocessor = build_act_processors(
-        policy_cfg, dataset_stats=dataset_stats, pretrained_path=resolved_model_path
-    )
-    policy.eval()
-    if hasattr(policy, "reset"):
-        policy.reset()
-    policy_inputs = getattr(policy_cfg, "input_features", None)
+    if not is_diffusion:
+        resolved_model_path = _resolve_model_path(model_path)
+        policy, policy_cfg = build_act_policy(cfg, pretrained_path=resolved_model_path)
+        dataset_stats = _inference_dataset_stats(cfg, resolved_model_path)
+        preprocessor, postprocessor = build_act_processors(
+            policy_cfg, dataset_stats=dataset_stats, pretrained_path=resolved_model_path
+        )
+        policy.eval()
+        if hasattr(policy, "reset"):
+            policy.reset()
+    policy_inputs = None if is_diffusion else getattr(policy_cfg, "input_features", None)
     if policy_inputs:
         policy_views = [
             key.removeprefix("observation.images.")
@@ -203,9 +228,13 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
         cfg, camera_views=policy_views,
         environment_state_dim=policy_env_dim,
     )
-    scheduler = ActionChunkScheduler(cfg, allow_late=preview)
+    if is_diffusion:
+        from sim.diffusion.runtime import RollingChunk
+        scheduler = RollingChunk()
+    else:
+        scheduler = ActionChunkScheduler(cfg, allow_late=preview)
     scheduler.reset(env.time)
-    admittance = _force_loop(cfg)
+    admittance = (_force_loop(cfg,env) if cfg.get_path("scene.contact_profile",None)=="trial4_1n" else _force_loop(cfg))
     overforce_relief = _overforce_relief_loop(cfg)
     contact = False
     z_nominal = float(env.tcp()[2])
@@ -264,10 +293,26 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
 
     try:
         while sampled_frames < max_frames:
-            if pending is None and scheduler.query_due(env.time):
+            if is_diffusion:
+                if resource_check is not None:
+                    resource_check()
+                if time.perf_counter()-wall_started >= wall_seconds:
+                    termination_reason = "wall-clock limit"
+                    break
+                runtime.history.append(builder.observe(env,contact_latched=contact))
+                if scheduler.query_due(env.time):
+                    issued_at = float(env.time)
+                    values = action_deltas_to_absolute(last_action.copy(),runtime.predict())
+                    if time.perf_counter()-wall_started >= wall_seconds:
+                        termination_reason = "wall-clock limit"
+                        break
+                    scheduler.accept(issued_at,values,env.time)
+                    scheduler_queries += 1
+            elif pending is None and scheduler.query_due(env.time):
                 obs = builder.observe(env, contact_latched=contact)
                 if len(observations) < 2000:
-                    observations.append(obs)
+                    observations.append(_retained_query_observation(
+                        obs, capture_replay=capture_replay))
                 issued_at = float(env.time)
                 scheduler.mark_query(env.time)
                 scheduler_queries += 1
@@ -299,6 +344,8 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
             try:
                 action = scheduler.action_for(env.time)
             except Exception:
+                if is_diffusion:
+                    raise
                 action = None
             if action is None:
                 # Missing, late, or invalid policy output holds the last valid
@@ -309,6 +356,8 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
             except Exception:
                 action = last_action.copy()
             if action.shape != (4,) or not np.all(np.isfinite(action)):
+                if is_diffusion:
+                    raise ValueError("invalid DP action; inference terminated")
                 action = last_action.copy()
             action[0] = np.clip(action[0], float(cfg.workspace.x_min), float(cfg.workspace.x_max))
             action[1] = np.clip(action[1], float(cfg.workspace.y_min), float(cfg.workspace.y_max))
@@ -358,6 +407,8 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                 try:
                     env.step_control(Command(x, y, z, yaw))
                 except Exception:
+                    if is_diffusion:
+                        raise
                     # Rejecting a policy reference (for example, unreachable
                     # IK or collision validation) is also non-terminal. Hold
                     # the measured pose; if even that command is rejected,
@@ -429,6 +480,9 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
 
             if termination_reason:
                 break
+    except BaseException:
+        env.close()
+        raise
     finally:
         # A terminal scene can still have a running prediction. Drain it before
         # the CLI releases its process lease; cancellation only stops queued work.
@@ -471,6 +525,10 @@ def run_act_episode(cfg, seed: int = 0, model_path: str | None = None,
                                   if first_contact_position is not None
                                   else None))
     env.close()
+    if is_diffusion:
+        result.policy_type = "diffusion"
+        result.inference_latencies = list(runtime.latencies)
+        result.wall_seconds = time.perf_counter()-wall_started
     if capture_replay:
         result.initial_object_poses = initial_object_poses
     return result
@@ -481,6 +539,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--model", default=None)
+    parser.add_argument("--policy-type", choices=("act", "diffusion"), default="act")
+    parser.add_argument("--wall-seconds", type=float, default=1200)
     parser.add_argument("--target-count", type=int, default=None,
                         help="exact number of the six components to collect")
     parser.add_argument("--record-replay", action="store_true",
@@ -505,15 +565,28 @@ def _run_main(argv=None) -> int:
     if args.target_count is not None and not 1 <= args.target_count <= 6:
         parser.error("--target-count must be between 1 and 6")
     cfg = load_config(args.config)
+    resource_check = None
+    if args.policy_type=="diffusion":
+        from sim.diffusion.runtime import inference_resource_guard
+        workspace = Path(__file__).resolve().parents[2]
+        args.video_root = args.video_root or str(workspace/"runs/diffusion_policy_mvp/videos")
+        resource_check = inference_resource_guard(workspace,args.replay_root,args.video_root)
     if args.target_count is not None:
         cfg.set_path("task.target_count", args.target_count)
     # Snapshot latest once, before loading; a concurrent trainer can update the
     # pointer while inference or video export is running.
-    resolved_model = _resolve_model_path(args.model)
+    if args.policy_type == "diffusion":
+        from sim.diffusion.runtime import resolve_checkpoint
+        resolved_model = resolve_checkpoint(args.model)
+    else:
+        resolved_model = _resolve_model_path(args.model)
     if resolved_model:
         resolved_model = str(Path(resolved_model).resolve())
+    extra = ({"policy_type": "diffusion", "wall_seconds": args.wall_seconds,
+              "resource_check": resource_check}
+             if args.policy_type == "diffusion" else {})
     result = run_act_episode(cfg, seed=args.seed, model_path=resolved_model,
-                             preview=args.preview, capture_replay=args.record_replay)
+                             preview=args.preview, capture_replay=args.record_replay, **extra)
     physical_summary = {"success": result.success, "reason": result.failure_reason,
                         "collected": result.collected, "target_count": result.target_count,
                         "peak_collected": (result.collected if getattr(
@@ -532,6 +605,11 @@ def _run_main(argv=None) -> int:
                         "termination_reason": result.termination_reason,
                         "preview": bool(args.preview),
                         "model_checkpoint": resolved_model}
+    if args.policy_type == "diffusion":
+        physical_summary.update(policy_type="diffusion",
+            inference_latencies=getattr(result,"inference_latencies",[]),
+            wall_seconds=getattr(result,"wall_seconds",None),
+            real_time_200ms_claim=False)
     replay_episode_id = None
     replay_error = ""
     video_path = None
@@ -540,6 +618,8 @@ def _run_main(argv=None) -> int:
     image_cleanup_error = ""
     replay_input_path = None
     if args.record_replay:
+        if resource_check is not None:
+            resource_check()
         # Replay uses the causal command trace, not the cached query images.
         # Release those after inference, before rendering another five views.
         if getattr(result, "observations", None) is not None:
@@ -555,6 +635,7 @@ def _run_main(argv=None) -> int:
             replay_episode_id = save_inference_replay(
                 cfg, args.seed, result, args.replay_root, model=resolved_model,
                 image_format=args.replay_image_format,
+                **({"resource_check":resource_check} if resource_check is not None else {}),
             )
         except Exception as exc:  # keep the physical result visible if replay fails
             replay_error = f"{type(exc).__name__}: {exc}"
@@ -570,7 +651,8 @@ def _run_main(argv=None) -> int:
 
                 output_root = args.video_root or inference_video_root(cfg, Path.cwd())
                 video_path = str(export_inference_video(
-                    Path(args.replay_root) / replay_episode_id, output_root))
+                    Path(args.replay_root) / replay_episode_id, output_root,
+                    **({"resource_check":resource_check} if resource_check is not None else {})))
                 from .media_retention import finalize_inference_video
                 try:
                     finalize_inference_video(
@@ -589,6 +671,8 @@ def _run_main(argv=None) -> int:
                       "video_deferred": bool(args.defer_video and replay_episode_id),
                       "frame_images_deleted": frame_images_deleted,
                       "image_cleanup_error": image_cleanup_error}, ensure_ascii=False), flush=True)
+    if args.policy_type=="diffusion" and (replay_error or video_error):
+        raise RuntimeError(f"DP media infrastructure failed: {replay_error or video_error}")
     return 0 if result.success else 1
 
 

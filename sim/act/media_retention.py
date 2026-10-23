@@ -115,6 +115,8 @@ def finalize_inference_video(episode_dir: str | Path, video_path: str | Path) ->
     for name, x in (("overhead", 0), ("inspection", 320), ("wrist", 640)):
         if name in names:
             layout[name] = [x, 0, 320, 320]
+    if names=={"top","wrist"}:
+        layout={"top":[0,0,320,240],"wrist":[320,0,320,240]}
     report = {"deleted_files": len(existing), "freed_bytes": removed_bytes,
               "video_verification": verification, "completed_at": time.time()}
     manifest = root / "manifest.jsonl"

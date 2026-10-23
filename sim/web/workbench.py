@@ -209,6 +209,8 @@ class WorkbenchState:
         """Delete exactly one episode directory and its manifest record."""
         with self._io_lock:
             root, rec, preview = self._find(episode_id)
+            if not preview and self.cfg.get_path("web.readonly_dataset",False):
+                raise PermissionError("read-only demonstration dataset")
             episode_id = str(rec["episode_id"])
             episode_dir = root / episode_id
             if episode_dir.resolve().parent != root.resolve() or not episode_dir.is_dir():

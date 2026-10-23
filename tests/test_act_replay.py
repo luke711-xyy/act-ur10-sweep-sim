@@ -208,6 +208,9 @@ def test_inference_capture_renders_the_same_physical_numeric_frames(tmp_path, mo
                                  f"act.dataset_dir={tmp_path / 'missing'}"])
     result = evaluate.run_act_episode(cfg, seed=2110081, preview=True, capture_replay=True)
     assert result.sampled_frames == 2
+    assert result.observations
+    assert all(not any(key.startswith("observation.images.") for key in obs)
+               for obs in result.observations)
     assert len(result.trace) == 8
     assert all("replay_state" in row for row in result.trace)
     episode_id = save_inference_replay(cfg, 2110081, result, tmp_path)

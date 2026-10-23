@@ -1,0 +1,127 @@
+table:
+  z: -0.002
+  center_xy:
+  - 0.005
+  - -0.685
+  size_xy:
+  - 1.25
+  - 1.15
+  texture: assets/table/wood.png
+  rgba:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+robot:
+  source: home
+  joints_deg:
+  - 0
+  - -90
+  - 90
+  - -90
+  - -90
+  - 90
+  gripper_frac: 0.0
+  dataset:
+    name: circular_hole_v21_clean
+    episode: 0
+    frame: 400
+holes:
+  fixed: true
+  circle:
+    enabled: true
+    x: 0.007
+    y: -0.872
+    yaw_deg: 0
+  square:
+    enabled: false
+    x: 0.01
+    y: -0.87
+    yaw_deg: 0
+peg:
+  mode: table
+  x: 0.01
+  y: -0.662
+  yaw_deg: 0
+  gripper_offset:
+    xyz:
+    - 0.0803
+    - 0.06
+    - 0.0
+    rpy_deg:
+    - -90
+    - 0
+    - 0
+cameras:
+  top:
+    view_label: 前上方相机
+    view_description: 从收集区一侧前上方斜看零件与扫动区域，减少机械臂和刷板遮挡
+    pos:
+    - -0.85
+    - -0.95
+    - 1.0
+    look_at:
+    - -0.035
+    - -0.7
+    - -0.002
+    up_hint:
+    - 0
+    - 0
+    - 1
+    rpy_deg: null
+    appearance: appearance/top.json
+    yaw_deg: 0
+    roll_deg: 0
+    fov_h_deg: 65
+  wrist:
+    mount:
+      enabled: true
+      version: V6_REINFORCED
+      angle_deg: -14
+      rgb_toward_z: 1
+      lens: rgb
+    body_yaw_deg: 0
+    pos:
+    - -0.02
+    - -0.085
+    - -0.036
+    look_at:
+    - 0.09
+    - 0.0
+    - 0.0
+    up_hint:
+    - 0
+    - -1
+    - 0
+    rpy_deg: null
+    tilt_deg: 0
+    roll_deg: 0
+    fov_h_deg: 69
+    color_gain:
+    - 0.83
+    - 0.82
+    - 0.79
+    appearance: appearance/wrist.json
+  overview:
+    pos:
+    - 1.6
+    - -1.9
+    - 1.4
+    look_at:
+    - 0.0
+    - -0.5
+    - 0.3
+render:
+  width: 640
+  height: 480
+  compare: true
+  settle_steps: 2500
+  out_dir: out
+sweep_task:
+  enabled: true
+  source_config: configs/rudra-dinov3-act-cuda.yaml
+  seed: 42
+  initial_tcp_local:
+  - 0.42
+  - 0.0
+  - 0.1

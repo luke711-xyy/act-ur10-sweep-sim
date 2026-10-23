@@ -43,6 +43,25 @@ def _jsonable_stats(stats):
     }
 
 
+def configure_cuda_memory_budget(cfg):
+    """Opt-in limit for this trainer's allocator when sharing a CUDA device."""
+    fraction = cfg.act.get("cuda_memory_fraction", None)
+    if fraction is None:
+        return None
+    fraction = float(fraction)
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError("CUDA memory fraction must be finite and in (0, 1]")
+    device = str(cfg.act.get("device", "mps"))
+    if not device.startswith("cuda"):
+        raise ValueError("CUDA memory fraction requires a CUDA training device")
+    import torch
+
+    torch.cuda.set_per_process_memory_fraction(
+        fraction, device=None if device == "cuda" else device
+    )
+    return fraction
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None)
@@ -79,6 +98,13 @@ def build_arg_parser():
         nargs="+",
         default=None,
         help="Additional completed optimizer steps to save without changing the periodic schedule",
+    )
+    parser.add_argument(
+        "--checkpoint-permanent-steps",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Save these completed steps permanently, outside rolling retention",
     )
     parser.add_argument(
         "--keep-checkpoints",
@@ -302,22 +328,25 @@ def _checkpoint_dir(out_root: Path, step: int) -> Path:
 
 
 def checkpoint_due(completed_steps: int, first_step: int,
-                   interval: int, *, extra_steps=()) -> bool:
+                   interval: int, *, extra_steps=(), permanent_steps=()) -> bool:
     """Return whether a periodic or additional checkpoint is due."""
     completed_steps = int(completed_steps)
     first_step = int(first_step)
     interval = int(interval)
-    return (completed_steps in extra_steps
+    return (completed_steps in extra_steps or completed_steps in permanent_steps
             or (interval > 0 and first_step > 0 and completed_steps >= first_step
                 and (completed_steps - first_step) % interval == 0))
 
 
-def _prune_checkpoints(out_root: Path, keep_checkpoints: int) -> None:
+def _prune_checkpoints(out_root: Path, keep_checkpoints: int,
+                       *, permanent_steps=()) -> None:
     if keep_checkpoints <= 0:
         return
     root = out_root / "checkpoints"
+    permanent_names = {f"step_{int(step):06d}" for step in permanent_steps}
     checkpoints = sorted(
-        (path for path in root.glob("step_*") if path.is_dir()),
+        (path for path in root.glob("step_*")
+         if path.is_dir() and path.name not in permanent_names),
         key=lambda path: path.name,
     )
     for stale in checkpoints[:-keep_checkpoints]:
@@ -327,7 +356,8 @@ def _prune_checkpoints(out_root: Path, keep_checkpoints: int) -> None:
 def save_checkpoint(policy, preprocessor, postprocessor, optimizer, out_root: Path,
                     step: int, dataset_root: str, device: str,
                     keep_checkpoints: int = 3,
-                    elapsed_seconds: float = 0.0) -> Path:
+                    elapsed_seconds: float = 0.0,
+                    *, permanent_steps=()) -> Path:
     """Save model, processors, optimizer and progress in one resumable directory."""
     import torch
 
@@ -352,7 +382,7 @@ def save_checkpoint(policy, preprocessor, postprocessor, optimizer, out_root: Pa
     (out_root / "latest_checkpoint.txt").write_text(
         str(checkpoint_root.relative_to(out_root)), encoding="utf-8"
     )
-    _prune_checkpoints(out_root, keep_checkpoints)
+    _prune_checkpoints(out_root, keep_checkpoints, permanent_steps=permanent_steps)
     return checkpoint_root
 
 
@@ -371,6 +401,20 @@ def main(argv=None) -> int:
     from .policy import build_act_policy, build_act_processors
 
     cfg = load_config(args.config)
+    configure_cuda_memory_budget(cfg)
+    if args.resume:
+        checkpoint_config = json.loads(
+            (Path(args.resume) / "config.json").read_text(encoding="utf-8")
+        )
+        requested_encoder = str(cfg.act.get("vision_encoder", "resnet18"))
+        expected_type = "act_dinov3" if requested_encoder == "dinov3" else "act"
+        if checkpoint_config.get("type") != expected_type:
+            raise ValueError(
+                "ACT training encoder mismatch: "
+                f"requested {requested_encoder!r}, checkpoint type "
+                f"{checkpoint_config.get('type')!r}; use a matching profile or "
+                "omit --resume to initialize a fresh policy"
+            )
     dataset_root = args.dataset or str(cfg.act.dataset_dir)
     out_root = Path(args.out or str(cfg.act.model_dir))
     out_root.mkdir(parents=True, exist_ok=True)
@@ -438,6 +482,19 @@ def main(argv=None) -> int:
         cfg.act.get("use_amp", False) if args.amp is None else args.amp
     ) and device_type in {"mps", "cuda"}
     scaler = torch.amp.GradScaler(device_type, enabled=amp_enabled)
+    print(json.dumps({
+        "event": "training_started", "policy_type": policy_cfg.type,
+        "vision_encoder": str(cfg.act.get("vision_encoder", "resnet18")),
+        "camera_views": list(dataset.camera_views),
+        "image_size": list(cfg.act.image_size), "batch_size": batch_size,
+        "max_steps": max_steps, "amp": amp_enabled,
+        "device": str(policy_cfg.device),
+        "cuda_memory_fraction": cfg.act.get("cuda_memory_fraction", None),
+        "trainable_parameters": sum(p.numel() for p in policy.parameters() if p.requires_grad),
+        "frozen_parameters": sum(p.numel() for p in policy.parameters() if not p.requires_grad),
+        "optimizer_lr": float(policy_cfg.optimizer_lr),
+        "dataset_valid_frames": len(dataset),
+    }), flush=True)
     checkpoint_start = int(
         cfg.act.get("checkpoint_start_step", 1)
         if args.checkpoint_start_step is None else args.checkpoint_start_step
@@ -452,6 +509,12 @@ def main(argv=None) -> int:
     ))
     if any(step <= 0 for step in checkpoint_extra_steps):
         raise ValueError("checkpoint-extra-steps must be positive")
+    checkpoint_permanent_steps = tuple(int(step) for step in (
+        cfg.act.get("checkpoint_permanent_steps", [])
+        if args.checkpoint_permanent_steps is None else args.checkpoint_permanent_steps
+    ))
+    if any(step <= 0 for step in checkpoint_permanent_steps):
+        raise ValueError("checkpoint-permanent-steps must be positive")
     keep_checkpoints = int(
         cfg.act.get("keep_checkpoints", 3)
         if args.keep_checkpoints is None else args.keep_checkpoints
@@ -495,6 +558,14 @@ def main(argv=None) -> int:
             np.random.set_state(resume_state["numpy_rng_state"])
         if "python_rng_state" in resume_state:
             random.setstate(resume_state["python_rng_state"])
+        print(json.dumps({
+            "event": "training_resumed", "resume_step": start_step,
+            "checkpoint": str(args.resume),
+            "optimizer_state_entries": len(optimizer.state),
+            "optimizer_lr": float(optimizer.param_groups[0]["lr"]),
+            "elapsed_seconds": elapsed_before_resume,
+        }), flush=True)
+        del resume_state
     tracking_project = (args.trackio_project if args.trackio_project is not None
                         else cfg.act.get("tracking_project"))
     tracking_space = (args.trackio_space if args.trackio_space is not None
@@ -529,6 +600,7 @@ def main(argv=None) -> int:
             "checkpoint_start_step": checkpoint_start,
             "checkpoint_every_steps": checkpoint_every,
             "checkpoint_extra_steps": list(checkpoint_extra_steps),
+            "checkpoint_permanent_steps": list(checkpoint_permanent_steps),
             "keep_checkpoints": keep_checkpoints,
             "tracking_sync_interval_seconds": tracking_sync_interval,
             "resume_step": start_step,
@@ -589,11 +661,13 @@ def main(argv=None) -> int:
                 elapsed_before_resume + time.monotonic() - started
             )
             if checkpoint_due(completed_steps, checkpoint_start, checkpoint_every,
-                              extra_steps=checkpoint_extra_steps):
+                              extra_steps=checkpoint_extra_steps,
+                              permanent_steps=checkpoint_permanent_steps):
                 checkpoint_root = save_checkpoint(
                     policy, preprocessor, postprocessor, optimizer, out_root,
                     completed_steps, dataset_root, str(policy_cfg.device),
                     keep_checkpoints, elapsed_seconds=elapsed_seconds,
+                    permanent_steps=checkpoint_permanent_steps,
                 )
                 print(json.dumps({
                     "checkpoint_step": completed_steps,
@@ -645,7 +719,8 @@ def main(argv=None) -> int:
                     "event": "trackio_final_sync_skipped",
                     "reason": "previous static sync is still running",
                 }), flush=True)
-        if (stop_request.requested and (checkpoint_every > 0 or checkpoint_extra_steps)
+        if (stop_request.requested and (checkpoint_every > 0 or checkpoint_extra_steps
+                                       or checkpoint_permanent_steps)
                 and completed_steps > start_step):
             try:
                 checkpoint_root = save_checkpoint(
@@ -654,6 +729,7 @@ def main(argv=None) -> int:
                     keep_checkpoints, elapsed_seconds=(
                         elapsed_before_resume + time.monotonic() - started
                     ),
+                    permanent_steps=checkpoint_permanent_steps,
                 )
                 print(json.dumps({
                     "checkpoint_step": completed_steps,
@@ -676,6 +752,7 @@ def main(argv=None) -> int:
             "interrupted": bool(stop_request.requested),
             "checkpoint_every_steps": checkpoint_every,
             "checkpoint_extra_steps": list(checkpoint_extra_steps),
+            "checkpoint_permanent_steps": list(checkpoint_permanent_steps),
             "checkpoint_start_step": checkpoint_start,
             "keep_checkpoints": keep_checkpoints,
             "dataset": str(dataset_root),
