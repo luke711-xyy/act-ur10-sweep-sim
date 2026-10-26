@@ -1,0 +1,30 @@
+{
+  "handoff_date": "2026-10-26",
+  "timezone": "Asia/Singapore",
+  "repository": "luke711-xyy/act-ur10-sweep-sim",
+  "branch": "codex/wam-ubuntu-handoff-20261026",
+  "remote_code_base_ref": "feat/mt-act-goal-embedding",
+  "remote_code_base_commit": "34d2d9ca699d9d1f334d12adf68b54815d1e3fc0",
+  "planning_workspace_head": "1a0d484fa3725753edc97a8fd54a9db5262b6a2b",
+  "planning_workspace_uncommitted_code_included": false,
+  "plan_version": "0.99",
+  "audit_version": "1.29",
+  "latest_data_revision": "R13",
+  "ubuntu_source_dataset": {
+    "reported_episode_count": 300,
+    "reported_success": true,
+    "reported_camera_count": 2,
+    "reported_teacher": "A*",
+    "evidence": "human_report",
+    "dataset_accessed": false,
+    "compatibility": "not_checked",
+    "path": null,
+    "per_target_counts": null,
+    "schema": null
+  },
+  "publication_scope": "documentation_only",
+  "training_started": false,
+  "new_wam_implementation_verified": false,
+  "dataset_or_weights_uploaded": false,
+  "hardware_validation_performed": false
+}

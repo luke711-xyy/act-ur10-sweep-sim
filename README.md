@@ -1,5 +1,13 @@
 # act-ur10-sweep-sim — MuJoCo UR10 ACT tabletop sweep
 
+## Ubuntu WAM 开发交接（2026-10-26）
+
+本分支 `codex/wam-ubuntu-handoff-20261026` 提供待实现的对象世界模型/MBRL研究计划，
+入口为 [Ubuntu 开发交接](docs/research/ubuntu-wam-handoff.md)。内含阶段训练与验收、完整数据流、
+论文审计及现有 **300 条双机位 A* 成功示教**的复用审核；数据尚未检查，新 WAM 尚未训练。
+只完整训练一次，最终同一 checkpoint 比较 actor 直接执行与候选搜索。
+下方原有 ACT 分支说明和命令保留作历史背景，不是新 WAM 的完整训练入口。
+
 ## 分支导航与回滚（2026-10-14）
 
 **本分支：`feat/mt-act-goal-embedding`**。可选 categorical goal-token 实验。该分支也曾运行普通标量条件 ACT；是否 embedding 必须核对实际 policy/config，不能按分支名判断。
