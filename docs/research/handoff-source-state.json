@@ -7,9 +7,11 @@
   "remote_code_base_commit": "34d2d9ca699d9d1f334d12adf68b54815d1e3fc0",
   "planning_workspace_head": "1a0d484fa3725753edc97a8fd54a9db5262b6a2b",
   "planning_workspace_uncommitted_code_included": false,
-  "plan_version": "0.99",
-  "audit_version": "1.29",
+  "plan_version": "1.00",
+  "audit_version": "1.30",
   "latest_data_revision": "R13",
+  "latest_architecture_revision": "R14",
+  "temporal_memory": "per-object causal Transformer; GRU replaced",
   "ubuntu_source_dataset": {
     "reported_episode_count": 300,
     "reported_success": true,
